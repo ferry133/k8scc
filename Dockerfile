@@ -49,8 +49,10 @@ RUN curl -fsSL https://claude.ai/install.sh | bash
 USER root
 COPY memory_mcp_server.py /usr/local/bin/memory_mcp_server.py
 COPY auth0_login.py /usr/local/bin/auth0_login.py
+COPY claude-session /usr/local/bin/claude-session
 RUN chmod +x /usr/local/bin/memory_mcp_server.py \
-             /usr/local/bin/auth0_login.py
+             /usr/local/bin/auth0_login.py \
+             /usr/local/bin/claude-session
 
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh

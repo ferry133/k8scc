@@ -1,0 +1,40 @@
+#!/bin/bash
+# Runs inside the ttyd terminal session.
+# 1. Auth0 Device Flow (if configured) — user sees it here
+# 2. Inject MCP memory server into settings.json
+# 3. exec bash
+
+CLAUDE_USER_ID="claude_code"
+
+if [ -n "${AUTH0_DOMAIN}" ] && [ -n "${AUTH0_CLIENT_ID}" ]; then
+    _uid=$(python3 /usr/local/bin/auth0_login.py)
+    if [ $? -eq 0 ] && [ -n "$_uid" ]; then
+        CLAUDE_USER_ID="$_uid"
+    else
+        echo ""
+        echo "Auth0 登入失敗，終止連線。" >&2
+        exit 1
+    fi
+fi
+export CLAUDE_USER_ID
+
+if [ -n "${DATABASE_URL}" ]; then
+    python3 - <<'PYEOF'
+import json, os
+p = "/home/claude/.claude/settings.json"
+with open(p) as f:
+    s = json.load(f)
+s.setdefault("mcpServers", {})["memory"] = {
+    "command": "python3",
+    "args": ["/usr/local/bin/memory_mcp_server.py"],
+    "env": {
+        "DATABASE_URL": os.environ["DATABASE_URL"],
+        "CLAUDE_USER_ID": os.environ.get("CLAUDE_USER_ID", "claude_code"),
+    },
+}
+with open(p, "w") as f:
+    json.dump(s, f, indent=2)
+PYEOF
+fi
+
+exec /bin/bash

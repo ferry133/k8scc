@@ -31,7 +31,6 @@ The workflow uses `secrets.GHCR_TOKEN` (not `secrets.GITHUB_TOKEN`) because:
 
 | Env Var | Description |
 |---------|-------------|
-| `TTYD_CREDENTIAL` | Optional `user:password` for ttyd basic auth |
 | `DATABASE_URL` | Optional PostgreSQL DSN; enables MCP memory server when set |
 | `AUTH0_DOMAIN` | Optional Auth0 domain for device-flow login |
 | `AUTH0_CLIENT_ID` | Optional Auth0 client ID for device-flow login |
