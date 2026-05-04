@@ -68,11 +68,20 @@ def main():
                     "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
                 },
             )
-            user = _decode_jwt_payload(tokens["id_token"])
-            user_id = user.get("email") or user.get("sub")
-            name = user.get("name", user_id)
+            # Prefer id_token (has email/name), fallback to access_token sub
+            if "id_token" in tokens:
+                user = _decode_jwt_payload(tokens["id_token"])
+                user_id = user.get("email") or user.get("sub", "unknown")
+                name = user.get("name", user_id)
+            elif "access_token" in tokens:
+                user = _decode_jwt_payload(tokens["access_token"])
+                user_id = user.get("email") or user.get("sub", "unknown")
+                name = user_id
+            else:
+                print(f"\n無法取得 token，回應：{list(tokens.keys())}", file=sys.stderr)
+                sys.exit(1)
             print(f"\n✓ 歡迎，{name}", file=sys.stderr, flush=True)
-            print(user_id)  # stdout — captured by entrypoint.sh
+            print(user_id)  # stdout — captured by claude-session
             sys.exit(0)
 
         except urllib.error.HTTPError as e:
@@ -86,6 +95,9 @@ def main():
             else:
                 print(f"\n授權失敗：{body.get('error_description', err)}", file=sys.stderr)
                 sys.exit(1)
+        except Exception as e:
+            print(f"\n[錯誤] {type(e).__name__}: {e}", file=sys.stderr, flush=True)
+            sys.exit(1)
 
     print("\n授權逾時", file=sys.stderr)
     sys.exit(1)
