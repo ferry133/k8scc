@@ -68,18 +68,19 @@ def main():
                     "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
                 },
             )
-            # Prefer id_token (has email/name), fallback to access_token sub
-            if "id_token" in tokens:
-                user = _decode_jwt_payload(tokens["id_token"])
-                user_id = user.get("email") or user.get("sub", "unknown")
-                name = user.get("name", user_id)
-            elif "access_token" in tokens:
-                user = _decode_jwt_payload(tokens["access_token"])
-                user_id = user.get("email") or user.get("sub", "unknown")
-                name = user_id
-            else:
-                print(f"\n無法取得 token，回應：{list(tokens.keys())}", file=sys.stderr)
+            # Use /userinfo endpoint — works regardless of id_token presence
+            access_token = tokens.get("access_token")
+            if not access_token:
+                print(f"\n無法取得 access_token，回應：{list(tokens.keys())}", file=sys.stderr)
                 sys.exit(1)
+            ui_req = urllib.request.Request(
+                f"https://{DOMAIN}/userinfo",
+                headers={"Authorization": f"Bearer {access_token}"},
+            )
+            with urllib.request.urlopen(ui_req) as r:
+                user = json.loads(r.read())
+            user_id = user.get("email") or user.get("sub", "unknown")
+            name = user.get("name", user_id)
             print(f"\n✓ 歡迎，{name}", file=sys.stderr, flush=True)
             print(user_id)  # stdout — captured by claude-session
             sys.exit(0)
