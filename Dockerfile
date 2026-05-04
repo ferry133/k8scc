@@ -15,8 +15,11 @@ RUN apt-get update && apt-get install -y \
     dbus \
     libsecret-1-0 \
     gnome-keyring \
-    python3 \
+    python3 python3-pip \
     && rm -rf /var/lib/apt/lists/*
+
+# Install MCP server deps
+RUN pip3 install --break-system-packages psycopg2-binary mcp
 
 # Create D-Bus machine-id (required for session bus)
 RUN mkdir -p /var/lib/dbus && dbus-uuidgen > /var/lib/dbus/machine-id
@@ -44,6 +47,11 @@ ENV PATH="/home/claude/.local/bin:${PATH}"
 RUN curl -fsSL https://claude.ai/install.sh | bash
 
 USER root
+COPY memory_mcp_server.py /usr/local/bin/memory_mcp_server.py
+COPY auth0_login.py /usr/local/bin/auth0_login.py
+RUN chmod +x /usr/local/bin/memory_mcp_server.py \
+             /usr/local/bin/auth0_login.py
+
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 

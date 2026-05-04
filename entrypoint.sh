@@ -7,6 +7,38 @@ if [ ! -f /home/claude/.claude/settings.json ]; then
     echo '{"env":{"DISABLE_AUTOUPDATER":"1"}}' > /home/claude/.claude/settings.json
 fi
 
+# Auth0 Device Flow: get user identity before starting the session
+CLAUDE_USER_ID="claude_code"
+if [ -n "${AUTH0_DOMAIN}" ] && [ -n "${AUTH0_CLIENT_ID}" ]; then
+    _uid=$(python3 /usr/local/bin/auth0_login.py)
+    if [ $? -eq 0 ] && [ -n "$_uid" ]; then
+        CLAUDE_USER_ID="$_uid"
+    else
+        echo "Auth0 登入失敗，以匿名模式繼續" >&2
+    fi
+fi
+export CLAUDE_USER_ID
+
+# Inject MCP memory server into settings.json if DATABASE_URL is configured
+if [ -n "${DATABASE_URL}" ]; then
+    python3 - <<'PYEOF'
+import json, os
+p = "/home/claude/.claude/settings.json"
+with open(p) as f:
+    s = json.load(f)
+s.setdefault("mcpServers", {})["memory"] = {
+    "command": "python3",
+    "args": ["/usr/local/bin/memory_mcp_server.py"],
+    "env": {
+        "DATABASE_URL": os.environ["DATABASE_URL"],
+        "CLAUDE_USER_ID": os.environ.get("CLAUDE_USER_ID", "claude_code"),
+    },
+}
+with open(p, "w") as f:
+    json.dump(s, f, indent=2)
+PYEOF
+fi
+
 # Start D-Bus session daemon (required for Claude Code credential storage)
 if command -v dbus-daemon &>/dev/null && [ -z "$DBUS_SESSION_BUS_ADDRESS" ]; then
     DBUS_ADDR=$(dbus-daemon --session --fork --print-address 2>/dev/null)

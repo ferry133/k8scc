@@ -46,4 +46,4 @@ Two layers of persistence:
 | Auto-memory | Claude Code built-in | PVC at `/home/claude/.claude` | Survives container rebuild; `.md` files |
 | Explicit memory | MCP Memory Server | PostgreSQL `knowledge` table | Enabled when `DATABASE_URL` is set; `remember()` / `recall()` / `forget()` tools |
 
-The MCP server (`memory_mcp_server.py`) shares the same `knowledge` table as linebot agents, keyed by `agent_id = CLAUDE_USER_ID`.
+The MCP server (`memory_mcp_server.py`) uses a **dedicated PostgreSQL instance** (separate from linebot), keyed by `agent_id = CLAUDE_USER_ID`.
