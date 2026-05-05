@@ -5,7 +5,13 @@
 # 3. exec bash
 # CLAUDE_USER_ID is set by the pod environment (oauth2-proxy handles auth externally)
 
-export CLAUDE_USER_ID="${CLAUDE_USER_ID:-claude_code}"
+# Prefer email injected by oauth2-proxy via X-Auth-Request-Email header
+# ttyd maps HTTP headers to env vars: X-Auth-Request-Email → HTTP_X_AUTH_REQUEST_EMAIL
+if [ -n "${HTTP_X_AUTH_REQUEST_EMAIL}" ]; then
+    export CLAUDE_USER_ID="${HTTP_X_AUTH_REQUEST_EMAIL}"
+else
+    export CLAUDE_USER_ID="${CLAUDE_USER_ID:-claude_code}"
+fi
 
 # Initialize settings.json on first login
 mkdir -p /home/claude/.claude
