@@ -51,6 +51,7 @@ def main():
     print(f"請前往以下網址完成授權：", file=sys.stderr)
     print(f"  {device['verification_uri_complete']}", file=sys.stderr)
     print(f"驗證碼：{device['user_code']}", file=sys.stderr)
+    print("授權完成後請關閉該視窗，回到此頁繼續操作", file=sys.stderr, flush=True)
     print("等待授權中...", file=sys.stderr, flush=True)
 
     # Step 3: poll for token
