@@ -1,8 +1,9 @@
 #!/bin/bash
 # Runs inside the ttyd terminal session.
-# 1. Auth0 Device Flow (if configured) — user sees it here
-# 2. Inject MCP memory server into settings.json
-# 3. exec bash
+# 1. Auth0 Device Flow — user sees it here
+# 2. Set per-user HOME directory (under /mnt/claude-users/{email}/)
+# 3. Inject MCP memory server into settings.json
+# 4. exec bash
 
 CLAUDE_USER_ID="claude_code"
 
@@ -18,10 +19,30 @@ if [ -n "${AUTH0_DOMAIN}" ] && [ -n "${AUTH0_CLIENT_ID}" ]; then
 fi
 export CLAUDE_USER_ID
 
+# Set per-user home directory
+# If NAS claude-users is mounted, use per-user subdirectory for full isolation.
+# Otherwise fall back to the default /home/claude.
+if [ -d "/mnt/claude-users" ]; then
+    USER_HOME="/mnt/claude-users/${CLAUDE_USER_ID}"
+else
+    USER_HOME="/home/claude"
+fi
+
+mkdir -p "${USER_HOME}/.claude" "${USER_HOME}/workspace"
+export HOME="${USER_HOME}"
+export CLAUDE_CONFIG_DIR="${USER_HOME}/.claude"
+cd "${USER_HOME}/workspace"
+
+# Initialize settings.json on first login
+if [ ! -f "${USER_HOME}/.claude/settings.json" ]; then
+    echo '{"env":{"DISABLE_AUTOUPDATER":"1"}}' > "${USER_HOME}/.claude/settings.json"
+fi
+
+# Inject MCP memory server into settings.json if DATABASE_URL is configured
 if [ -n "${DATABASE_URL}" ]; then
     python3 - <<'PYEOF'
 import json, os
-p = "/home/claude/.claude/settings.json"
+p = os.path.join(os.environ["CLAUDE_CONFIG_DIR"], "settings.json")
 with open(p) as f:
     s = json.load(f)
 s.setdefault("mcpServers", {})["memory"] = {
