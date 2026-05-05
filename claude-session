@@ -33,4 +33,8 @@ with open(p, "w") as f:
 PYEOF
 fi
 
-exec /bin/bash
+echo ""
+echo "✓ 歡迎，${CLAUDE_USER_ID}"
+echo ""
+
+exec claude
