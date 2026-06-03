@@ -1,0 +1,485 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Claude — Anthropic</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;600;700&family=Lora:ital,wght@0,400;0,500;1,400&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --dark:       #141413;
+      --light:      #faf9f5;
+      --mid-gray:   #b0aea5;
+      --light-gray: #e8e6dc;
+      --orange:     #d97757;
+      --blue:       #6a9bcc;
+      --green:      #788c5d;
+    }
+
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    html { scroll-behavior: smooth; }
+
+    body {
+      background: var(--light);
+      color: var(--dark);
+      font-family: 'Lora', Georgia, serif;
+      overflow-x: hidden;
+    }
+
+    /* ── NAV ── */
+    nav {
+      position: fixed; top: 0; left: 0; right: 0; z-index: 100;
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 1.25rem 3rem;
+      background: rgba(250, 249, 245, 0.88);
+      backdrop-filter: blur(12px);
+      border-bottom: 1px solid var(--light-gray);
+    }
+    .nav-logo {
+      font-family: 'Poppins', Arial, sans-serif;
+      font-weight: 700; font-size: 1.15rem;
+      letter-spacing: -0.02em; color: var(--dark);
+      text-decoration: none;
+    }
+    .nav-logo span { color: var(--orange); }
+    .nav-links { display: flex; gap: 2rem; list-style: none; }
+    .nav-links a {
+      font-family: 'Poppins', Arial, sans-serif;
+      font-size: 0.85rem; font-weight: 400;
+      color: var(--mid-gray); text-decoration: none;
+      transition: color .2s;
+    }
+    .nav-links a:hover { color: var(--dark); }
+    .nav-cta {
+      font-family: 'Poppins', Arial, sans-serif;
+      font-size: 0.85rem; font-weight: 600;
+      color: var(--light); background: var(--dark);
+      padding: 0.55rem 1.35rem; border-radius: 100px;
+      text-decoration: none; transition: background .2s, transform .15s;
+    }
+    .nav-cta:hover { background: var(--orange); transform: translateY(-1px); }
+
+    /* ── HERO ── */
+    .hero {
+      min-height: 100vh;
+      display: grid; place-items: center;
+      padding: 7rem 3rem 5rem;
+      position: relative; overflow: hidden;
+    }
+    .hero-blob {
+      position: absolute; border-radius: 50%;
+      filter: blur(90px); opacity: .18;
+      pointer-events: none;
+    }
+    .blob-1 { width: 600px; height: 600px; background: var(--orange); top: -120px; right: -100px; animation: drift 12s ease-in-out infinite; }
+    .blob-2 { width: 400px; height: 400px; background: var(--blue);   bottom: -80px; left: -80px;  animation: drift 16s ease-in-out infinite reverse; }
+    .blob-3 { width: 300px; height: 300px; background: var(--green);  top: 40%;     left: 40%;    animation: drift 10s ease-in-out infinite 4s; }
+
+    @keyframes drift {
+      0%, 100% { transform: translate(0, 0) scale(1); }
+      33%       { transform: translate(30px, -20px) scale(1.05); }
+      66%       { transform: translate(-20px, 30px) scale(.96); }
+    }
+
+    .hero-inner {
+      position: relative; z-index: 1;
+      max-width: 760px; text-align: center;
+      animation: fadeUp .9s ease both;
+    }
+    @keyframes fadeUp {
+      from { opacity: 0; transform: translateY(28px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+    .hero-badge {
+      display: inline-block;
+      font-family: 'Poppins', Arial, sans-serif;
+      font-size: .75rem; font-weight: 600; letter-spacing: .1em; text-transform: uppercase;
+      color: var(--orange); border: 1.5px solid var(--orange);
+      padding: .35rem .9rem; border-radius: 100px; margin-bottom: 2rem;
+    }
+    .hero h1 {
+      font-family: 'Poppins', Arial, sans-serif;
+      font-size: clamp(2.8rem, 6vw, 5.2rem);
+      font-weight: 700; line-height: 1.08;
+      letter-spacing: -0.03em;
+      margin-bottom: 1.5rem;
+    }
+    .hero h1 em { font-style: italic; color: var(--orange); font-family: 'Lora', Georgia, serif; }
+    .hero-desc {
+      font-size: 1.15rem; line-height: 1.75;
+      color: #4a4a45; max-width: 540px; margin: 0 auto 2.5rem;
+    }
+    .hero-actions { display: flex; gap: 1rem; justify-content: center; flex-wrap: wrap; }
+    .btn-primary {
+      font-family: 'Poppins', Arial, sans-serif; font-weight: 600; font-size: .95rem;
+      background: var(--dark); color: var(--light);
+      padding: .85rem 2rem; border-radius: 100px; text-decoration: none;
+      transition: background .2s, transform .15s, box-shadow .2s;
+      box-shadow: 0 4px 20px rgba(20,20,19,.15);
+    }
+    .btn-primary:hover { background: var(--orange); transform: translateY(-2px); box-shadow: 0 8px 28px rgba(217,119,87,.3); }
+    .btn-secondary {
+      font-family: 'Poppins', Arial, sans-serif; font-weight: 500; font-size: .95rem;
+      color: var(--dark); border: 1.5px solid var(--light-gray);
+      padding: .85rem 2rem; border-radius: 100px; text-decoration: none;
+      transition: border-color .2s, transform .15s;
+    }
+    .btn-secondary:hover { border-color: var(--mid-gray); transform: translateY(-2px); }
+
+    .hero-scroll {
+      position: absolute; bottom: 2rem; left: 50%; transform: translateX(-50%);
+      display: flex; flex-direction: column; align-items: center; gap: .5rem;
+      color: var(--mid-gray); font-family: 'Poppins', Arial, sans-serif; font-size: .75rem;
+      animation: fadeUp .9s ease .6s both;
+    }
+    .scroll-line {
+      width: 1px; height: 48px; background: linear-gradient(to bottom, var(--mid-gray), transparent);
+      animation: scrollPulse 2s ease-in-out infinite;
+    }
+    @keyframes scrollPulse { 0%, 100% { opacity: .4; } 50% { opacity: 1; } }
+
+    /* ── FEATURES ── */
+    section { padding: 7rem 3rem; }
+
+    .section-label {
+      font-family: 'Poppins', Arial, sans-serif;
+      font-size: .75rem; font-weight: 600; letter-spacing: .12em; text-transform: uppercase;
+      color: var(--mid-gray); margin-bottom: .75rem;
+    }
+    .section-title {
+      font-family: 'Poppins', Arial, sans-serif;
+      font-size: clamp(2rem, 4vw, 3rem); font-weight: 700;
+      line-height: 1.15; letter-spacing: -0.025em;
+      margin-bottom: 1.25rem;
+    }
+    .section-body {
+      font-size: 1.05rem; line-height: 1.8; color: #4a4a45; max-width: 520px;
+    }
+
+    /* Feature grid */
+    .features { background: var(--dark); color: var(--light); }
+    .features .section-label { color: var(--mid-gray); }
+    .features .section-title { color: var(--light); }
+    .features .section-body  { color: var(--mid-gray); max-width: 100%; }
+
+    .features-inner {
+      max-width: 1100px; margin: 0 auto;
+      display: grid; grid-template-columns: 1fr 1fr; gap: 5rem; align-items: center;
+    }
+    .features-grid {
+      display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; margin-top: 3rem;
+    }
+    .feat-card {
+      background: rgba(255,255,255,.05);
+      border: 1px solid rgba(255,255,255,.08);
+      border-radius: 16px; padding: 1.5rem;
+      transition: background .2s, transform .2s;
+    }
+    .feat-card:hover { background: rgba(255,255,255,.09); transform: translateY(-3px); }
+    .feat-icon {
+      width: 40px; height: 40px; border-radius: 10px;
+      display: grid; place-items: center; font-size: 1.2rem;
+      margin-bottom: 1rem;
+    }
+    .feat-icon.orange { background: rgba(217,119,87,.2); color: var(--orange); }
+    .feat-icon.blue   { background: rgba(106,155,204,.2); color: var(--blue); }
+    .feat-icon.green  { background: rgba(120,140,93,.2);  color: var(--green); }
+    .feat-icon.gray   { background: rgba(176,174,165,.2); color: var(--mid-gray); }
+    .feat-card h3 {
+      font-family: 'Poppins', Arial, sans-serif; font-weight: 600; font-size: .95rem;
+      margin-bottom: .5rem; color: var(--light);
+    }
+    .feat-card p { font-size: .875rem; color: var(--mid-gray); line-height: 1.65; }
+
+    /* Visual panel */
+    .visual-panel {
+      position: relative;
+      background: linear-gradient(135deg, #1e1e1c 0%, #2a2a27 100%);
+      border: 1px solid rgba(255,255,255,.08);
+      border-radius: 20px; padding: 2rem;
+      font-family: 'Poppins', Arial, sans-serif;
+    }
+    .panel-bar { display: flex; gap: .5rem; margin-bottom: 1.5rem; }
+    .panel-dot { width: 10px; height: 10px; border-radius: 50%; }
+    .panel-dot:nth-child(1) { background: #ff5f57; }
+    .panel-dot:nth-child(2) { background: #febc2e; }
+    .panel-dot:nth-child(3) { background: #28c840; }
+    .chat-msg { display: flex; gap: .75rem; margin-bottom: 1rem; align-items: flex-start; }
+    .chat-avatar {
+      width: 28px; height: 28px; border-radius: 50%; flex-shrink: 0;
+      display: grid; place-items: center; font-size: .7rem; font-weight: 700;
+    }
+    .avatar-u { background: var(--light-gray); color: var(--dark); }
+    .avatar-c { background: var(--orange); color: var(--light); }
+    .chat-bubble {
+      background: rgba(255,255,255,.07); border-radius: 12px; padding: .65rem .9rem;
+      font-size: .8rem; line-height: 1.6; color: #ccc; max-width: 85%;
+    }
+    .chat-bubble.user { background: rgba(217,119,87,.15); color: #e8c3b3; }
+    .cursor { display: inline-block; width: 2px; height: 13px; background: var(--orange); animation: blink .85s step-end infinite; vertical-align: text-bottom; margin-left: 2px; }
+    @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0; } }
+
+    /* ── STATS ── */
+    .stats { background: var(--light-gray); }
+    .stats-inner { max-width: 960px; margin: 0 auto; text-align: center; }
+    .stats-inner .section-title { margin-bottom: 3.5rem; }
+    .stats-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 2rem; }
+    .stat-item { padding: 2rem; background: var(--light); border-radius: 20px; border: 1px solid var(--light-gray); }
+    .stat-num {
+      font-family: 'Poppins', Arial, sans-serif; font-weight: 700;
+      font-size: 2.8rem; letter-spacing: -0.04em;
+      background: linear-gradient(135deg, var(--dark), var(--orange));
+      -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+    }
+    .stat-label { font-family: 'Poppins', Arial, sans-serif; font-size: .875rem; color: var(--mid-gray); margin-top: .5rem; }
+
+    /* ── PRINCIPLES ── */
+    .principles { background: var(--light); }
+    .principles-inner { max-width: 1100px; margin: 0 auto; }
+    .principles-header { max-width: 600px; margin-bottom: 4rem; }
+    .principles-cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1.5rem; }
+    .principle-card {
+      border-top: 2px solid var(--light-gray);
+      padding-top: 2rem;
+      transition: border-color .2s;
+    }
+    .principle-card:hover { border-color: var(--orange); }
+    .principle-num {
+      font-family: 'Poppins', Arial, sans-serif; font-size: 3rem; font-weight: 700;
+      color: var(--light-gray); letter-spacing: -0.04em; line-height: 1;
+      margin-bottom: 1rem;
+    }
+    .principle-card h3 {
+      font-family: 'Poppins', Arial, sans-serif; font-weight: 600; font-size: 1.15rem;
+      margin-bottom: .75rem;
+    }
+    .principle-card p { font-size: .95rem; line-height: 1.75; color: #4a4a45; }
+
+    /* ── CTA ── */
+    .cta-section {
+      background: var(--dark);
+      text-align: center; padding: 8rem 3rem;
+      position: relative; overflow: hidden;
+    }
+    .cta-blob {
+      position: absolute; border-radius: 50%; filter: blur(80px); opacity: .15; pointer-events: none;
+    }
+    .cta-blob-1 { width: 500px; height: 500px; background: var(--orange); top: -150px; left: -100px; }
+    .cta-blob-2 { width: 400px; height: 400px; background: var(--blue);   bottom: -100px; right: -80px; }
+    .cta-inner { position: relative; z-index: 1; max-width: 640px; margin: 0 auto; }
+    .cta-inner .section-title { color: var(--light); margin-bottom: 1.25rem; }
+    .cta-inner p { font-size: 1.1rem; color: var(--mid-gray); line-height: 1.75; margin-bottom: 2.5rem; }
+    .cta-actions { display: flex; gap: 1rem; justify-content: center; flex-wrap: wrap; }
+    .btn-light {
+      font-family: 'Poppins', Arial, sans-serif; font-weight: 600; font-size: .95rem;
+      background: var(--light); color: var(--dark);
+      padding: .85rem 2rem; border-radius: 100px; text-decoration: none;
+      transition: background .2s, transform .15s;
+    }
+    .btn-light:hover { background: var(--light-gray); transform: translateY(-2px); }
+    .btn-outline-light {
+      font-family: 'Poppins', Arial, sans-serif; font-weight: 500; font-size: .95rem;
+      color: var(--light); border: 1.5px solid rgba(255,255,255,.25);
+      padding: .85rem 2rem; border-radius: 100px; text-decoration: none;
+      transition: border-color .2s, transform .15s;
+    }
+    .btn-outline-light:hover { border-color: var(--light); transform: translateY(-2px); }
+
+    /* ── FOOTER ── */
+    footer {
+      background: var(--dark); border-top: 1px solid rgba(255,255,255,.07);
+      padding: 3rem; display: flex; justify-content: space-between; align-items: center;
+      color: var(--mid-gray); font-family: 'Poppins', Arial, sans-serif; font-size: .8rem;
+    }
+    .footer-logo { font-weight: 700; color: var(--light); }
+    .footer-logo span { color: var(--orange); }
+
+    /* ── SCROLL REVEAL ── */
+    .reveal { opacity: 0; transform: translateY(32px); transition: opacity .7s ease, transform .7s ease; }
+    .reveal.visible { opacity: 1; transform: translateY(0); }
+
+    /* ── RESPONSIVE ── */
+    @media (max-width: 768px) {
+      nav { padding: 1rem 1.5rem; }
+      .nav-links { display: none; }
+      section { padding: 5rem 1.5rem; }
+      .features-inner { grid-template-columns: 1fr; gap: 3rem; }
+      .features-grid { grid-template-columns: 1fr; }
+      .stats-grid { grid-template-columns: 1fr; }
+      .principles-cards { grid-template-columns: 1fr; }
+      footer { flex-direction: column; gap: 1rem; text-align: center; }
+    }
+  </style>
+</head>
+<body>
+
+<!-- NAV -->
+<nav>
+  <a class="nav-logo" href="#"><span>✦</span> Anthropic</a>
+  <ul class="nav-links">
+    <li><a href="#features">功能</a></li>
+    <li><a href="#principles">原則</a></li>
+    <li><a href="#research">研究</a></li>
+    <li><a href="#pricing">方案</a></li>
+  </ul>
+  <a class="nav-cta" href="#">開始使用 →</a>
+</nav>
+
+<!-- HERO -->
+<section class="hero">
+  <div class="hero-blob blob-1"></div>
+  <div class="hero-blob blob-2"></div>
+  <div class="hero-blob blob-3"></div>
+  <div class="hero-inner">
+    <div class="hero-badge">AI Safety Company</div>
+    <h1>安全、誠實、<em>有益</em>的人工智慧</h1>
+    <p class="hero-desc">
+      Claude 是 Anthropic 研發的 AI 助理，以安全性與可信度為核心，幫助你思考、創作、解決問題。
+    </p>
+    <div class="hero-actions">
+      <a class="btn-primary" href="#">免費試用 Claude</a>
+      <a class="btn-secondary" href="#">了解我們的研究</a>
+    </div>
+  </div>
+  <div class="hero-scroll">
+    <span>向下探索</span>
+    <div class="scroll-line"></div>
+  </div>
+</section>
+
+<!-- FEATURES -->
+<section class="features" id="features">
+  <div class="features-inner">
+    <div>
+      <div class="section-label">核心能力</div>
+      <h2 class="section-title">為真實工作<br/>而生的智慧</h2>
+      <p class="section-body">
+        從複雜的程式碼除錯到深度的文件分析，Claude 能理解上下文、推論邏輯，並以清晰、誠實的方式與你協作。
+      </p>
+      <div class="features-grid reveal">
+        <div class="feat-card">
+          <div class="feat-icon orange">✦</div>
+          <h3>深度推理</h3>
+          <p>多步驟邏輯、數學推導、複雜問題拆解。</p>
+        </div>
+        <div class="feat-card">
+          <div class="feat-icon blue">⌘</div>
+          <h3>程式碼協作</h3>
+          <p>撰寫、審查、除錯程式碼，支援數十種語言。</p>
+        </div>
+        <div class="feat-card">
+          <div class="feat-icon green">◎</div>
+          <h3>長文件理解</h3>
+          <p>分析合約、論文、報告，精準提取洞見。</p>
+        </div>
+        <div class="feat-card">
+          <div class="feat-icon gray">◈</div>
+          <h3>創意寫作</h3>
+          <p>文章、故事、腳本，保持一致的風格與語氣。</p>
+        </div>
+      </div>
+    </div>
+    <div class="visual-panel reveal" style="animation-delay:.15s">
+      <div class="panel-bar">
+        <div class="panel-dot"></div>
+        <div class="panel-dot"></div>
+        <div class="panel-dot"></div>
+      </div>
+      <div class="chat-msg">
+        <div class="chat-avatar avatar-u">你</div>
+        <div class="chat-bubble user">幫我分析這份 Q2 財務報告的主要風險點。</div>
+      </div>
+      <div class="chat-msg">
+        <div class="chat-avatar avatar-c">C</div>
+        <div class="chat-bubble">根據報告內容，我識別出三個主要風險：<br/><br/>
+          <strong style="color:#d97757">① 流動性風險</strong> — 短期負債比率上升 12%，現金儲備下降至警戒線。<br/><br/>
+          <strong style="color:#6a9bcc">② 市場集中風險</strong> — 前五大客戶佔總營收的 67%，客戶集中度過高。<br/><br/>
+          <strong style="color:#788c5d">③ 匯率風險</strong> — 美元敞口約 3.2 億，對沖比例僅 40%。<span class="cursor"></span>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- STATS -->
+<section class="stats">
+  <div class="stats-inner">
+    <div class="section-label reveal">影響力與規模</div>
+    <h2 class="section-title reveal">數字背後的信任</h2>
+    <div class="stats-grid">
+      <div class="stat-item reveal">
+        <div class="stat-num">200K+</div>
+        <div class="stat-label">Context Window Token 數</div>
+      </div>
+      <div class="stat-item reveal" style="animation-delay:.1s">
+        <div class="stat-num">170+</div>
+        <div class="stat-label">支援國家與地區</div>
+      </div>
+      <div class="stat-item reveal" style="animation-delay:.2s">
+        <div class="stat-num">99.9%</div>
+        <div class="stat-label">服務可用性 SLA</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- PRINCIPLES -->
+<section class="principles" id="principles">
+  <div class="principles-inner">
+    <div class="principles-header">
+      <div class="section-label reveal">設計哲學</div>
+      <h2 class="section-title reveal">以安全為基石的<br/>AI 設計原則</h2>
+      <p class="section-body reveal">Anthropic 相信，建構真正有益的 AI，必須從根本上重視安全性與誠實性。</p>
+    </div>
+    <div class="principles-cards">
+      <div class="principle-card reveal">
+        <div class="principle-num">01</div>
+        <h3>安全性優先</h3>
+        <p>Constitutional AI 方法讓 Claude 學習遵守明確的原則，而非僅靠人類回饋。每一次迭代都以降低風險為首要目標。</p>
+      </div>
+      <div class="principle-card reveal" style="animation-delay:.1s">
+        <div class="principle-num">02</div>
+        <h3>誠實無欺</h3>
+        <p>Claude 不會主動誤導你，也會承認自己的不確定性。我們相信 AI 應當坦率，而非一味取悅使用者。</p>
+      </div>
+      <div class="principle-card reveal" style="animation-delay:.2s">
+        <div class="principle-num">03</div>
+        <h3>對人類有益</h3>
+        <p>長期利益優於短期滿足。Claude 的目標是幫助你做出更好的決策，而不只是完成任務。</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- CTA -->
+<section class="cta-section">
+  <div class="cta-blob cta-blob-1"></div>
+  <div class="cta-blob cta-blob-2"></div>
+  <div class="cta-inner">
+    <h2 class="section-title reveal">準備好了嗎？</h2>
+    <p class="reveal">立即體驗 Claude，感受安全、誠實的 AI 如何改變你的工作方式。</p>
+    <div class="cta-actions reveal">
+      <a class="btn-light" href="#">免費開始使用</a>
+      <a class="btn-outline-light" href="#">閱讀技術文件</a>
+    </div>
+  </div>
+</section>
+
+<!-- FOOTER -->
+<footer>
+  <div class="footer-logo"><span>✦</span> Anthropic</div>
+  <div>© 2025 Anthropic, PBC. All rights reserved.</div>
+  <div>以安全為核心，以人類為中心</div>
+</footer>
+
+<script>
+  const observer = new IntersectionObserver((entries) => {
+    entries.forEach(e => { if (e.isIntersecting) e.target.classList.add('visible'); });
+  }, { threshold: 0.12 });
+  document.querySelectorAll('.reveal').forEach(el => observer.observe(el));
+</script>
+</body>
+</html>
