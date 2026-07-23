@@ -18,6 +18,34 @@ RUN apt-get update && apt-get install -y \
     python3 python3-pip \
     && rm -rf /var/lib/apt/lists/*
 
+# Network diagnostics toolkit — for remote-supporting client networks
+# (jg-cluster-template deployments) where CC needs to inventory LAN
+# devices and debug router/DHCP/VPN config without the client having
+# any networking background. Packet-level tools (nmap, masscan,
+# arp-scan, tcpdump, fping) need CAP_NET_RAW, granted at the pod
+# securityContext, not here.
+# avahi-browse/iw/nmcli deliberately omitted: the first needs a
+# privileged avahi-daemon + system D-Bus session we don't want to run
+# in this non-root container; the latter two manage host network
+# interfaces via NetworkManager, which Talos nodes don't run.
+RUN apt-get update && apt-get install -y \
+    nmap \
+    fping \
+    masscan \
+    arp-scan \
+    iproute2 \
+    net-tools \
+    tcpdump \
+    dnsutils \
+    nbtscan \
+    snmp \
+    mtr-tiny \
+    traceroute \
+    ipcalc \
+    netcat-openbsd \
+    socat \
+    && rm -rf /var/lib/apt/lists/*
+
 # Install MCP server deps
 RUN pip3 install --break-system-packages psycopg2-binary mcp
 
