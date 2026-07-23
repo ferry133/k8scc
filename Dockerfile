@@ -44,7 +44,20 @@ RUN apt-get update && apt-get install -y \
     ipcalc \
     netcat-openbsd \
     socat \
+    libcap2-bin \
     && rm -rf /var/lib/apt/lists/*
+
+# Raw-socket tools need CAP_NET_RAW to actually work when run as the
+# non-root `claude` user. Kubernetes' securityContext.capabilities.add
+# only puts NET_RAW in the container's capability *bounding* set for a
+# non-root process, not its effective/ambient set -- these file
+# capabilities are what actually activate it, scoped to just these
+# binaries rather than the whole shell. fping already gets this from
+# its own Debian postinst; the rest don't.
+RUN setcap cap_net_raw+ep /usr/bin/nmap && \
+    setcap cap_net_raw+ep /usr/sbin/arp-scan && \
+    setcap cap_net_raw+ep /usr/bin/tcpdump && \
+    setcap cap_net_raw+ep /usr/bin/masscan
 
 # Install MCP server deps
 RUN pip3 install --break-system-packages psycopg2-binary mcp
