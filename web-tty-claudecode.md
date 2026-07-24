@@ -98,7 +98,13 @@ To restrict access to specific emails or domains, configure Auth0 **Rules** or *
 
 ### Claude Account Sign-in (first use)
 
-On first launch Claude Code asks you to sign in to your Claude account and shows a long OAuth URL. The URL wraps across several terminal lines, so the in-terminal link is unreliable — instead, an orange **「🔗 開啟 Claude 登入頁 / Open sign-in page」** button appears at the top-right of the page. Click it to open the sign-in page in a new tab, approve, then paste the code back into the terminal. (The button is added by a patched ttyd client page that reassembles the wrapped URL; it disappears after successful login.)
+On first launch Claude Code asks you to sign in to your Claude account and shows a long OAuth URL. The URL wraps across several terminal lines, so the in-terminal link is unreliable — instead, an orange **「🔗 開啟 Claude 登入頁 / Open sign-in page」** button appears at the top-right of the page:
+
+1. Click it — the sign-in page opens in a new tab; approve access there.
+2. On the confirmation page, click **Copy code**.
+3. Switch back to the terminal tab — the code is detected in your clipboard and submitted automatically (your browser may ask once for clipboard permission; if it was denied, click **「📋 貼上驗證碼 / Paste code」** instead).
+
+The buttons disappear once you are signed in. (They are added by a patched ttyd client page that reassembles the wrapped URL; the clipboard is only read while a sign-in is pending, and only a code matching this exact sign-in attempt is ever accepted.)
 
 ### Using the Terminal
 

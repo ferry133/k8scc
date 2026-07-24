@@ -52,13 +52,24 @@ Fix: `patch-ttyd-index.py` (build time) extracts the gzipped index.html embedded
 in the ttyd binary and injects `login-link-helper.js` before the client bundle;
 `entrypoint.sh` serves it via `ttyd --index /usr/local/share/ttyd/index.html`.
 The helper:
-1. Taps the ttyd WebSocket, learns terminal width from auth/resize frames, and
+1. Taps the ttyd WebSocket, learns terminal size from auth/resize frames, and
    reassembles the full URL across wrapped lines (full-width line ⇒ continues).
-2. Overlays a clickable "開啟 Claude 登入頁 / Open sign-in page" button (hides on
-   `Login successful`, dismissible with ✕).
+2. Overlays a clickable "開啟 Claude 登入頁 / Open sign-in page" button. Shown
+   iff a login URL appears *later in the stream* than the last post-login
+   marker (`Welcome back`, `? for shortcuts`, …) — ordering, not proximity, so
+   partial redraws can't confuse it. Screen-clear (`CSI 2J`, alt-screen) resets
+   the buffer.
 3. Wraps `window.open()` with a facade so clicking the truncated in-terminal
    link navigates to the full reassembled URL (WebLinksAddon opens links as
    `w = window.open(); w.location.href = url`).
+4. Auto-submits the auth code: on tab focus (or via the 📋 button as a
+   user-gesture fallback for clipboard permission), reads the clipboard and, if
+   the text ends with `#<state>` matching the captured URL's OAuth `state`
+   param, types it into the terminal via the WebSocket (`'0'` input frame) +
+   Enter. State validation means nothing else can ever be injected; clipboard
+   is only read while a login is pending. A fully automatic callback is
+   impossible remotely — Anthropic's OAuth app only allows localhost or
+   platform.claude.com redirect URIs.
 
 Unit-testable without a browser: stub `window`/`document`/`WebSocket` and feed
 simulated frames (the helper is a self-contained IIFE using only those globals).
