@@ -77,6 +77,18 @@ RUN ARCH=$(dpkg --print-architecture) && \
       "https://github.com/tsl0922/ttyd/releases/download/${TTYD_VERSION}/ttyd.${TTYD_ARCH}" && \
     chmod +x /usr/local/bin/ttyd
 
+# Claude Code's OAuth login URL hard-wraps across terminal rows, so ttyd's
+# stock client links only the first (truncated) line. Extract the embedded
+# index.html from the ttyd binary and inject login-link-helper.js, which
+# reassembles the full URL from the WebSocket stream and overlays a clickable
+# sign-in button. Served via `ttyd --index` (see entrypoint.sh).
+COPY login-link-helper.js patch-ttyd-index.py /usr/local/share/ttyd/
+RUN python3 /usr/local/share/ttyd/patch-ttyd-index.py \
+      /usr/local/bin/ttyd \
+      /usr/local/share/ttyd/login-link-helper.js \
+      /usr/local/share/ttyd/index.html && \
+    grep -q login-link-helper /usr/local/share/ttyd/index.html
+
 # Create non-root user and set correct ownership
 RUN useradd -m -u 1000 -s /bin/bash claude && \
     mkdir -p /home/claude/workspace /home/claude/.claude && \

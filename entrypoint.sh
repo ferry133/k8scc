@@ -26,6 +26,12 @@ TTYD_ARGS=(
     "--client-option" "scrollback=5000"
 )
 
+# Patched client page: makes the wrapped Claude OAuth login URL clickable
+# (built by patch-ttyd-index.py in the Dockerfile)
+if [ -f /usr/local/share/ttyd/index.html ]; then
+    TTYD_ARGS+=("--index" "/usr/local/share/ttyd/index.html")
+fi
+
 # Enable basic auth if credentials are provided
 if [ -n "${TTYD_CREDENTIAL}" ]; then
     TTYD_ARGS+=("--credential" "${TTYD_CREDENTIAL}")

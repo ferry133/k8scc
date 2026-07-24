@@ -96,6 +96,10 @@ To restrict access to specific emails or domains, configure Auth0 **Rules** or *
 
 > If you are already signed into the same browser session, login is automatic (SSO — no interaction required). To verify who is currently logged in, open **https://cc.janncot.com/oauth2/userinfo** in the same browser.
 
+### Claude Account Sign-in (first use)
+
+On first launch Claude Code asks you to sign in to your Claude account and shows a long OAuth URL. The URL wraps across several terminal lines, so the in-terminal link is unreliable — instead, an orange **「🔗 開啟 Claude 登入頁 / Open sign-in page」** button appears at the top-right of the page. Click it to open the sign-in page in a new tab, approve, then paste the code back into the terminal. (The button is added by a patched ttyd client page that reassembles the wrapped URL; it disappears after successful login.)
+
 ### Using the Terminal
 
 The terminal is a full bash session running as user `claude`. Claude Code is launched automatically on login.

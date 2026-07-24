@@ -41,6 +41,28 @@ Deliberately omitted:
 
 Per-client instances deploy with `replicas: 0` by default — this is a LAN-facing, network-scanning-capable shell; scale to 1 only while actively supporting that client.
 
+## Login Link Helper (patched ttyd client)
+
+Claude Code's OAuth login URL (~450 chars) is hard-wrapped by its TUI with real
+newlines at the terminal width, so ttyd's stock xterm.js client links only the
+first (truncated) line — clicking it opens a broken URL, and no client-side link
+regex can rejoin hard-wrapped lines.
+
+Fix: `patch-ttyd-index.py` (build time) extracts the gzipped index.html embedded
+in the ttyd binary and injects `login-link-helper.js` before the client bundle;
+`entrypoint.sh` serves it via `ttyd --index /usr/local/share/ttyd/index.html`.
+The helper:
+1. Taps the ttyd WebSocket, learns terminal width from auth/resize frames, and
+   reassembles the full URL across wrapped lines (full-width line ⇒ continues).
+2. Overlays a clickable "開啟 Claude 登入頁 / Open sign-in page" button (hides on
+   `Login successful`, dismissible with ✕).
+3. Wraps `window.open()` with a facade so clicking the truncated in-terminal
+   link navigates to the full reassembled URL (WebLinksAddon opens links as
+   `w = window.open(); w.location.href = url`).
+
+Unit-testable without a browser: stub `window`/`document`/`WebSocket` and feed
+simulated frames (the helper is a self-contained IIFE using only those globals).
+
 ## Runtime Configuration
 
 | Env Var | Description |
