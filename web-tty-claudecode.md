@@ -24,19 +24,27 @@ Browser → oauth2-proxy (Auth0 OIDC) → ttyd → bash → claude
 ### Request Flow
 
 ```
-1. User opens https://cc.janncot.com
-2. oauth2-proxy checks for valid session cookie
+1. User opens https://cc.<domain>
+2. oauth2-proxy (sidecar, :4180) checks for valid session cookie
    └─ No cookie → redirect to Auth0 login page
    └─ Auth0 (Google / GitHub / etc.) → callback → oauth2-proxy issues cookie
-3. oauth2-proxy forwards request to ttyd (localhost:7681)
-   └─ Injects X-Auth-Request-Email: user@gmail.com header
-4. ttyd spawns claude-session
-   └─ HTTP headers become env vars (CGI-style):
-      X-Auth-Request-Email → HTTP_X_AUTH_REQUEST_EMAIL
-5. claude-session sets CLAUDE_USER_ID=user@gmail.com
+   └─ Email must be in the allowlist file (claudecode_allowed_emails)
+3. oauth2-proxy forwards request to ttyd (127.0.0.1:7681)
+   └─ Injects X-Forwarded-Email: user@gmail.com header
+4. ttyd (run with --auth-header X-Forwarded-Email) requires that header
+   └─ rejects requests without it; exposes its value to the session as
+      TTYD_USER (ttyd does NOT do CGI-style HTTP_* header mapping)
+5. claude-session sets CLAUDE_USER_ID from TTYD_USER
 6. MCP memory server uses CLAUDE_USER_ID as agent_id in PostgreSQL
 7. Claude Code launches with per-user memory namespace
 ```
+
+> OIDC mode is opt-in per deployment: setting `TTYD_INTERFACE=127.0.0.1` +
+> `TTYD_AUTH_HEADER=X-Forwarded-Email` (and fronting with oauth2-proxy)
+> activates it; leaving them unset keeps plain ttyd with optional
+> `TTYD_CREDENTIAL` basic auth. `TTYD_INTERFACE` must be an IP, not an
+> interface name — ttyd resolves a name like `lo` to its first non-127
+> address (on Talos, a 169.254.x.x).
 
 ### Account Layers
 
@@ -61,26 +69,34 @@ Different Google accounts logging in get completely separate MCP memories. They 
 
 ### Kubernetes Deployment
 
-- **Cluster**: jcom (`janncot.com`)
+Deployed per cluster as the `claudecode/claude-code` extra (manifests in
+`jg-base`, templated via `jg-cluster-template`, values in each cluster's
+`cluster.yaml`). Reference deployment: jg-jiahd, `cc.jiahd.cc`.
+
 - **Namespace**: `claudecode`
-- **HelmRelease**: `cc` (single replica, `Recreate` strategy)
-- **Image**: `ghcr.io/ferry133/claude-code:latest`
-- **Ingress**: `cc.janncot.com` via Envoy Gateway (HTTPS)
-- **Secrets**: `claude-code-secret` (SOPS encrypted) — `DATABASE_URL`, `OAUTH2_PROXY_CLIENT_ID`, `OAUTH2_PROXY_CLIENT_SECRET`, `OAUTH2_PROXY_COOKIE_SECRET`
+- **HelmRelease**: one per entry in `claude_instances` (single replica, `Recreate`, hostNetwork)
+- **Image**: `ghcr.io/ferry133/claude-code:<git-short-sha>` (pinned, not `:latest`)
+- **Route**: `<instance>.<domain>` via Envoy Gateway → oauth2-proxy `:4180` (OIDC mode) or ttyd `:7681` (basic-auth mode)
+- **Runs as root** (`runAsUser: 0`): the NAS NFS coding export allows root only; `HOME=/home/claude` pinned via env
+- **kubectl + RBAC**: image ships kubectl; the pod uses the shared SA `claude-code` bound to **cluster-admin** (jg-base `rbac.yaml`) — in-pod kubectl hits the in-cluster API endpoint directly, independent of Omni (this is the cluster's rescue path when Omni is down)
+- **Login persistence**: `CLAUDE_CONFIG_DIR=/home/claude/.claude` keeps Claude onboarding/credentials on the PVC — sign in once, survives pod restarts and image updates
+- **Secrets**: `claude-code-secret` — `TTYD_CREDENTIAL`, `DATABASE_URL`, `OAUTH2_PROXY_CLIENT_ID`, `OAUTH2_PROXY_CLIENT_SECRET`, `OAUTH2_PROXY_COOKIE_SECRET`, `ALLOWED_EMAILS` (newline-separated, rendered from `claudecode_allowed_emails`)
 - **Storage**:
-  - `claude-config` PVC — 5Gi (sc-nas) → `/home/claude/.claude`
+  - `claude-config` PVC — 5Gi (sc-nas) → `/home/claude/.claude` (+ keyring dir via subPath)
   - `claude-workspace` PVC — 20Gi (sc-nas) → `/home/claude/workspace`
-  - `coding` NFS — `10.9.1.12:/volume2/coding` → `/home/claude/coding`
+  - `coding` NFS — `${NAS_SERVER}:${NAS_CODING_PATH}` → `/home/claude/coding`
 
 ### Auth0 Configuration
 
-- **Application type**: Regular Web Application
-- **Allowed Callback URLs**: `https://cc.janncot.com/oauth2/callback`
-- **Allowed Logout URLs**: `https://cc.janncot.com`
-- **Allowed Web Origins**: `https://cc.janncot.com`
+- **Application type**: Regular Web Application (an existing app can be shared across sites)
+- **Allowed Callback URLs**: `https://<instance>.<domain>/oauth2/callback`
+- **Allowed Logout URLs**: `https://<instance>.<domain>`
+- **Allowed Web Origins**: `https://<instance>.<domain>`
 - **Connections**: Google, GitHub (or any configured social login)
 
-To restrict access to specific emails or domains, configure Auth0 **Rules** or **Actions** in the Auth0 Dashboard.
+Access is restricted by the `claudecode_allowed_emails` allowlist enforced
+by oauth2-proxy (`--authenticated-emails-file`) — no Auth0 Rules/Actions
+needed. An account that passes Auth0 but is not in the allowlist gets 403.
 
 ---
 
@@ -88,13 +104,13 @@ To restrict access to specific emails or domains, configure Auth0 **Rules** or *
 
 ### Logging In
 
-1. Open **https://cc.janncot.com** in your browser
+1. Open **https://cc.<domain>** (e.g. `cc.jiahd.cc`) in your browser
 2. You will be redirected to Auth0 login — choose your Google (or GitHub) account
 3. After successful login, the terminal opens automatically
 4. A welcome message confirms your identity: `✓ 歡迎，your@email.com`
 5. Claude Code launches immediately — no extra steps needed
 
-> If you are already signed into the same browser session, login is automatic (SSO — no interaction required). To verify who is currently logged in, open **https://cc.janncot.com/oauth2/userinfo** in the same browser.
+> If you are already signed into the same browser session, login is automatic (SSO — no interaction required). To verify who is currently logged in, open **https://cc.<domain>/oauth2/userinfo** in the same browser.
 
 ### Claude Account Sign-in (first use)
 
@@ -108,7 +124,7 @@ The buttons disappear once you are signed in. (They are added by a patched ttyd 
 
 ### Using the Terminal
 
-The terminal is a full bash session running as user `claude`. Claude Code is launched automatically on login.
+The terminal session runs as root (see Kubernetes Deployment) with `HOME=/home/claude`. Claude Code is launched automatically on login; `kubectl` is available with cluster-admin.
 
 Common operations:
 
@@ -149,7 +165,7 @@ forget("outdated fact")
 
 To sign out and invalidate your session:
 
-- Open **https://cc.janncot.com/oauth2/sign_out** in your browser
+- Open **https://cc.<domain>/oauth2/sign_out** in your browser
 
 This clears the oauth2-proxy session cookie. The next visit will require Auth0 login again.
 
@@ -169,7 +185,7 @@ This clears the oauth2-proxy session cookie. The next visit will require Auth0 l
 
 ### Rebuilding the Image
 
-Push to `main` branch of `ferry133/k8scc` — GitHub Actions builds and pushes `ghcr.io/ferry133/claude-code:latest` automatically (multi-arch: amd64 + arm64).
+Push to `main` branch of `ferry133/k8scc` — GitHub Actions builds and pushes `ghcr.io/ferry133/claude-code:<git-short-sha>` and `:latest` automatically (multi-arch: amd64 + arm64). Deployments pin the short-sha tag; bump it in the instances helmrelease template and re-render.
 
 ### Forcing a Pod Restart
 
