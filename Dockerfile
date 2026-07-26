@@ -59,6 +59,16 @@ RUN setcap cap_net_raw+ep /usr/bin/nmap && \
     setcap cap_net_raw+ep /usr/bin/tcpdump && \
     setcap cap_net_raw+ep /usr/bin/masscan
 
+# kubectl -- in-cluster troubleshooting from the web terminal. The binary
+# alone grants nothing; cluster access comes from RBAC bound to the pod's
+# ServiceAccount at deploy time. Pinned to the cluster's minor version
+# (kubectl skew policy allows ±1 minor against the API server).
+ARG KUBECTL_VERSION=v1.36.0
+RUN ARCH=$(dpkg --print-architecture) && \
+    curl -fsSL -o /usr/local/bin/kubectl \
+      "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${ARCH}/kubectl" && \
+    chmod +x /usr/local/bin/kubectl
+
 # Install MCP server deps
 RUN pip3 install --break-system-packages psycopg2-binary mcp
 
