@@ -37,4 +37,17 @@ if [ -n "${TTYD_CREDENTIAL}" ]; then
     TTYD_ARGS+=("--credential" "${TTYD_CREDENTIAL}")
 fi
 
+# Bind to a specific interface (e.g. "lo" when an auth proxy fronts ttyd in
+# the same network namespace -- keeps :7681 off the LAN on hostNetwork pods)
+if [ -n "${TTYD_INTERFACE}" ]; then
+    TTYD_ARGS+=("--interface" "${TTYD_INTERFACE}")
+fi
+
+# Require + trust a reverse-proxy auth header (e.g. X-Forwarded-Email from
+# oauth2-proxy). ttyd rejects requests missing it and exposes its value to
+# the session as TTYD_USER (not as an HTTP_* CGI-style var).
+if [ -n "${TTYD_AUTH_HEADER}" ]; then
+    TTYD_ARGS+=("--auth-header" "${TTYD_AUTH_HEADER}")
+fi
+
 exec ttyd "${TTYD_ARGS[@]}" /usr/local/bin/claude-session

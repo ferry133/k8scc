@@ -5,10 +5,11 @@
 # 3. exec bash
 # CLAUDE_USER_ID is set by the pod environment (oauth2-proxy handles auth externally)
 
-# Prefer email injected by oauth2-proxy via X-Auth-Request-Email header
-# ttyd maps HTTP headers to env vars: X-Auth-Request-Email → HTTP_X_AUTH_REQUEST_EMAIL
-if [ -n "${HTTP_X_AUTH_REQUEST_EMAIL}" ]; then
-    export CLAUDE_USER_ID="${HTTP_X_AUTH_REQUEST_EMAIL}"
+# Prefer email injected by oauth2-proxy via X-Forwarded-Email: ttyd is run
+# with --auth-header X-Forwarded-Email, which surfaces the value as TTYD_USER.
+# (ttyd does NOT do CGI-style HTTP_* header-to-env mapping.)
+if [ -n "${TTYD_USER}" ]; then
+    export CLAUDE_USER_ID="${TTYD_USER}"
 else
     export CLAUDE_USER_ID="${CLAUDE_USER_ID:-claude_code}"
 fi
