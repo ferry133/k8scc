@@ -37,8 +37,10 @@ if [ -n "${TTYD_CREDENTIAL}" ]; then
     TTYD_ARGS+=("--credential" "${TTYD_CREDENTIAL}")
 fi
 
-# Bind to a specific interface (e.g. "lo" when an auth proxy fronts ttyd in
-# the same network namespace -- keeps :7681 off the LAN on hostNetwork pods)
+# Bind to a specific address (e.g. "127.0.0.1" when an auth proxy fronts ttyd
+# in the same network namespace -- keeps :7681 off the LAN on hostNetwork
+# pods). Prefer an IP over an interface name: ttyd resolves a name like "lo"
+# to its first non-127 address, which on Talos is a 169.254.x.x on lo.
 if [ -n "${TTYD_INTERFACE}" ]; then
     TTYD_ARGS+=("--interface" "${TTYD_INTERFACE}")
 fi
