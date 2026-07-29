@@ -69,6 +69,16 @@ RUN ARCH=$(dpkg --print-architecture) && \
       "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${ARCH}/kubectl" && \
     chmod +x /usr/local/bin/kubectl
 
+# talosctl -- backs the talos-mcp sidecar's read-only Talos diagnostics.
+# The binary alone grants nothing; the sidecar mounts an os:reader-scoped
+# talosconfig at deploy time (see openspec/changes/insideman in jg-base).
+# Pinned to the cluster's Talos version.
+ARG TALOSCTL_VERSION=v1.13.2
+RUN ARCH=$(dpkg --print-architecture) && \
+    curl -fsSL -o /usr/local/bin/talosctl \
+      "https://github.com/siderolabs/talos/releases/download/${TALOSCTL_VERSION}/talosctl-linux-${ARCH}" && \
+    chmod +x /usr/local/bin/talosctl
+
 # Install MCP server deps
 RUN pip3 install --break-system-packages psycopg2-binary mcp
 
@@ -111,9 +121,11 @@ RUN curl -fsSL https://claude.ai/install.sh | bash
 
 USER root
 COPY memory_mcp_server.py /usr/local/bin/memory_mcp_server.py
+COPY talos_mcp_server.py /usr/local/bin/talos_mcp_server.py
 COPY auth0_login.py /usr/local/bin/auth0_login.py
 COPY claude-session /usr/local/bin/claude-session
 RUN chmod +x /usr/local/bin/memory_mcp_server.py \
+             /usr/local/bin/talos_mcp_server.py \
              /usr/local/bin/auth0_login.py \
              /usr/local/bin/claude-session
 

@@ -74,14 +74,26 @@ The helper:
 Unit-testable without a browser: stub `window`/`document`/`WebSocket` and feed
 simulated frames (the helper is a self-contained IIFE using only those globals).
 
+## Talos MCP Sidecar (isolated, read-only cluster diagnostics)
+
+A second container, `talos-mcp` (same image, `command` override — see below), gives the agent read-only Talos diagnostics for the client's own cluster without any credential crossing the remote-operator boundary. See `openspec/changes/insideman` in `jg-base` for the full design.
+
+- **Credential**: an `os:reader`-scoped Talos client certificate (Talos's own native RBAC role, independent of Omni — `talosctl config new --roles=os:reader`), unique per client, bootstrapped once at onboarding. `os:reader` is enforced by the Talos API server itself: any mutating RPC (reboot, config apply, upgrade) is rejected regardless of what the calling code requests.
+- **Isolation**: the credential is mounted only into the `talos-mcp` container's own filesystem/env — never the `app` container the terminal user/agent shell runs in. The two containers share a pod (`hostNetwork: true`, so the same network namespace) but not a filesystem.
+- **Transport**: `talos_mcp_server.py` runs as a long-lived process (not a stdio subprocess like `memory`), exposing MCP over SSE bound to `127.0.0.1:8765`. Started via a `command` override (`python3 /usr/local/bin/talos_mcp_server.py`) that bypasses `entrypoint.sh` entirely — this container never runs ttyd.
+- **Registration**: `claude-session` registers it in `settings.json` as a remote MCP server (`"type": "sse"`) when `TALOS_MCP_URL` is set — a different registration shape than `memory`'s local stdio entry, since a remote/sidecar server needs a URL, not a `command`/`args` pair to spawn.
+- **Tool surface** (read-only by construction; no mutating tool exists in this file, full stop): `get_node_status`, `get_etcd_members`, `get_link_status`, `get_service_logs` — each shells out to the bundled `talosctl` binary.
+
 ## Runtime Configuration
 
 | Env Var | Description |
 |---------|-------------|
 | `DATABASE_URL` | Optional PostgreSQL DSN; enables MCP memory server when set |
-| `AUTH0_DOMAIN` | Optional Auth0 domain for device-flow login |
-| `AUTH0_CLIENT_ID` | Optional Auth0 client ID for device-flow login |
-| `CLAUDE_USER_ID` | Set automatically by Auth0 login; used as `agent_id` in DB (default: `claude_code`) |
+| `TTYD_INTERFACE` | Optional bind address for ttyd (e.g. `127.0.0.1` when an oauth2-proxy sidecar fronts it in the same netns) |
+| `TTYD_AUTH_HEADER` | Optional trusted header ttyd requires (e.g. `X-Forwarded-Email` from oauth2-proxy); its value surfaces to `claude-session` as `TTYD_USER` |
+| `CLAUDE_USER_ID` | Resolved in `claude-session` from `TTYD_USER` if present, else this var, else `claude_code`; used as `agent_id` in the memory DB |
+| `TALOS_MCP_URL` | Optional; set only when the `talos-mcp` sidecar exists. Registers it as a remote MCP server (see above) |
+| `TALOS_NODES` (talos-mcp container only) | Comma-separated node IPs the sidecar's credential is scoped to |
 
 ## Persistent Memory
 
