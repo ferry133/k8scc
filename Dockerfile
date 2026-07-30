@@ -79,8 +79,11 @@ RUN ARCH=$(dpkg --print-architecture) && \
       "https://github.com/siderolabs/talos/releases/download/${TALOSCTL_VERSION}/talosctl-linux-${ARCH}" && \
     chmod +x /usr/local/bin/talosctl
 
-# Install MCP server deps
-RUN pip3 install --break-system-packages psycopg2-binary mcp
+# Install MCP server deps. mcp pinned <2.0: the 2.0 release (2026-07)
+# dropped mcp.server.fastmcp.FastMCP (both memory_mcp_server.py and
+# talos_mcp_server.py use the FastMCP class) in favor of a new API this
+# codebase hasn't migrated to yet.
+RUN pip3 install --break-system-packages psycopg2-binary "mcp==1.29.0"
 
 # Create D-Bus machine-id (required for session bus)
 RUN mkdir -p /var/lib/dbus && dbus-uuidgen > /var/lib/dbus/machine-id
