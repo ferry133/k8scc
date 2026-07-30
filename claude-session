@@ -20,24 +20,24 @@ if [ ! -f /home/claude/.claude/settings.json ]; then
     echo '{"env":{"DISABLE_AUTOUPDATER":"1"}}' > /home/claude/.claude/settings.json
 fi
 
-# Inject MCP memory server into settings.json if DATABASE_URL is configured
+# Register MCP servers via `claude mcp add --scope local` (writes to
+# ~/.claude/.claude.json, keyed to this project dir) -- NOT settings.json's
+# `mcpServers` key, which Claude Code CLI 2.1.220 no longer reads at all
+# (confirmed live 2026-07-30: entries sat in settings.json inertly, `claude
+# mcp list` never showed them). `--scope local` is per-user/per-project and
+# needs no interactive trust-dialog approval, unlike `--scope project`
+# (.mcp.json, shared, would prompt on every new session). `claude mcp get`
+# exits 0 if already registered -- idempotent across repeat ttyd connections
+# to the same long-lived pod.
+
+# Inject MCP memory server if DATABASE_URL is configured
 if [ -n "${DATABASE_URL}" ]; then
-    python3 - <<'PYEOF'
-import json, os
-p = "/home/claude/.claude/settings.json"
-with open(p) as f:
-    s = json.load(f)
-s.setdefault("mcpServers", {})["memory"] = {
-    "command": "python3",
-    "args": ["/usr/local/bin/memory_mcp_server.py"],
-    "env": {
-        "DATABASE_URL": os.environ["DATABASE_URL"],
-        "CLAUDE_USER_ID": os.environ.get("CLAUDE_USER_ID", "claude_code"),
-    },
-}
-with open(p, "w") as f:
-    json.dump(s, f, indent=2)
-PYEOF
+    if ! claude mcp get memory >/dev/null 2>&1; then
+        claude mcp add --scope local \
+            -e DATABASE_URL="${DATABASE_URL}" \
+            -e CLAUDE_USER_ID="${CLAUDE_USER_ID}" \
+            memory -- python3 /usr/local/bin/memory_mcp_server.py >/dev/null 2>&1
+    fi
 fi
 
 # Register the talos-mcp sidecar (if present) as a *remote* MCP server --
@@ -46,18 +46,9 @@ fi
 # shell's filesystem/env. TALOS_MCP_URL is set by the HelmRelease only when
 # the sidecar container exists.
 if [ -n "${TALOS_MCP_URL}" ]; then
-    python3 - <<'PYEOF'
-import json, os
-p = "/home/claude/.claude/settings.json"
-with open(p) as f:
-    s = json.load(f)
-s.setdefault("mcpServers", {})["talos"] = {
-    "type": "sse",
-    "url": os.environ["TALOS_MCP_URL"],
-}
-with open(p, "w") as f:
-    json.dump(s, f, indent=2)
-PYEOF
+    if ! claude mcp get talos >/dev/null 2>&1; then
+        claude mcp add --transport sse --scope local talos "${TALOS_MCP_URL}" >/dev/null 2>&1
+    fi
 fi
 
 echo ""
