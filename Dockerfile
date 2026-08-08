@@ -26,7 +26,17 @@ RUN apt-get update && apt-get install -y \
 # every reconnect (see claude-session). history-limit matches ttyd's
 # client-side --client-option scrollback=5000 (entrypoint.sh) so reattaching
 # restores the same amount of visible history.
-RUN echo "set-option -g history-limit 5000" > /etc/tmux.conf
+#
+# default-terminal MUST stay xterm-256color, not tmux's own default
+# (tmux-256color): ttyd's pty already reports xterm-256color (matching
+# xterm.js), and that's the TERM Claude Code's TUI renders correctly under.
+# tmux otherwise overrides TERM to tmux-256color for the child process,
+# which Claude Code's box-drawing/layout doesn't handle -- confirmed live
+# 2026-08-08 (corrupted borders, missing box edges) against cc.jiahd.cc.
+RUN printf '%s\n' \
+      'set-option -g history-limit 5000' \
+      'set-option -g default-terminal "xterm-256color"' \
+      > /etc/tmux.conf
 
 # Network diagnostics toolkit — for remote-supporting client networks
 # (jg-cluster-template deployments) where CC needs to inventory LAN
