@@ -16,7 +16,17 @@ RUN apt-get update && apt-get install -y \
     libsecret-1-0 \
     gnome-keyring \
     python3 python3-pip \
+    tmux \
     && rm -rf /var/lib/apt/lists/*
+
+# tmux keeps `claude` alive across ttyd reconnects -- ttyd forks a brand-new
+# child process per WebSocket connection with no session persistence of its
+# own, so an idle-dropped connection (e.g. Envoy Gateway's default 5m stream
+# idle timeout) would otherwise kill and restart `claude` from scratch on
+# every reconnect (see claude-session). history-limit matches ttyd's
+# client-side --client-option scrollback=5000 (entrypoint.sh) so reattaching
+# restores the same amount of visible history.
+RUN echo "set-option -g history-limit 5000" > /etc/tmux.conf
 
 # Network diagnostics toolkit — for remote-supporting client networks
 # (jg-cluster-template deployments) where CC needs to inventory LAN

@@ -55,4 +55,8 @@ echo ""
 echo "✓ 歡迎，${CLAUDE_USER_ID}"
 echo ""
 
-exec claude
+# -A: attach to the "claude" tmux session if it already exists (a
+# reconnecting ttyd WebSocket after an idle disconnect) instead of forking
+# a new `claude` process on top of it. Session name is fixed since each pod
+# only ever runs one interactive user.
+exec tmux new-session -A -s claude -- claude
