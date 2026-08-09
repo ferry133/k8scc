@@ -133,8 +133,15 @@ RUN python3 /usr/local/share/ttyd/patch-ttyd-index.py \
     grep -q login-link-helper /usr/local/share/ttyd/index.html
 
 # Create non-root user and set correct ownership
+#
+# ~/.tmux.conf -> /etc/tmux.conf: the pod actually runs as uid 0 at deploy
+# time (NAS export permissions -- see defaultPodOptions in the
+# jg-cluster-template HelmRelease), but HOME is pinned to /home/claude via
+# pod env regardless, so tmux looks for its per-user config here too.
+# Symlinked rather than duplicated so the two settings above stay in sync.
 RUN useradd -m -u 1000 -s /bin/bash claude && \
     mkdir -p /home/claude/workspace /home/claude/.claude && \
+    ln -s /etc/tmux.conf /home/claude/.tmux.conf && \
     chown -R claude:claude /home/claude
 
 # Install Claude Code as claude user (native installer → ~/.local/bin/claude)
