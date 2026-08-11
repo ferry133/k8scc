@@ -9,8 +9,21 @@ this server exposes no mutating tools, by design and redundantly by the
 credential's own role.
 
 Start: python3 talos_mcp_server.py  (HTTP/SSE transport, binds 127.0.0.1 only)
-Requires: TALOSCONFIG (path to an os:reader-scoped talosconfig file),
-          TALOS_NODES (comma-separated node IPs for this cluster)
+
+Requires: TALOSCONFIG (path to an os:reader-scoped talosconfig file), plus
+          OMNI_SERVICE_ACCOUNT_KEY and OMNI_ENDPOINT — the talosconfig carries
+          no key material of its own, and talosctl's auth library reads those
+          two directly from the environment.
+
+Optional: TALOS_NODES (comma-separated node IPs). Rejects tool calls naming a
+          node outside the list. This is a nicer error message, NOT a security
+          boundary — the credential already resolves to exactly one cluster
+          server-side, so an unknown IP fails at Omni regardless. Left unset by
+          the jg-cluster-template pipeline on purpose: the list is hand-written
+          for Omni-provisioned clusters (they render `nodes: []`), so it goes
+          stale on node replacement and would then block diagnostics during the
+          very incident this sidecar exists for. Set it only where the node
+          addresses are genuinely fixed.
 """
 import os
 import subprocess
