@@ -144,6 +144,16 @@ RUN useradd -m -u 1000 -s /bin/bash claude && \
     ln -s /etc/tmux.conf /home/claude/.tmux.conf && \
     chown -R claude:claude /home/claude
 
+# debian:12-slim leaves LANG unset, i.e. the C locale. tmux reads LC_ALL /
+# LC_CTYPE / LANG to decide whether an attaching client can accept UTF-8, and
+# with all three unset it flags the client non-UTF-8 and replaces every
+# non-ASCII cell with "_" on its way out. Traditional Chinese — which the
+# talos-mcp tool descriptions and claude-session's own banner are written in —
+# therefore arrived at cc.jiahd.cc as rows of underscores (observed 2026-08-11,
+# `tmux list-clients` on the live ttyd client read utf8=0). C.UTF-8 is present
+# in this base image and needs no locales package.
+ENV LANG=C.UTF-8
+
 # Install Claude Code as claude user (native installer → ~/.local/bin/claude)
 USER claude
 ENV PATH="/home/claude/.local/bin:${PATH}"

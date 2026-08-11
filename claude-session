@@ -59,4 +59,10 @@ echo ""
 # reconnecting ttyd WebSocket after an idle disconnect) instead of forking
 # a new `claude` process on top of it. Session name is fixed since each pod
 # only ever runs one interactive user.
-exec tmux new-session -A -s claude -- claude
+# -u: force UTF-8 for this client rather than inferring it from the locale.
+# LANG=C.UTF-8 is baked into the image, but the flag is what makes the
+# behaviour independent of whether that env var actually survives ttyd's fork
+# or a deployment that overrides the container env — and getting it wrong is
+# silent, costing only mangled non-ASCII output (see the LANG comment in the
+# Dockerfile).
+exec tmux -u new-session -A -s claude -- claude
