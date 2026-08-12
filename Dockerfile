@@ -155,9 +155,16 @@ RUN useradd -m -u 1000 -s /bin/bash claude && \
 ENV LANG=C.UTF-8
 
 # Install Claude Code as claude user (native installer → ~/.local/bin/claude)
+# Pinned like the other tools above. With no argument install.sh resolves
+# "latest" at build time, which the GHA layer cache then freezes: two builds of
+# the same commit could ship different CLIs, and a rebuild would keep serving
+# the old one because this layer is a cache hit. An explicit version makes the
+# build reproducible and busts the cache exactly when this ARG is bumped.
+# install.sh takes [stable|latest|X.Y.Z] and passes it to `claude install`.
+ARG CLAUDE_CODE_VERSION=2.1.228
 USER claude
 ENV PATH="/home/claude/.local/bin:${PATH}"
-RUN curl -fsSL https://claude.ai/install.sh | bash
+RUN curl -fsSL https://claude.ai/install.sh | bash -s -- "${CLAUDE_CODE_VERSION}"
 
 USER root
 COPY memory_mcp_server.py /usr/local/bin/memory_mcp_server.py
