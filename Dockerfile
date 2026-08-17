@@ -1,4 +1,15 @@
-FROM debian:12-slim
+# Two targets are built from this file (see .github/workflows/build.yaml):
+#
+#   --target base     ghcr.io/ferry133/claude-code:<sha>          (unchanged)
+#   --target factory  ghcr.io/ferry133/claude-code:factory-<sha>
+#
+# `base` is the image existing consumers pin by short SHA; nothing may be
+# added to it on the factory's behalf. `factory` is `base` plus the
+# cluster-build toolchain and the Omni COSI watch, on its own tag, so a
+# factory change can never reach a running cluster that pinned a base tag.
+# Building with no --target would produce the factory image under the base's
+# tags, which is why the workflow names both explicitly.
+FROM debian:12-slim AS base
 
 LABEL org.opencontainers.image.source="https://github.com/ferry133/k8scc"
 LABEL org.opencontainers.image.description="Claude Code CLI with ttyd web terminal"
@@ -188,3 +199,201 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
     CMD curl -f http://localhost:7681/ || exit 1
 
 ENTRYPOINT ["/entrypoint.sh"]
+
+# ===========================================================================
+# factory variant
+# ===========================================================================
+#
+# base + the toolchain a cluster build shells out to + a long-lived Omni COSI
+# watch. Everything below lands only on the `factory-*` tags; the `base`
+# target above is untouched by it.
+
+# The watch is cross-compiled from the build host rather than built under
+# QEMU: the Omni client pulls in enough of Kubernetes and gRPC that an
+# emulated arm64 compile costs minutes per build. Pinned to the same Go
+# version github.com/siderolabs/omni/client@v1.10.3 requires (go >= 1.26.6),
+# so the toolchain can't silently drift under the module.
+FROM --platform=$BUILDPLATFORM golang:1.26.6-bookworm AS omni-watch-build
+
+WORKDIR /src
+
+COPY omni-machine-watch/go.mod omni-machine-watch/go.sum ./
+RUN go mod download
+
+COPY omni-machine-watch/ ./
+
+# Run the tests here, natively, so a regression in the watch fails the image
+# build instead of surfacing on a client's cluster. They drive an in-memory
+# COSI state and need no network or Omni instance.
+RUN go vet ./... && go test ./...
+
+ARG TARGETARCH
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} \
+      go build -trimpath -ldflags='-s -w' -o /out/omni-machine-watch .
+
+FROM base AS factory
+
+LABEL org.opencontainers.image.description="Claude Code CLI with ttyd web terminal, cluster-build toolchain and an Omni COSI machine watch"
+
+USER root
+
+# Fail the build on a broken download instead of installing an empty file:
+# the default /bin/sh (dash) has no pipefail, so `curl ... | tar` would
+# succeed on a 404 body.
+SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
+
+# Toolchain pins.
+#
+# These must track the `.mise.toml` of the repo a factory run drives -- that
+# file is the source of truth, and these are a copy of it. A drift shows up
+# as a rendering or schema error partway through a client's cluster build,
+# not as a clean failure at startup, so bump the two together.
+#
+# Pinned rather than resolved at build time for the same reason as
+# CLAUDE_CODE_VERSION (8228f58): "latest" gets frozen into the GHA layer
+# cache, so two builds of one commit can ship different tools and a rebuild
+# keeps serving the stale one.
+ARG OMNICTL_VERSION=v1.8.1
+ARG GH_VERSION=2.87.3
+ARG CLOUDFLARED_VERSION=2026.2.0
+ARG AGE_VERSION=v1.3.1
+ARG SOPS_VERSION=v3.12.1
+ARG CUE_VERSION=v0.15.4
+ARG TASK_VERSION=v3.48.0
+ARG HELM_VERSION=v4.1.1
+ARG HELMFILE_VERSION=1.3.2
+ARG TALHELPER_VERSION=v3.1.16
+ARG FLUX_VERSION=2.8.1
+ARG KUSTOMIZE_VERSION=v5.7.1
+ARG KUBECONFORM_VERSION=v0.7.0
+ARG YQ_VERSION=v4.52.4
+ARG JQ_VERSION=1.8.1
+ARG UV_VERSION=0.10.7
+ARG MAKEJINJA_VERSION=2.8.2
+
+# kubectl and talosctl already exist in `base`, pinned to the cluster that
+# hosts this pod. A factory run drives someone else's cluster, so these
+# override them with the driven repo's pins. Both deltas are inside the
+# supported skew either way (kubectl +/-1 minor; talosctl same minor), which
+# is why the base pin was left alone rather than moved to match.
+ARG FACTORY_KUBECTL_VERSION=v1.35.2
+ARG FACTORY_TALOSCTL_VERSION=v1.13.8
+
+# Single-file binaries.
+RUN ARCH=$(dpkg --print-architecture) && \
+    curl -fsSL -o /usr/local/bin/omnictl \
+      "https://github.com/siderolabs/omni/releases/download/${OMNICTL_VERSION}/omnictl-linux-${ARCH}" && \
+    curl -fsSL -o /usr/local/bin/cloudflared \
+      "https://github.com/cloudflare/cloudflared/releases/download/${CLOUDFLARED_VERSION}/cloudflared-linux-${ARCH}" && \
+    curl -fsSL -o /usr/local/bin/sops \
+      "https://github.com/getsops/sops/releases/download/${SOPS_VERSION}/sops-${SOPS_VERSION}.linux.${ARCH}" && \
+    curl -fsSL -o /usr/local/bin/yq \
+      "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_${ARCH}" && \
+    curl -fsSL -o /usr/local/bin/jq \
+      "https://github.com/jqlang/jq/releases/download/jq-${JQ_VERSION}/jq-linux-${ARCH}" && \
+    curl -fsSL -o /usr/local/bin/kubectl \
+      "https://dl.k8s.io/release/${FACTORY_KUBECTL_VERSION}/bin/linux/${ARCH}/kubectl" && \
+    curl -fsSL -o /usr/local/bin/talosctl \
+      "https://github.com/siderolabs/talos/releases/download/${FACTORY_TALOSCTL_VERSION}/talosctl-linux-${ARCH}" && \
+    chmod +x /usr/local/bin/omnictl /usr/local/bin/cloudflared /usr/local/bin/sops \
+             /usr/local/bin/yq /usr/local/bin/jq /usr/local/bin/kubectl /usr/local/bin/talosctl
+
+# Tarballs. Layouts differ per project, so each gets its own strip depth.
+RUN ARCH=$(dpkg --print-architecture) && \
+    curl -fsSL "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_${ARCH}.tar.gz" \
+      | tar -xz --strip-components=2 -C /usr/local/bin "gh_${GH_VERSION}_linux_${ARCH}/bin/gh" && \
+    curl -fsSL "https://github.com/FiloSottile/age/releases/download/${AGE_VERSION}/age-${AGE_VERSION}-linux-${ARCH}.tar.gz" \
+      | tar -xz --strip-components=1 -C /usr/local/bin age/age age/age-keygen && \
+    curl -fsSL "https://github.com/cue-lang/cue/releases/download/${CUE_VERSION}/cue_${CUE_VERSION}_linux_${ARCH}.tar.gz" \
+      | tar -xz -C /usr/local/bin cue && \
+    curl -fsSL "https://github.com/go-task/task/releases/download/${TASK_VERSION}/task_linux_${ARCH}.tar.gz" \
+      | tar -xz -C /usr/local/bin task && \
+    curl -fsSL "https://get.helm.sh/helm-${HELM_VERSION}-linux-${ARCH}.tar.gz" \
+      | tar -xz --strip-components=1 -C /usr/local/bin "linux-${ARCH}/helm" && \
+    curl -fsSL "https://github.com/helmfile/helmfile/releases/download/v${HELMFILE_VERSION}/helmfile_${HELMFILE_VERSION}_linux_${ARCH}.tar.gz" \
+      | tar -xz -C /usr/local/bin helmfile && \
+    curl -fsSL "https://github.com/budimanjojo/talhelper/releases/download/${TALHELPER_VERSION}/talhelper_linux_${ARCH}.tar.gz" \
+      | tar -xz -C /usr/local/bin talhelper && \
+    curl -fsSL "https://github.com/fluxcd/flux2/releases/download/v${FLUX_VERSION}/flux_${FLUX_VERSION}_linux_${ARCH}.tar.gz" \
+      | tar -xz -C /usr/local/bin flux && \
+    curl -fsSL "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2F${KUSTOMIZE_VERSION}/kustomize_${KUSTOMIZE_VERSION}_linux_${ARCH}.tar.gz" \
+      | tar -xz -C /usr/local/bin kustomize && \
+    curl -fsSL "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-${ARCH}.tar.gz" \
+      | tar -xz -C /usr/local/bin kubeconform && \
+    chmod +x /usr/local/bin/gh /usr/local/bin/age /usr/local/bin/age-keygen /usr/local/bin/cue \
+             /usr/local/bin/task /usr/local/bin/helm /usr/local/bin/helmfile /usr/local/bin/talhelper \
+             /usr/local/bin/flux /usr/local/bin/kustomize /usr/local/bin/kubeconform
+
+# makejinja needs Python >= 3.12 and debian:12 ships 3.11, so it cannot go
+# through the system pip3 the MCP servers use. uv installs it into its own
+# venv against a managed CPython it downloads -- which is also the Python
+# version the driven repo pins, so the renderer runs on the interpreter it
+# was pinned against rather than on whatever the base image happens to have.
+ARG UV_PYTHON_VERSION=3.14
+RUN ARCH=$(dpkg --print-architecture) && \
+    case "${ARCH}" in \
+      amd64) UV_TRIPLE="x86_64-unknown-linux-gnu" ;; \
+      arm64) UV_TRIPLE="aarch64-unknown-linux-gnu" ;; \
+      *) echo "Unsupported architecture: ${ARCH}" && exit 1 ;; \
+    esac && \
+    curl -fsSL "https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/uv-${UV_TRIPLE}.tar.gz" \
+      | tar -xz --strip-components=1 -C /usr/local/bin "uv-${UV_TRIPLE}/uv" "uv-${UV_TRIPLE}/uvx" && \
+    chmod +x /usr/local/bin/uv /usr/local/bin/uvx
+
+# UV_* are set for this layer only: pointing a non-root runtime user's uv at
+# /usr/local would just fail on write. The installed shims keep working
+# because they reference these paths absolutely.
+RUN UV_TOOL_BIN_DIR=/usr/local/bin \
+    UV_TOOL_DIR=/usr/local/share/uv/tools \
+    UV_PYTHON_INSTALL_DIR=/usr/local/share/uv/python \
+    uv tool install --python "${UV_PYTHON_VERSION}" "makejinja==${MAKEJINJA_VERSION}" && \
+    chmod -R a+rX /usr/local/share/uv
+
+# Long-lived COSI watch on MachineStatuses.omni.sidero.dev. Not started by
+# entrypoint.sh: it needs an Omni credential, and the terminal container must
+# not hold one (same split as the talos-mcp sidecar). Run it as its own
+# container with `command: ["/usr/local/bin/omni-machine-watch"]`, or from a
+# shell that has OMNI_ENDPOINT/OMNI_SERVICE_ACCOUNT_KEY in its environment.
+COPY --from=omni-watch-build /out/omni-machine-watch /usr/local/bin/omni-machine-watch
+
+# Every binary is exercised here rather than trusted, because a wrong-arch or
+# truncated download is otherwise invisible until a client's build reaches
+# that step. Under buildx this runs once per target platform, emulated, so it
+# also proves the arm64 binaries actually execute.
+RUN verify() { \
+      name="$1"; shift; \
+      if out=$("$@" 2>&1); then \
+        printf '%-16s %s\n' "$name" "$(printf '%s' "$out" | head -1)"; \
+      else \
+        printf '%-16s FAILED: %s\n' "$name" "$out"; \
+        return 1; \
+      fi; \
+    }; \
+    verify omnictl    omnictl --version && \
+    verify gh         gh --version && \
+    verify cloudflared cloudflared --version && \
+    verify age        age --version && \
+    verify age-keygen age-keygen --version && \
+    verify sops       bash -c 'sops --version --disable-version-check || sops --version' && \
+    verify cue        cue version && \
+    verify makejinja  makejinja --version && \
+    verify task       task --version && \
+    verify helm       helm version --short && \
+    verify helmfile   bash -c 'helmfile version || helmfile --version' && \
+    verify talhelper  bash -c 'talhelper --version || talhelper version' && \
+    verify flux       flux --version && \
+    verify kustomize  kustomize version && \
+    verify kubeconform kubeconform -v && \
+    verify yq         yq --version && \
+    verify jq         jq --version && \
+    verify uv         uv --version && \
+    verify kubectl    kubectl version --client=true && \
+    verify talosctl   talosctl version --client && \
+    verify omni-machine-watch \
+      bash -c 'out=$(omni-machine-watch 2>&1 || true); \
+               case "$out" in *"no endpoint"*|*OMNI_SERVICE_ACCOUNT_KEY*) printf %s "$out" ;; \
+                              *) printf "unexpected: %s" "$out"; exit 1 ;; esac'
+
+SHELL ["/bin/sh", "-c"]
+
+USER claude

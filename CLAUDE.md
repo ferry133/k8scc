@@ -85,6 +85,40 @@ A second container, `talos-mcp` (same image, `command` override — see below), 
 - **Registration**: `claude-session` registers it in `settings.json` as a remote MCP server (`"type": "sse"`) when `TALOS_MCP_URL` is set — a different registration shape than `memory`'s local stdio entry, since a remote/sidecar server needs a URL, not a `command`/`args` pair to spawn.
 - **Tool surface** (read-only by construction; no mutating tool exists in this file, full stop): `get_node_status`, `get_etcd_members`, `get_link_status`, `get_service_logs` — each shells out to the bundled `talosctl` binary.
 
+## Factory Variant (`factory-*` tags)
+
+The `Dockerfile` builds **two** targets. Building it with no `--target` gives you the factory image, so both the workflow and any local build must name one.
+
+| Target | Tags | Contents |
+|--------|------|----------|
+| `base` | `<short-sha>`, `latest` | What every existing consumer pins. Unchanged by the factory work. |
+| `factory` | `factory-<short-sha>`, `factory-latest` | `base` + cluster-build toolchain + `omni-machine-watch` |
+
+Same GHCR repository (`ghcr.io/ferry133/claude-code`), not a sibling package: a new package would be created private and bound to `k8scc`, so every consumer would need a pull secret and a visibility flip before it could pull anything. The tag prefix carries the distinction instead. Consumers pin short SHAs (not `latest`), so `factory-<sha>` can never collide with a tag someone is already pulling.
+
+### Toolchain
+
+Beyond `base`, the factory target adds `omnictl` `gh` `cloudflared` `age`/`age-keygen` `sops` `cue` `makejinja` `task` `helm` `helmfile` `talhelper` `flux` `kustomize` `kubeconform` `yq` `jq` `uv`, and re-pins `kubectl`/`talosctl` to the driven repo's versions rather than the hosting cluster's.
+
+Two rules govern the pins:
+
+- **They are a copy of the driven repo's `.mise.toml`, and copies drift.** Bump them together. A mismatch surfaces as a cue schema or makejinja rendering error partway through a client's cluster build, not as a clean startup failure.
+- **`helm` `talhelper` `flux` `kustomize` `kubeconform` `yq` `jq` are not in the issue's list.** They are there because the named tools shell out to them — `task configure`/`bootstrap` targets in the driven repo reference `talhelper` 16×, `sops` 17×, `yq`/`kubeconform`/`flux` 8× each. Shipping `task` without them delivers a tool that cannot run.
+
+`makejinja` cannot use the system `pip3`: it requires Python ≥ 3.12 and `debian:12` ships 3.11. It is installed with `uv` against a managed CPython matching the driven repo's own Python pin.
+
+Every binary is exercised (`--version`) in the final build layer, per target platform under emulation, so a wrong-arch or truncated download fails the build instead of a client's cluster build.
+
+### `omni-machine-watch`
+
+A long-lived Go process holding a COSI watch (`safe.StateWatchKind` on `MachineStatuses.omni.sidero.dev`) — `omnictl` stays for cluster-creation calls but cannot serve this, as `omnictl get --watch` prints a human table and dies with the command. Source in `omni-machine-watch/`, built against `github.com/siderolabs/omni/client`.
+
+- **Output**: one JSON object per line on stdout (`created`/`updated`/`destroyed`/`bootstrapped`/`reconnect`/`stopped`), operational noise on stderr. `bootstrapped` marks the boundary between existing contents and live changes — that is what a "wait until the machine appears" caller keys on.
+- **Lifetime is the caller's**: SIGINT/SIGTERM cancels the context, which tears down the subscription and exits 0.
+- **Reconnects with backoff.** The example in the Omni source returns on `state.Errored`; a factory run outlives its watch being dropped by a restart or LB timeout, so this re-establishes and re-bootstraps instead of going silently quiet.
+- **Not started by `entrypoint.sh`.** It needs an Omni credential and the terminal container must not hold one — the same split as the `talos-mcp` sidecar. Run it as its own container (`command: ["/usr/local/bin/omni-machine-watch"]`) or from a shell that already has the credential in its environment.
+- **Testable without an Omni**: `stream()` takes a `state.CoreState`, so `main_test.go` drives it against an in-memory COSI state. This is not decoration — a live watch on an idle instance emits no changes, so "no `updated` events" there cannot distinguish a quiet cluster from a broken post-bootstrap stream. `go test` runs in the builder stage, so a regression fails the image build.
+
 ## Runtime Configuration
 
 | Env Var | Description |
@@ -97,6 +131,7 @@ A second container, `talos-mcp` (same image, `command` override — see below), 
 | `TALOSCONFIG` (talos-mcp only) | Path to the mounted talosconfig (`/etc/talos-mcp/talosconfig`). Routing metadata only — see `OMNI_SERVICE_ACCOUNT_KEY` |
 | `OMNI_SERVICE_ACCOUNT_KEY` (talos-mcp only) | The Reader-role Omni SA's actual bearer credential; read straight from env by talosctl's auth library |
 | `OMNI_ENDPOINT` (talos-mcp only) | Direct gRPC endpoint for the client's Omni. Must bypass any Cloudflare Tunnel (gRPC trailers) |
+| `OMNI_ENDPOINT`, `OMNI_SERVICE_ACCOUNT_KEY` (omni-machine-watch) | Same pair as talos-mcp, same constraint on the endpoint being direct gRPC. The key is read from env only and deliberately has no flag — flags land in `ps` output |
 | `TALOS_NODES` (talos-mcp only) | **Optional, unset by default.** Comma-separated node IPs; tool calls naming anything else are refused. A friendlier error, not a security boundary — the credential already resolves to one cluster server-side. Deliberately not wired into the jg-cluster-template pipeline: Omni clusters render `nodes: []`, so the list would be hand-written, and a stale entry blocks diagnostics exactly when they are needed |
 
 ## Persistent Memory

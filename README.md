@@ -34,6 +34,7 @@ claude-session (bash script)
 | `claude-session` | Shell session init: resolves user identity, writes settings, execs `claude` |
 | `memory_mcp_server.py` | MCP server: PostgreSQL-backed `remember` / `recall` / `forget` tools |
 | `auth0_login.py` | Auth0 Device Flow helper (optional; not used by default) |
+| `omni-machine-watch/` | Go source for the factory variant's long-lived Omni COSI machine watch |
 
 ### Ports
 
@@ -95,8 +96,17 @@ GitHub Actions workflow: [`.github/workflows/build.yaml`](.github/workflows/buil
 
 - **Triggers**: push to `main`, `workflow_dispatch`
 - **Platforms**: `linux/amd64`, `linux/arm64`
-- **Tags**: `latest` (main branch) + short SHA
 - **Registry**: GitHub Container Registry (`ghcr.io/ferry133/claude-code`)
+- **Tags**: two targets are built from the one Dockerfile
+
+  | Target | Tags |
+  |--------|------|
+  | `base` | short SHA + `latest` (main branch) |
+  | `factory` | `factory-<short SHA>` + `factory-latest` (main branch) |
+
+  A build with no `--target` produces the factory image, because it is the
+  last stage — both build steps name their target explicitly so the factory
+  variant can never be published under the base tags.
 
 ### Required secret
 
@@ -132,6 +142,33 @@ volumes:
     persistentVolumeClaim:
       claimName: claude-data
 ```
+
+---
+
+## Factory variant
+
+`ghcr.io/ferry133/claude-code:factory-<short SHA>` is the base image plus the
+toolchain a cluster build shells out to (`omnictl` `gh` `cloudflared` `age`
+`sops` `cue` `makejinja` `task` `helm` `helmfile` `talhelper` `flux`
+`kustomize` `kubeconform` `yq` `jq` `uv`) and `omni-machine-watch`, a
+long-lived process holding a COSI watch on `MachineStatuses.omni.sidero.dev`.
+
+```bash
+# one JSON object per line on stdout; SIGTERM ends it cleanly
+OMNI_ENDPOINT=grpc://omni.example:8080 \
+OMNI_SERVICE_ACCOUNT_KEY=... \
+  omni-machine-watch
+```
+
+```
+{"ts":"...","event":"watching","message":"grpc://omni.example:8080"}
+{"ts":"...","event":"created","id":"<uuid>","connected":true,"maintenance":false,"cluster":"…","role":"CONTROL_PLANE","talos_version":"v1.13.8"}
+{"ts":"...","event":"bootstrapped"}
+```
+
+The credential is read from the environment and never baked into the image.
+See [`CLAUDE.md`](CLAUDE.md) for the tag scheme, the pinning rules and why the
+watch is not started by `entrypoint.sh`.
 
 ---
 

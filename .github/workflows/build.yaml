@@ -34,7 +34,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GHCR_TOKEN }}
 
-      - name: Extract Docker metadata
+      - name: Extract Docker metadata (base)
         id: meta
         uses: docker/metadata-action@v5
         with:
@@ -43,13 +43,42 @@ jobs:
             type=sha,prefix=,format=short
             type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
 
+      # target: base is load-bearing. The Dockerfile's last stage is the
+      # factory variant, so a build with no target would publish that under
+      # the tags existing consumers pin.
       - name: Build and push Docker image
         uses: docker/build-push-action@v6
         with:
           context: .
+          target: base
           platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Extract Docker metadata (factory variant)
+        id: meta-factory
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=sha,prefix=factory-,format=short
+            type=raw,value=factory-latest,enable=${{ github.ref == 'refs/heads/main' }}
+
+      # Same job, after the base build, deliberately: the factory stage is
+      # FROM base, so running it here reuses the layers the step above just
+      # built. A parallel matrix job would rebuild every base layer under
+      # QEMU for no gain.
+      - name: Build and push factory variant
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: factory
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta-factory.outputs.tags }}
+          labels: ${{ steps.meta-factory.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
