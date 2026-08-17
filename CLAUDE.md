@@ -107,7 +107,9 @@ Two rules govern the pins:
 
 `makejinja` cannot use the system `pip3`: it requires Python ≥ 3.12 and `debian:12` ships 3.11. It is installed with `uv` against a managed CPython matching the driven repo's own Python pin.
 
-Every binary is exercised (`--version`) in the final build layer, per target platform under emulation, so a wrong-arch or truncated download fails the build instead of a client's cluster build.
+Every binary is exercised in the final build layer, per target platform under emulation, so a wrong-arch or truncated download fails the build instead of a client's cluster build.
+
+One exception, because it bites: **`makejinja --version` reports the wrong number.** `cli.py` uses `@click.version_option(None)`, whose auto-detection resolves to the wrong distribution and prints rich-click's version (`1.9.8`) for makejinja `2.8.2`. The real version is asserted at install time from the distribution metadata and fails the build on a mismatch; the final layer only checks the entry point runs. Do not "fix" a future version bump by trusting that flag.
 
 ### `omni-machine-watch`
 

@@ -343,11 +343,22 @@ RUN ARCH=$(dpkg --print-architecture) && \
 # UV_* are set for this layer only: pointing a non-root runtime user's uv at
 # /usr/local would just fail on write. The installed shims keep working
 # because they reference these paths absolutely.
+#
+# The version is asserted here, from the installed distribution's own
+# metadata, because `makejinja --version` cannot be trusted: its cli.py uses
+# @click.version_option(None), whose auto-detection resolves to the wrong
+# distribution and prints rich-click's version (1.9.8 against makejinja
+# 2.8.2). A probe that reports the wrong number is worse than no probe --
+# this one fails the build instead.
 RUN UV_TOOL_BIN_DIR=/usr/local/bin \
     UV_TOOL_DIR=/usr/local/share/uv/tools \
     UV_PYTHON_INSTALL_DIR=/usr/local/share/uv/python \
     uv tool install --python "${UV_PYTHON_VERSION}" "makejinja==${MAKEJINJA_VERSION}" && \
-    chmod -R a+rX /usr/local/share/uv
+    chmod -R a+rX /usr/local/share/uv && \
+    installed=$(/usr/local/share/uv/tools/makejinja/bin/python \
+      -c 'from importlib.metadata import version; print(version("makejinja"))') && \
+    echo "makejinja installed: ${installed} (expected ${MAKEJINJA_VERSION})" && \
+    [ "${installed}" = "${MAKEJINJA_VERSION}" ]
 
 # Long-lived COSI watch on MachineStatuses.omni.sidero.dev. Not started by
 # entrypoint.sh: it needs an Omni credential, and the terminal container must
@@ -360,10 +371,15 @@ COPY --from=omni-watch-build /out/omni-machine-watch /usr/local/bin/omni-machine
 # truncated download is otherwise invisible until a client's build reaches
 # that step. Under buildx this runs once per target platform, emulated, so it
 # also proves the arm64 binaries actually execute.
+#
+# The reported line is the first *non-empty* one: `helmfile version` leads
+# with a blank line, and `head -1` reported it as having printed nothing,
+# which reads exactly like a tool that silently produced no output.
 RUN verify() { \
       name="$1"; shift; \
       if out=$("$@" 2>&1); then \
-        printf '%-16s %s\n' "$name" "$(printf '%s' "$out" | head -1)"; \
+        first=$(printf '%s\n' "$out" | grep -m1 . || true); \
+        printf '%-16s %s\n' "$name" "$first"; \
       else \
         printf '%-16s FAILED: %s\n' "$name" "$out"; \
         return 1; \
@@ -376,7 +392,7 @@ RUN verify() { \
     verify age-keygen age-keygen --version && \
     verify sops       bash -c 'sops --version --disable-version-check || sops --version' && \
     verify cue        cue version && \
-    verify makejinja  makejinja --version && \
+    verify makejinja  bash -c 'makejinja --help >/dev/null && echo "entry point ok; version asserted at install"' && \
     verify task       task --version && \
     verify helm       helm version --short && \
     verify helmfile   bash -c 'helmfile version || helmfile --version' && \
@@ -388,7 +404,7 @@ RUN verify() { \
     verify jq         jq --version && \
     verify uv         uv --version && \
     verify kubectl    kubectl version --client=true && \
-    verify talosctl   talosctl version --client && \
+    verify talosctl   bash -c 'talosctl version --client | tr "\n" " "' && \
     verify omni-machine-watch \
       bash -c 'out=$(omni-machine-watch 2>&1 || true); \
                case "$out" in *"no endpoint"*|*OMNI_SERVICE_ACCOUNT_KEY*) printf %s "$out" ;; \
