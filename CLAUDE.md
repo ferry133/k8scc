@@ -107,9 +107,26 @@ Two rules govern the pins:
 
 `makejinja` cannot use the system `pip3`: it requires Python ≥ 3.12 and `debian:12` ships 3.11. It is installed with `uv` against a managed CPython matching the driven repo's own Python pin.
 
-Every binary is exercised in the final build layer, per target platform under emulation, so a wrong-arch or truncated download fails the build instead of a client's cluster build.
+Every binary is made to **agree with the ARG that installed it** in the final build layer, per target platform under emulation. Printing a tool's version and failing only on a nonzero exit reports *"the install did not error"*, which reads identically to *"the requested version is present"* and is not the same claim — a check that cannot fail in the direction you care about is indistinguishable from one that passed.
 
-One exception, because it bites: **`makejinja --version` reports the wrong number.** `cli.py` uses `@click.version_option(None)`, whose auto-detection resolves to the wrong distribution and prints rich-click's version (`1.9.8`) for makejinja `2.8.2`. The real version is asserted at install time from the distribution metadata and fails the build on a mismatch; the final layer only checks the entry point runs. Do not "fix" a future version bump by trusting that flag.
+Matching translates `.` to `_` on both sides before `grep -wF`, so dots count as word characters. Without that, `grep -w` treats `.` as a boundary and a truncated pin like `1.35` matches inside `1.35.2` — the build then passes on a version nobody asked for.
+
+`test/assert-controls.sh` drives that function — **extracted from the Dockerfile, not copied**, so it cannot keep passing after the original changes — against outputs recorded from real builds *and* against pins that must be rejected (moved pin, truncated pin, nonzero exit, missing binary). It runs in CI before anything is built.
+
+The confirmed versions are written to **`/usr/local/share/factory-toolchain.json`** inside the image. Anything downstream that needs to know what is installed should read that rather than infer it from this Dockerfile or from an image label — it is the record of an execution *inside* the image.
+
+One exception, because it bites: **`makejinja --version` reports the wrong number.** `cli.py` uses `@click.version_option(None)`, whose auto-detection resolves to the wrong distribution and prints rich-click's version (`1.9.8`) for makejinja `2.8.2`. It is asserted from the installed distribution's metadata instead, both at install time and in the final layer. Do not "fix" a future version bump by trusting that flag.
+
+`omni-machine-watch -version` reports the Omni client module it was **linked against**, read from the embedded build info, and the expected value is written by the builder stage from `go list -m` — so no copy of that version exists to drift.
+
+### Published tags are not digest-stable across rebuilds
+
+Rebuilding the same commit produces a **different manifest digest**, and the tag moves to it. Measured on 2026-08-18, when `170830f` was rebuilt on `main` after having been built on a branch:
+
+- `docker/metadata-action` stamps `org.opencontainers.image.created` (a fresh timestamp every run) and `org.opencontainers.image.version` (the primary tag, which differs between a branch build and a `main` build). That alone changes the config blob, hence the digest — **even when every layer is identical**.
+- GitHub Actions cache is branch-scoped, so a `main` build cannot read a feature branch's cache. Base layers hit `main`'s own cache and stayed byte-identical; the six factory layers were rebuilt and their digests changed.
+
+**Consequence for consumers who pin `tag@sha256:…`:** the old manifest remains pullable by digest but becomes *untagged*, and untagged versions are what GHCR retention policies delete. A scan or acceptance test performed against a digest does not automatically cover what the tag serves after the next build of the same commit.
 
 ### `omni-machine-watch`
 
@@ -119,6 +136,7 @@ A long-lived Go process holding a COSI watch (`safe.StateWatchKind` on `MachineS
 - **Lifetime is the caller's**: SIGINT/SIGTERM cancels the context, which tears down the subscription and exits 0.
 - **Reconnects with backoff.** The example in the Omni source returns on `state.Errored`; a factory run outlives its watch being dropped by a restart or LB timeout, so this re-establishes and re-bootstraps instead of going silently quiet.
 - **Not started by `entrypoint.sh`.** It needs an Omni credential and the terminal container must not hold one — the same split as the `talos-mcp` sidecar. Run it as its own container (`command: ["/usr/local/bin/omni-machine-watch"]`) or from a shell that already has the credential in its environment.
+- **`go build` in `omni-machine-watch/` drops a ~100MB binary next to the source.** Nothing in the build needs it there — the builder stage writes to `/out` — and this repo carries no ignore rule for it (`.gitignore` is excluded globally on the author's machine). Build to a path outside the tree, or delete it before staging.
 - **Testable without an Omni**: `stream()` takes a `state.CoreState`, so `main_test.go` drives it against an in-memory COSI state. This is not decoration — a live watch on an idle instance emits no changes, so "no `updated` events" there cannot distinguish a quiet cluster from a broken post-bootstrap stream. `go test` runs in the builder stage, so a regression fails the image build.
 
 ## Runtime Configuration

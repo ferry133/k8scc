@@ -21,6 +21,14 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # The version assertions in the Dockerfile are what make the build
+      # claim "the requested version is present" rather than "the install
+      # did not error". Their positive AND negative controls run here, before
+      # anything is built, so a check that has stopped being able to fail is
+      # caught in this repo rather than by someone reading the image later.
+      - name: Check the version-assertion controls
+        run: test/assert-controls.sh
+
       - name: Set up QEMU (multi-arch)
         uses: docker/setup-qemu-action@v3
 

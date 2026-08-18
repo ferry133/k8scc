@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"runtime/debug"
+	"strings"
 	"testing"
 	"time"
 
@@ -154,5 +156,33 @@ func next(t *testing.T, events <-chan event) event {
 		t.Fatal("timed out waiting for an event")
 
 		return event{}
+	}
+}
+
+// TestVersionStringReportsLinkedOmniClient guards the -version flag the image
+// build asserts against. It reads the module version out of the embedded
+// build info, so a stale or mismatched client cannot be reported as the
+// pinned one -- which is the only reason to have the flag at all.
+func TestVersionStringReportsLinkedOmniClient(t *testing.T) {
+	got := versionString(debug.ReadBuildInfo())
+
+	if !strings.Contains(got, omniClientModule) {
+		t.Fatalf("version string does not name the Omni client module: %q", got)
+	}
+
+	// A test binary that reported "unknown" would still contain the module
+	// path, so the version itself has to be checked separately.
+	if strings.Contains(got, omniClientModule+" unknown") {
+		t.Fatalf("Omni client version not resolved from build info: %q", got)
+	}
+
+	if !strings.Contains(got, omniClientModule+" v") {
+		t.Fatalf("Omni client version is not a semver-looking string: %q", got)
+	}
+}
+
+func TestVersionStringWithoutBuildInfo(t *testing.T) {
+	if got := versionString(nil, false); !strings.Contains(got, "unavailable") {
+		t.Fatalf("expected an explicit unavailable marker, got %q", got)
 	}
 }

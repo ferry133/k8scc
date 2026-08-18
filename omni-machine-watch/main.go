@@ -22,6 +22,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"runtime/debug"
 	"syscall"
 	"time"
 
@@ -31,6 +32,11 @@ import (
 	"github.com/siderolabs/omni/client/pkg/client"
 	"github.com/siderolabs/omni/client/pkg/omni/resources/omni"
 )
+
+// omniClientModule is the module whose COSI client this binary is built
+// against. Reported by -version from the embedded build info rather than
+// from a constant, so the number cannot drift from what was linked in.
+const omniClientModule = "github.com/siderolabs/omni/client"
 
 // event is one line of the output stream. Fields are omitempty so a
 // destroyed/lifecycle event stays readable, but connected/maintenance are
@@ -75,7 +81,14 @@ func main() {
 		"emit the current contents of the kind before streaming further changes")
 	retryMin := flag.Duration("retry-min", time.Second, "initial reconnect backoff")
 	retryMax := flag.Duration("retry-max", time.Minute, "maximum reconnect backoff")
+	showVersion := flag.Bool("version", false, "print the build's Omni client and Go versions, then exit")
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Println(versionString(debug.ReadBuildInfo()))
+
+		return
+	}
 
 	if *endpoint == "" {
 		fmt.Fprintln(os.Stderr, "omni-machine-watch: no endpoint: set OMNI_ENDPOINT or pass -endpoint")
@@ -250,6 +263,33 @@ func eventName(t state.EventType) string {
 	default:
 		return "unknown"
 	}
+}
+
+// versionString reports what this binary was actually linked against. Taking
+// it from the build info rather than a build flag means it cannot disagree
+// with the module that was compiled in, which is the whole point of a
+// version probe.
+func versionString(bi *debug.BuildInfo, ok bool) string {
+	if !ok || bi == nil {
+		return "omni-machine-watch (build info unavailable)"
+	}
+
+	client := "unknown"
+
+	for _, dep := range bi.Deps {
+		if dep.Path != omniClientModule {
+			continue
+		}
+
+		client = dep.Version
+		if dep.Replace != nil {
+			client = dep.Replace.Version
+		}
+
+		break
+	}
+
+	return fmt.Sprintf("omni-machine-watch (%s %s, %s)", omniClientModule, client, bi.GoVersion)
 }
 
 func errString(err error) string {

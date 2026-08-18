@@ -229,7 +229,8 @@ RUN go vet ./... && go test ./...
 
 ARG TARGETARCH
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} \
-      go build -trimpath -ldflags='-s -w' -o /out/omni-machine-watch .
+      go build -trimpath -ldflags='-s -w' -o /out/omni-machine-watch . && \
+    go list -m -f '{{.Version}}' github.com/siderolabs/omni/client > /out/omni-client-version
 
 FROM base AS factory
 
@@ -367,48 +368,88 @@ RUN UV_TOOL_BIN_DIR=/usr/local/bin \
 # shell that has OMNI_ENDPOINT/OMNI_SERVICE_ACCOUNT_KEY in its environment.
 COPY --from=omni-watch-build /out/omni-machine-watch /usr/local/bin/omni-machine-watch
 
-# Every binary is exercised here rather than trusted, because a wrong-arch or
-# truncated download is otherwise invisible until a client's build reaches
-# that step. Under buildx this runs once per target platform, emulated, so it
-# also proves the arm64 binaries actually execute.
+# Every added binary is made to AGREE with the ARG that installed it, not
+# merely to run. Printing whatever a tool says and failing only on a nonzero
+# exit reports "the install command did not error" -- which reads identically
+# to "the requested version is present" and is not the same claim. A check
+# that cannot fail in the direction you care about is indistinguishable from
+# one that passed.
 #
-# The reported line is the first *non-empty* one: `helmfile version` leads
-# with a blank line, and `head -1` reported it as having printed nothing,
-# which reads exactly like a tool that silently produced no output.
-RUN verify() { \
-      name="$1"; shift; \
-      if out=$("$@" 2>&1); then \
-        first=$(printf '%s\n' "$out" | grep -m1 . || true); \
-        printf '%-16s %s\n' "$name" "$first"; \
+# Each expected string below was checked against that tool's real output in
+# an earlier build of this file, so a mismatch means the pin moved, not that
+# the probe is guessing. Matching is word-boundaried (grep -wF, with and
+# without a leading v). Dots are translated to underscores on both sides
+# first, so that they count as word characters: without that, grep -w treats
+# "." as a boundary and a truncated pin like 1.35 matches inside 1.35.2 --
+# a check that passes on a version nobody asked for.
+#
+# Runs once per target platform under emulation, so it also proves the arm64
+# binaries execute.
+#
+# makejinja is the one documented exception -- see the install layer above.
+COPY --from=omni-watch-build /out/omni-client-version /usr/local/share/omni-client-version
+
+RUN manifest=/usr/local/share/factory-toolchain.json; \
+    records=$(mktemp); \
+    assert() { \
+      name="$1"; want="${2#v}"; shift 2; \
+      rc=0; out=$("$@" 2>&1) || rc=$?; \
+      if [ "$rc" -ne 0 ]; then \
+        printf '%-18s FAILED (exit %s): %s\n' "$name" "$rc" "$out"; \
+        return 1; \
+      fi; \
+      line=$(printf '%s\n' "$out" | grep -m1 . || true); \
+      u=$(printf '%s' "$out" | tr . _); w=$(printf '%s' "$want" | tr . _); \
+      if printf '%s' "$u" | grep -qwF "$w" || printf '%s' "$u" | grep -qwF "v$w"; then \
+        printf '%-18s %s\n' "$name" "$line"; \
+        printf '%s\t%s\n' "$name" "$want" >> "$records"; \
       else \
-        printf '%-16s FAILED: %s\n' "$name" "$out"; \
+        printf '%-18s FAILED: expected %s, got: %s\n' "$name" "$want" "$line"; \
         return 1; \
       fi; \
     }; \
-    verify omnictl    omnictl --version && \
-    verify gh         gh --version && \
-    verify cloudflared cloudflared --version && \
-    verify age        age --version && \
-    verify age-keygen age-keygen --version && \
-    verify sops       bash -c 'sops --version --disable-version-check || sops --version' && \
-    verify cue        cue version && \
-    verify makejinja  bash -c 'makejinja --help >/dev/null && echo "entry point ok; version asserted at install"' && \
-    verify task       task --version && \
-    verify helm       helm version --short && \
-    verify helmfile   bash -c 'helmfile version || helmfile --version' && \
-    verify talhelper  bash -c 'talhelper --version || talhelper version' && \
-    verify flux       flux --version && \
-    verify kustomize  kustomize version && \
-    verify kubeconform kubeconform -v && \
-    verify yq         yq --version && \
-    verify jq         jq --version && \
-    verify uv         uv --version && \
-    verify kubectl    kubectl version --client=true && \
-    verify talosctl   bash -c 'talosctl version --client | tr "\n" " "' && \
-    verify omni-machine-watch \
+    smoke() { \
+      name="$1"; shift; \
+      rc=0; out=$("$@" 2>&1) || rc=$?; \
+      if [ "$rc" -ne 0 ]; then \
+        printf '%-18s FAILED (exit %s): %s\n' "$name" "$rc" "$out"; \
+        return 1; \
+      fi; \
+      printf '%-18s %s\n' "$name" "$(printf '%s\n' "$out" | grep -m1 . || true)"; \
+    }; \
+    assert omnictl     "${OMNICTL_VERSION}"           omnictl --version && \
+    assert gh          "${GH_VERSION}"                gh --version && \
+    assert cloudflared "${CLOUDFLARED_VERSION}"       cloudflared --version && \
+    assert age         "${AGE_VERSION}"               age --version && \
+    assert age-keygen  "${AGE_VERSION}"               age-keygen --version && \
+    assert sops        "${SOPS_VERSION}"              bash -c 'sops --version --disable-version-check || sops --version' && \
+    assert cue         "${CUE_VERSION}"               cue version && \
+    assert task        "${TASK_VERSION}"              task --version && \
+    assert helm        "${HELM_VERSION}"              helm version --short && \
+    assert helmfile    "${HELMFILE_VERSION}"          helmfile version && \
+    assert talhelper   "${TALHELPER_VERSION}"         talhelper --version && \
+    assert flux        "${FLUX_VERSION}"              flux --version && \
+    assert kustomize   "${KUSTOMIZE_VERSION}"         kustomize version && \
+    assert kubeconform "${KUBECONFORM_VERSION}"       kubeconform -v && \
+    assert yq          "${YQ_VERSION}"                yq --version && \
+    assert jq          "${JQ_VERSION}"                jq --version && \
+    assert uv          "${UV_VERSION}"                uv --version && \
+    assert kubectl     "${FACTORY_KUBECTL_VERSION}"   kubectl version --client=true && \
+    assert talosctl    "${FACTORY_TALOSCTL_VERSION}"  bash -c 'talosctl version --client | tr "\n" " "' && \
+    assert omni-client "$(cat /usr/local/share/omni-client-version)" omni-machine-watch -version && \
+    assert makejinja   "${MAKEJINJA_VERSION}" \
+      /usr/local/share/uv/tools/makejinja/bin/python \
+        -c 'from importlib.metadata import version; print(version("makejinja"))' && \
+    smoke makejinja-cli bash -c 'makejinja --help >/dev/null && echo "entry point ok"' && \
+    smoke watch-guard \
       bash -c 'out=$(omni-machine-watch 2>&1 || true); \
                case "$out" in *"no endpoint"*|*OMNI_SERVICE_ACCOUNT_KEY*) printf %s "$out" ;; \
-                              *) printf "unexpected: %s" "$out"; exit 1 ;; esac'
+                              *) printf "unexpected: %s" "$out"; exit 1 ;; esac' && \
+    python3 -c 'import json,sys; print(json.dumps(dict(l.split(chr(9)) for l in sys.stdin.read().splitlines()), indent=2, sort_keys=True))' \
+      < "$records" > "$manifest" && \
+    rm -f "$records" && \
+    chmod 0444 "$manifest" && \
+    echo "--- $manifest ---" && cat "$manifest"
 
 SHELL ["/bin/sh", "-c"]
 
