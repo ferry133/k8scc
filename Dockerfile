@@ -172,7 +172,7 @@ ENV LANG=C.UTF-8
 # the old one because this layer is a cache hit. An explicit version makes the
 # build reproducible and busts the cache exactly when this ARG is bumped.
 # install.sh takes [stable|latest|X.Y.Z] and passes it to `claude install`.
-ARG CLAUDE_CODE_VERSION=2.1.228
+ARG CLAUDE_CODE_VERSION=2.1.261
 USER claude
 ENV PATH="/home/claude/.local/bin:${PATH}"
 RUN curl -fsSL https://claude.ai/install.sh | bash -s -- "${CLAUDE_CODE_VERSION}"
