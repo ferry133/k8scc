@@ -30,13 +30,21 @@ fi
 # exits 0 if already registered -- idempotent across repeat ttyd connections
 # to the same long-lived pod.
 
-# Inject MCP memory server if DATABASE_URL is configured
+# Inject MCP memory server if DATABASE_URL is configured.
+# The server name must come BEFORE the -e flags: -e is variadic
+# (`-e <env...>`), so it eats every following bare word and a trailing
+# name is rejected as a malformed KEY=value (confirmed live 2026-09-06,
+# CLI 2.1.228). Add errors go to mcp-add.log and flag the terminal --
+# a swallowed failure here reads identically to success.
 if [ -n "${DATABASE_URL}" ]; then
     if ! claude mcp get memory >/dev/null 2>&1; then
-        claude mcp add --scope local \
+        if ! claude mcp add --scope local memory \
             -e DATABASE_URL="${DATABASE_URL}" \
             -e CLAUDE_USER_ID="${CLAUDE_USER_ID}" \
-            memory -- python3 /usr/local/bin/memory_mcp_server.py >/dev/null 2>&1
+            -- python3 /usr/local/bin/memory_mcp_server.py \
+            >>/home/claude/.claude/mcp-add.log 2>&1; then
+            echo "⚠ claude mcp add memory 失敗——見 ~/.claude/mcp-add.log" >&2
+        fi
     fi
 fi
 
@@ -47,7 +55,10 @@ fi
 # the sidecar container exists.
 if [ -n "${TALOS_MCP_URL}" ]; then
     if ! claude mcp get talos >/dev/null 2>&1; then
-        claude mcp add --transport sse --scope local talos "${TALOS_MCP_URL}" >/dev/null 2>&1
+        if ! claude mcp add --transport sse --scope local talos "${TALOS_MCP_URL}" \
+            >>/home/claude/.claude/mcp-add.log 2>&1; then
+            echo "⚠ claude mcp add talos 失敗——見 ~/.claude/mcp-add.log" >&2
+        fi
     fi
 fi
 
