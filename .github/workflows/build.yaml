@@ -16,6 +16,11 @@ jobs:
     permissions:
       contents: read
       packages: write
+    outputs:
+      # The digest this build actually pushed for the base target. Passed to
+      # the bump job so what lands in jg-base can be checked against a second,
+      # independent source instead of trusted.
+      base-digest: ${{ steps.build-base.outputs.digest }}
 
     steps:
       - name: Checkout repository
@@ -55,6 +60,7 @@ jobs:
       # factory variant, so a build with no target would publish that under
       # the tags existing consumers pin.
       - name: Build and push Docker image
+        id: build-base
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -90,3 +96,170 @@ jobs:
           labels: ${{ steps.meta-factory.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  # ---------------------------------------------------------------------------
+  # Bump jg-base's `im` pin to the image this build just pushed.
+  #
+  # jg-base#66 measured `latest` frozen on spegel clusters: the mirror answers
+  # tag queries from node cache, so jg-jiahd ran a months-old image while every
+  # signal read green. The fix there was tag@digest. This is the other half --
+  # without it the pin is correct and permanently stale, which is the same
+  # failure with a different cause.
+  #
+  # It also has to run on a rebuild of an unchanged commit, not only on new
+  # commits: this repo's tags are not digest-stable (k8scc#3 -- SLSA provenance
+  # attestations carry wall-clock timestamps, so the index digest changes even
+  # when every layer is a cache hit). A rebuild therefore leaves jg-base
+  # pinning a digest that is still pullable but now untagged, and untagged is
+  # what GHCR retention deletes. Gating on the ref rather than the event is
+  # what makes that case covered.
+  #
+  # It stops at "PR opened", deliberately. jg-base's main reaches every cluster
+  # through Flux, so merging there is that repo's decision and its owner's to
+  # make -- an automation that merged would be deploying to the fleet.
+  bump-jg-base-pin:
+    needs: build-and-push
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      # Secrets cannot be read in a job-level `if`, so the gate is here. A
+      # missing token skips the job instead of failing it: the manual path
+      # (jg-base scripts/bump-claudecode-image.sh) still works, and a red
+      # build on every push would train everyone to ignore this workflow.
+      - name: Resolve the cross-repo token
+        id: tok
+        env:
+          DEDICATED: ${{ secrets.JG_BASE_PR_TOKEN }}
+          FALLBACK: ${{ secrets.GHCR_TOKEN }}
+        run: |
+          if [ -n "${DEDICATED}" ]; then
+            TOKEN="${DEDICATED}"; WHICH=JG_BASE_PR_TOKEN
+          elif [ -n "${FALLBACK}" ]; then
+            TOKEN="${FALLBACK}"; WHICH=GHCR_TOKEN
+          else
+            echo "have=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::No JG_BASE_PR_TOKEN or GHCR_TOKEN -- skipping the jg-base bump."
+            echo "::notice::Run jg-base scripts/bump-claudecode-image.sh ${GITHUB_SHA:0:7} by hand."
+            exit 0
+          fi
+
+          # Probe push permission rather than discovering it as a checkout
+          # failure. GHCR_TOKEN only has to carry write:packages to do its
+          # real job, so it may well not reach jg-base -- and a workflow that
+          # goes red on every push is one everyone learns to ignore, which is
+          # the failure this whole job exists to prevent, one level up.
+          if PUSH=$(GH_TOKEN="${TOKEN}" gh api repos/ferry133/jg-base --jq .permissions.push 2>/dev/null) \
+             && [ "${PUSH}" = "true" ]; then
+            echo "have=true" >> "$GITHUB_OUTPUT"
+            echo "using ${WHICH}"
+          else
+            echo "have=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::${WHICH} cannot push to ferry133/jg-base (needs 'repo' scope) -- skipping."
+            echo "::notice::Set JG_BASE_PR_TOKEN, or run the bump script by hand."
+          fi
+
+      - name: Checkout jg-base
+        if: steps.tok.outputs.have == 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: ferry133/jg-base
+          token: ${{ secrets.JG_BASE_PR_TOKEN || secrets.GHCR_TOKEN }}
+          path: jg-base
+
+      # jg-base's own script, run from jg-base's checkout -- not a copy of its
+      # logic here. The `@sha256` perl-interpolation trap and the "exactly 3
+      # sites" guard live in one place, so a copy here cannot keep working
+      # after the original changes. k8scc#8 asked for the lessons to be copied
+      # across; not having a second implementation is strictly better than
+      # copying them.
+      - name: Rewrite the pin using jg-base's own script
+        if: steps.tok.outputs.have == 'true'
+        working-directory: jg-base
+        env:
+          GH_TOKEN: ${{ secrets.JG_BASE_PR_TOKEN || secrets.GHCR_TOKEN }}
+        run: scripts/bump-claudecode-image.sh "${GITHUB_SHA:0:7}"
+
+      # Cross-check, because the script resolves the digest by paging GHCR's
+      # package-versions API and this build knows the digest first-hand. Two
+      # independent sources agreeing is a measurement; the script's answer
+      # alone is a lookup that has a failure mode (a tag older than the
+      # pagination window reports "is the CI build done?", which is the wrong
+      # diagnosis stated confidently -- ferry133/jg-base issue filed).
+      - name: Check the written pin against the digest this build pushed
+        if: steps.tok.outputs.have == 'true'
+        working-directory: jg-base
+        env:
+          BUILT_DIGEST: ${{ needs.build-and-push.outputs.base-digest }}
+        run: |
+          set -euo pipefail
+          F=kubernetes/apps/base/claudecode/claude-code/im/enabled/helmrelease.yaml
+          WRITTEN=$(grep -oE 'sha256:[0-9a-f]{64}' "$F" | sort -u)
+          echo "written : ${WRITTEN}"
+          echo "built   : ${BUILT_DIGEST}"
+          if [ "$(printf '%s\n' "${WRITTEN}" | wc -l)" -ne 1 ]; then
+            echo "::error::the three sites disagree on the digest"; exit 1
+          fi
+          if [ "${WRITTEN}" != "${BUILT_DIGEST}" ]; then
+            echo "::error::GHCR resolved ${WRITTEN} but this build pushed ${BUILT_DIGEST}"
+            exit 1
+          fi
+
+      # No diff is the normal outcome of a re-run, not an error.
+      - name: Open or update the PR
+        if: steps.tok.outputs.have == 'true'
+        working-directory: jg-base
+        env:
+          GH_TOKEN: ${{ secrets.JG_BASE_PR_TOKEN || secrets.GHCR_TOKEN }}
+          FULL_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          SHORT="${FULL_SHA:0:7}"
+          BRANCH="bump/claudecode-${SHORT}"
+
+          if git diff --quiet; then
+            echo "::notice::jg-base already pins this digest -- nothing to do."
+            exit 0
+          fi
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B "${BRANCH}"
+          git add kubernetes/apps/base/claudecode/claude-code/im/enabled/helmrelease.yaml
+          git commit -m "chore(claudecode): bump im pin to ${SHORT} (k8scc)" \
+                     -m "Opened by ferry133/k8scc CI. k8scc#8 - jg-base#66"
+          git push -f origin "${BRANCH}"
+
+          if gh pr view "${BRANCH}" --repo ferry133/jg-base >/dev/null 2>&1; then
+            echo "::notice::PR for ${BRANCH} already open -- force-pushed the new digest onto it."
+            exit 0
+          fi
+
+          # Body written to a file rather than inlined: a heredoc terminator
+          # has to sit in column 0 for the shell, which inside a YAML block
+          # scalar ends the block instead. Measured the hard way.
+          {
+            echo "Opened automatically by \`ferry133/k8scc\` CI (k8scc#8)."
+            echo
+            echo "Bumps the base \`im\` \`tag@digest\` pin to the image k8scc main just built."
+            echo
+            echo "**Checked, not assumed:** the digest was resolved by this repo's own"
+            echo "\`scripts/bump-claudecode-image.sh\` from GHCR, then compared against the digest"
+            echo "the k8scc build step itself reported. Two independent sources; the job fails"
+            echo "rather than opening this PR if they disagree."
+            echo
+            echo "**Why this fires even when the commit did not change:** k8scc tags are not"
+            echo "digest-stable -- SLSA provenance attestations carry wall-clock timestamps, so a"
+            echo "rebuild of the same commit produces a new index digest (k8scc#3). Without a bump"
+            echo "the previous digest stays pullable but becomes untagged, and untagged is what"
+            echo "GHCR retention deletes."
+            echo
+            echo "**Not auto-merged on purpose.** This repo's main reaches every cluster through"
+            echo "Flux, so merging is this repo's call after its own review."
+          } > /tmp/pr-body.md
+
+          gh pr create --repo ferry133/jg-base --base main --head "${BRANCH}" \
+            --title "chore(claudecode): bump im pin to ${SHORT}" \
+            --body-file /tmp/pr-body.md
