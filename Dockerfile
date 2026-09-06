@@ -70,6 +70,7 @@ RUN apt-get update && apt-get install -y \
     dnsutils \
     nbtscan \
     snmp \
+    nfs-common \
     mtr-tiny \
     traceroute \
     ipcalc \
