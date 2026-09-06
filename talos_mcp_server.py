@@ -13,7 +13,10 @@ Start: python3 talos_mcp_server.py  (HTTP/SSE transport, binds 127.0.0.1 only)
 Requires: TALOSCONFIG (path to an os:reader-scoped talosconfig file), plus
           OMNI_SERVICE_ACCOUNT_KEY and OMNI_ENDPOINT — the talosconfig carries
           no key material of its own, and talosctl's auth library reads those
-          two directly from the environment.
+          two directly from the environment. When any of the three is empty or
+          absent the server still starts and serves, but every tool returns a
+          "not configured on this cluster" message — the base `im` instance
+          ships this sidecar fleet-wide, including clusters with no Omni.
 
 Optional: TALOS_NODES (comma-separated node IPs). Rejects tool calls naming a
           node outside the list. This is a nicer error message, NOT a security
@@ -31,14 +34,44 @@ import subprocess
 from mcp.server.fastmcp import FastMCP
 
 TALOSCTL = "/usr/local/bin/talosctl"
-TALOSCONFIG = os.environ["TALOSCONFIG"]
+TALOSCONFIG = os.environ.get("TALOSCONFIG", "")
 KNOWN_NODES = [ip.strip() for ip in os.environ.get("TALOS_NODES", "").split(",") if ip.strip()]
 MCP_PORT = int(os.environ.get("TALOS_MCP_PORT", "8765"))
+
+
+def _missing_config() -> list[str]:
+    missing = []
+    if not TALOSCONFIG or not os.path.isfile(TALOSCONFIG) or os.path.getsize(TALOSCONFIG) == 0:
+        missing.append("talosconfig file (TALOS_MCP_CONFIG_B64)")
+    if not os.environ.get("OMNI_SERVICE_ACCOUNT_KEY", "").strip():
+        missing.append("Omni SA key (TALOS_MCP_SA_KEY)")
+    if not os.environ.get("OMNI_ENDPOINT", "").strip():
+        missing.append("Omni endpoint (TALOS_MCP_OMNI_ENDPOINT)")
+    return missing
+
+
+# Checked once at startup, deliberately: OMNI_SERVICE_ACCOUNT_KEY arrives via
+# env from a secretKeyRef, so a later secret edit cannot reach a running
+# container anyway — a call-time re-check would report the mounted file as
+# fixed while the env half stayed stale, which is worse than a consistent
+# "restart the pod". This sidecar ships in the base `im` instance on every
+# cluster, so on clusters without Omni credentials the server must still come
+# up (probes pass, claude-session's TALOS_MCP_URL connects) and every tool
+# answers with the message below instead of a bare talosctl auth error.
+MISSING_CONFIG = _missing_config()
 
 app = FastMCP("talos", host="127.0.0.1", port=MCP_PORT)
 
 
 def _run(node: str, *args: str, timeout: int = 15) -> str:
+    if MISSING_CONFIG:
+        return (
+            "error: talos-mcp is not configured on this cluster — missing: "
+            + ", ".join(MISSING_CONFIG)
+            + ". Expected on clusters not managed by Omni. To enable: populate "
+            "these values in cluster-secrets, then restart this pod (the SA "
+            "key is env, a running container never sees the new value)."
+        )
     if KNOWN_NODES and node not in KNOWN_NODES:
         return f"error: {node} is not a known node for this cluster ({', '.join(KNOWN_NODES)})"
     try:
