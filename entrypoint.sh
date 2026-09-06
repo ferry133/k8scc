@@ -23,7 +23,7 @@ TTYD_ARGS=(
     "--client-option" "cursorBlink=true"
     "--client-option" "cursorStyle=block"
     "--client-option" "fontSize=15"
-    "--client-option" "scrollback=5000"
+    "--client-option" "scrollback=10000"
 )
 
 # Patched client page: makes the wrapped Claude OAuth login URL clickable

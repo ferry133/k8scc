@@ -35,8 +35,8 @@ RUN apt-get update && apt-get install -y \
 # own, so an idle-dropped connection (e.g. Envoy Gateway's default 5m stream
 # idle timeout) would otherwise kill and restart `claude` from scratch on
 # every reconnect (see claude-session). history-limit matches ttyd's
-# client-side --client-option scrollback=5000 (entrypoint.sh) so reattaching
-# restores the same amount of visible history.
+# client-side --client-option scrollback=10000 (entrypoint.sh) so reattaching
+# restores the same amount of visible history -- change the two together.
 #
 # default-terminal MUST stay xterm-256color, not tmux's own default
 # (tmux-256color): ttyd's pty already reports xterm-256color (matching
@@ -44,9 +44,14 @@ RUN apt-get update && apt-get install -y \
 # tmux otherwise overrides TERM to tmux-256color for the child process,
 # which Claude Code's box-drawing/layout doesn't handle -- confirmed live
 # 2026-08-08 (corrupted borders, missing box edges) against cc.jiahd.cc.
+#
+# mouse/history-limit mirror ferry133's own ~/.tmux.conf; its xclip copy/
+# paste bindings are deliberately not carried over (no xclip, no X server
+# -- they could only ever fail here).
 RUN printf '%s\n' \
-      'set-option -g history-limit 5000' \
+      'set-option -g history-limit 10000' \
       'set-option -g default-terminal "xterm-256color"' \
+      'set-option -g mouse on' \
       > /etc/tmux.conf
 
 # Network diagnostics toolkit — for remote-supporting client networks
@@ -154,6 +159,12 @@ RUN python3 /usr/local/share/ttyd/patch-ttyd-index.py \
 RUN useradd -m -u 1000 -s /bin/bash claude && \
     mkdir -p /home/claude/workspace /home/claude/.claude && \
     ln -s /etc/tmux.conf /home/claude/.tmux.conf && \
+    printf '%s\n' \
+      'alias k="kubectl"' \
+      'alias t="talosctl"' \
+      'alias o="omnictl"' \
+      'alias ll="ls -al"' \
+      >> /home/claude/.bashrc && \
     chown -R claude:claude /home/claude
 
 # debian:12-slim leaves LANG unset, i.e. the C locale. tmux reads LC_ALL /
