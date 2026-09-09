@@ -16,7 +16,8 @@ Requires: TALOSCONFIG (path to an os:reader-scoped talosconfig file), plus
           two directly from the environment. When any of the three is empty or
           absent the server still starts and serves, but every tool returns a
           "not configured on this cluster" message — the base `im` instance
-          ships this sidecar fleet-wide, including clusters with no Omni.
+          ships this sidecar fleet-wide, including clusters whose Omni
+          credential was never populated.
 
 Optional: TALOS_NODES (comma-separated node IPs). Rejects tool calls naming a
           node outside the list. This is a nicer error message, NOT a security
@@ -68,9 +69,12 @@ def _run(node: str, *args: str, timeout: int = 15) -> str:
         return (
             "error: talos-mcp is not configured on this cluster — missing: "
             + ", ".join(MISSING_CONFIG)
-            + ". Expected on clusters not managed by Omni. To enable: populate "
-            "these values in cluster-secrets, then restart this pod (the SA "
-            "key is env, a running container never sees the new value)."
+            + ". This reports an unpopulated credential, not the absence of "
+            "Omni: the sidecar ships fleet-wide, so a cluster that runs Omni "
+            "itself or is managed by one lands here too when it was never "
+            "onboarded. To enable: populate these values in cluster-secrets, "
+            "then restart this pod (the SA key is env, a running container "
+            "never sees the new value)."
         )
     if KNOWN_NODES and node not in KNOWN_NODES:
         return f"error: {node} is not a known node for this cluster ({', '.join(KNOWN_NODES)})"
