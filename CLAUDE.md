@@ -119,14 +119,23 @@ One exception, because it bites: **`makejinja --version` reports the wrong numbe
 
 `omni-machine-watch -version` reports the Omni client module it was **linked against**, read from the embedded build info, and the expected value is written by the builder stage from `go list -m` — so no copy of that version exists to drift.
 
-### Published tags are not digest-stable across rebuilds
+### Short-SHA tags stay on one digest — a commit is never built twice
 
-Rebuilding the same commit produces a **different manifest digest**, and the tag moves to it. Measured on 2026-08-18, when `170830f` was rebuilt on `main` after having been built on a branch:
+**Decision (ferry133, 2026-09-13, k8scc#3): keep the SLSA provenance attestation, and get digest stability by not rebuilding an already-published commit.** The workflow resolves `<short-sha>` and `factory-<short-sha>` against GHCR before building and skips the build when both already exist, so a given commit's tags are written exactly once.
 
-- `docker/metadata-action` stamps `org.opencontainers.image.created` (a fresh timestamp every run) and `org.opencontainers.image.version` (the primary tag, which differs between a branch build and a `main` build). That alone changes the config blob, hence the digest — **even when every layer is identical**.
-- GitHub Actions cache is branch-scoped, so a `main` build cannot read a feature branch's cache. Base layers hit `main`'s own cache and stayed byte-identical; the six factory layers were rebuilt and their digests changed.
+So `<short-sha>` and `<short-sha>@sha256:…` mean the same thing permanently, and a digest a consumer pinned keeps its tag — which also ends the orphaning problem, because GHCR retention deletes *untagged* versions and there is no longer an untagged version to delete. `latest` and `factory-latest` still move on every build, by design; that is why consumers pin short SHAs.
 
-**Consequence for consumers who pin `tag@sha256:…`:** the old manifest remains pullable by digest but becomes *untagged*, and untagged versions are what GHCR retention policies delete. A scan or acceptance test performed against a digest does not automatically cover what the tag serves after the next build of the same commit.
+**The escape hatch costs the invariant, deliberately loudly:** `workflow_dispatch` with `force_rebuild: true` rebuilds and moves the tags. Use it only to replace a bad publish, and expect any digest pinned to those tags to become untagged.
+
+**Why not reproducible builds instead.** Three things move the digest on a rebuild, and the third cannot be configured away:
+
+- `docker/metadata-action` stamps `org.opencontainers.image.created` (a fresh timestamp every run) and `org.opencontainers.image.version` (the primary tag, which differs between a branch build and a `main` build). That alone changes the config blob — **even when every layer is identical**.
+- GitHub Actions cache is branch-scoped, so a `main` build cannot read a feature branch's cache. Measured 2026-08-18 on `170830f`: base layers hit `main`'s own cache and stayed byte-identical; the six factory layers were rebuilt and their digests changed.
+- **The provenance attestations.** The published index holds four manifests — two platform images and two in-toto SLSA v1 attestations — and `tag@sha256:…` names the *index*, so anything that moves an attestation moves the pinned digest. Measured 2026-09-13 on `ca8865a`: the predicate carries `runDetails.metadata.startedOn` / `finishedOn` at nanosecond precision **and** the whole 9.5KB GitHub push event payload (`internalParameters.github_event_payload`, including `repository.updated_at`). Deterministic labels and `SOURCE_DATE_EPOCH` / `rewrite-timestamp` do not touch any of that.
+
+**So the trade-off is real and this is the side that was chosen:** digest stability via reproducibility would require `provenance: false`, i.e. giving up the attestation. Not rebuilding gets the same stability and keeps it. Anyone tempted to "fix" this by normalising timestamps should read the third bullet first — that remedy would ship, pass review, and not work.
+
+(k8scc is a public repo, so the event payload inside the attestation is publicly readable. Checked 2026-09-13: the addresses it carries are already in the repo's own git history, so it discloses nothing new.)
 
 ### `omni-machine-watch`
 
