@@ -5,6 +5,14 @@ on:
   push:
     branches: ["main"]
   workflow_dispatch:
+    inputs:
+      force_rebuild:
+        description: >-
+          Rebuild a commit that is already published. This MOVES its short-SHA
+          tag: any digest pinned to that tag becomes untagged, and untagged is
+          what GHCR retention deletes. Only for recovering a bad publish.
+        type: boolean
+        default: false
 
 env:
   REGISTRY: ghcr.io
@@ -17,10 +25,17 @@ jobs:
       contents: read
       packages: write
     outputs:
-      # The digest this build actually pushed for the base target. Passed to
-      # the bump job so what lands in jg-base can be checked against a second,
-      # independent source instead of trusted.
-      base-digest: ${{ steps.build-base.outputs.digest }}
+      # The digest the base target is published under. Passed to the bump job
+      # so what lands in jg-base can be checked against a second, independent
+      # source instead of trusted.
+      #
+      # Falls back to the gate's already-published digest, because a skipped
+      # rebuild leaves `build-base` with no outputs at all. Without the
+      # fallback the cross-check downstream compares a real digest against an
+      # empty string and fails every re-run -- and a workflow that goes red on
+      # a normal re-run is one everyone learns to ignore, which is the
+      # blindness the bump job exists to remove.
+      base-digest: ${{ steps.build-base.outputs.digest || steps.gate.outputs.base-digest }}
 
     steps:
       - name: Checkout repository
@@ -47,6 +62,141 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GHCR_TOKEN }}
 
+      # Short-SHA tags stay on one digest (k8scc#3, ferry133 2026-09-13), and
+      # the way that is achieved is by not building a commit twice rather than
+      # by making two builds produce the same bytes.
+      #
+      # Reproducibility was the obvious route and it does not work here. The
+      # index carries two SLSA provenance attestations besides the two platform
+      # manifests, and `tag@sha256:...` names the index -- so anything that
+      # moves an attestation moves the pinned digest. Measured on `ca8865a`
+      # 2026-09-13: the predicate holds `runDetails.metadata.startedOn` and
+      # `finishedOn` at nanosecond precision AND the entire 9.5KB GitHub push
+      # event payload. No label setting, `SOURCE_DATE_EPOCH` or
+      # `rewrite-timestamp` makes a second run reproduce that, so stability
+      # that way is only available by dropping provenance (`provenance: false`).
+      # Provenance is kept, so the second build is what goes.
+      #
+      # This also removes the orphaning it was meant to survive: a pinned
+      # digest keeps its tag, so GHCR retention has no untagged version to
+      # delete.
+      - name: Resolve whether this commit is already published
+        id: gate
+        env:
+          FORCE: ${{ inputs.force_rebuild }}
+          GHCR_PAT: ${{ secrets.GHCR_TOKEN }}
+        run: |
+          set -euo pipefail
+          SHORT="${GITHUB_SHA:0:7}"
+
+          if [ "${FORCE}" = "true" ]; then
+            echo "build=true" >> "$GITHUB_OUTPUT"
+            echo "::warning::force_rebuild: rebuilding ${SHORT}. Its tags move, and any digest pinned to them becomes untagged."
+            exit 0
+          fi
+
+          # The registry API rather than `imagetools inspect --format`: this is
+          # the load-bearing lookup, and its wrong answer is silent -- an empty
+          # result reads as "not published", so the build proceeds and moves the
+          # tag while the run stays green. HTTP status can be checked; a Go
+          # template that silently resolves to nothing cannot.
+          # No `"${ARR[@]}"` for the optional -u: an empty array under `set -u`
+          # is an error in bash 3.2, which is what a macOS shell runs when
+          # someone tests this outside CI. A check that only works on the
+          # machine it was written on is the shape this repo keeps meeting.
+          TOKEN_URL="https://ghcr.io/token?scope=repository:${IMAGE_NAME}:pull&service=ghcr.io"
+          # `if !` rather than a bare call: with `set -e` a failing curl would
+          # exit here carrying only curl's own exit code, and the run would say
+          # "(56) error: 403" instead of which question went unanswered.
+          if [ -n "${GHCR_PAT}" ]; then
+            if ! TOKEN_JSON="$(curl -fsS -u "${GITHUB_ACTOR}:${GHCR_PAT}" "${TOKEN_URL}")"; then
+              echo "::error::GHCR token endpoint refused the credentialled request for ${IMAGE_NAME}; cannot tell whether ${SHORT} is published"
+              exit 1
+            fi
+          else
+            if ! TOKEN_JSON="$(curl -fsS "${TOKEN_URL}")"; then
+              echo "::error::GHCR token endpoint refused an anonymous request for ${IMAGE_NAME}; cannot tell whether ${SHORT} is published"
+              exit 1
+            fi
+          fi
+          TOKEN="$(printf '%s' "${TOKEN_JSON}" \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin).get("token",""))')"
+          if [ -z "${TOKEN}" ]; then
+            echo "::error::no GHCR pull token, so whether ${SHORT} is published cannot be determined"
+            exit 1
+          fi
+
+          # Three outcomes, not two: published / absent / undecidable. Folding
+          # "undecidable" into "absent" is what would make this check read the
+          # same whether it worked or not -- and the cost of guessing wrong is
+          # moving a tag a consumer has pinned.
+          CODE=""; DIGEST=""
+          lookup() {
+            local h; h="$(mktemp)"
+            CODE="$(curl -sS -I -o "$h" -w '%{http_code}' \
+              -H "Authorization: Bearer ${TOKEN}" \
+              -H 'Accept: application/vnd.oci.image.index.v1+json' \
+              -H 'Accept: application/vnd.docker.distribution.manifest.list.v2+json' \
+              "https://ghcr.io/v2/${IMAGE_NAME}/manifests/$1")"
+            # awk, not `grep | ...`: grep exits non-zero when a 404 has no such
+            # header, and under `pipefail` that killed the script on the most
+            # common path of all -- a commit that has never been built. Measured
+            # 2026-09-13 before this line looked like this.
+            DIGEST="$(awk 'tolower($0) ~ /^docker-content-digest:/ {gsub(/\r/,""); print $2}' "$h")"
+            rm -f "$h"
+          }
+
+          BASE=""; FACTORY=""; PUBLISHED=0; ABSENT=0
+          for TAG in "${SHORT}" "factory-${SHORT}"; do
+            lookup "${TAG}"
+            case "${CODE}" in
+              200)
+                if [ -z "${DIGEST}" ]; then
+                  echo "::error::${TAG}: HTTP 200 with no docker-content-digest header"
+                  exit 1
+                fi
+                PUBLISHED=$((PUBLISHED + 1))
+                echo "${TAG} -> ${DIGEST}"
+                if [ "${TAG}" = "${SHORT}" ]; then BASE="${DIGEST}"; else FACTORY="${DIGEST}"; fi
+                ;;
+              404)
+                ABSENT=$((ABSENT + 1))
+                echo "${TAG} -> not published"
+                ;;
+              *)
+                echo "::error::${TAG}: registry returned HTTP ${CODE}, so it cannot be told apart from an unpublished tag. Refusing to build, because building moves the tag if it does exist."
+                exit 1
+                ;;
+            esac
+          done
+
+          # Both tags or neither. A half-published commit (base pushed, factory
+          # failed) has to stay rebuildable, and nothing can be pinned to it:
+          # the bump job only runs after this whole job succeeds, so no pin-bump
+          # PR was ever opened for that digest.
+          if [ "${PUBLISHED}" -eq 2 ]; then
+            echo "build=false" >> "$GITHUB_OUTPUT"
+            echo "base-digest=${BASE}" >> "$GITHUB_OUTPUT"
+            {
+              echo "### ${SHORT} is already published -- build skipped"
+              echo
+              echo "| tag | digest |"
+              echo "|---|---|"
+              echo "| \`${SHORT}\` | \`${BASE}\` |"
+              echo "| \`factory-${SHORT}\` | \`${FACTORY}\` |"
+              echo
+              echo "Rebuilding would move these tags and orphan any digest pinned to them."
+              echo "To rebuild anyway: re-run via \`workflow_dispatch\` with \`force_rebuild\`."
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "build=true" >> "$GITHUB_OUTPUT"
+            if [ "${ABSENT}" -eq 2 ]; then
+              echo "${SHORT} is not published yet -- building"
+            else
+              echo "::notice::${SHORT} is half-published (base='${BASE}' factory='${FACTORY}') -- rebuilding both."
+            fi
+          fi
+
       - name: Extract Docker metadata (base)
         id: meta
         uses: docker/metadata-action@v5
@@ -61,6 +211,7 @@ jobs:
       # the tags existing consumers pin.
       - name: Build and push Docker image
         id: build-base
+        if: steps.gate.outputs.build == 'true'
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -86,6 +237,7 @@ jobs:
       # built. A parallel matrix job would rebuild every base layer under
       # QEMU for no gain.
       - name: Build and push factory variant
+        if: steps.gate.outputs.build == 'true'
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -106,13 +258,14 @@ jobs:
   # without it the pin is correct and permanently stale, which is the same
   # failure with a different cause.
   #
-  # It also has to run on a rebuild of an unchanged commit, not only on new
-  # commits: this repo's tags are not digest-stable (k8scc#3 -- SLSA provenance
-  # attestations carry wall-clock timestamps, so the index digest changes even
-  # when every layer is a cache hit). A rebuild therefore leaves jg-base
-  # pinning a digest that is still pullable but now untagged, and untagged is
-  # what GHCR retention deletes. Gating on the ref rather than the event is
-  # what makes that case covered.
+  # This used to be the job that saved jg-base from a rebuild orphaning its
+  # pin, because a rebuild moved the tag (k8scc#3). Since 2026-09-13 the gate
+  # in the build job stops a commit being built twice at all, so that case no
+  # longer arises: a re-run resolves the same digest, jg-base already pins it,
+  # and the no-diff path below skips. Gating on the ref rather than the event
+  # is still right -- it keeps the job honest on a re-run instead of assuming
+  # one can't happen -- but the orphan it was written for is now prevented
+  # upstream rather than repaired here.
   #
   # It stops at "PR opened", deliberately. jg-base's main reaches every cluster
   # through Flux, so merging there is that repo's decision and its owner's to
@@ -195,6 +348,13 @@ jobs:
           BUILT_DIGEST: ${{ needs.build-and-push.outputs.base-digest }}
         run: |
           set -euo pipefail
+          # Two empty values compare equal and prove nothing. The gate's
+          # skip path is exactly where this one could arrive empty, so it is
+          # checked before it is compared rather than after it misleads.
+          if [ -z "${BUILT_DIGEST}" ]; then
+            echo "::error::no base digest: neither a fresh push nor the gate's already-published lookup produced one"
+            exit 1
+          fi
           F=kubernetes/apps/base/claudecode/claude-code/im/enabled/helmrelease.yaml
           WRITTEN=$(grep -oE 'sha256:[0-9a-f]{64}' "$F" | sort -u)
           echo "written : ${WRITTEN}"
@@ -250,11 +410,11 @@ jobs:
             echo "the k8scc build step itself reported. Two independent sources; the job fails"
             echo "rather than opening this PR if they disagree."
             echo
-            echo "**Why this fires even when the commit did not change:** k8scc tags are not"
-            echo "digest-stable -- SLSA provenance attestations carry wall-clock timestamps, so a"
-            echo "rebuild of the same commit produces a new index digest (k8scc#3). Without a bump"
-            echo "the previous digest stays pullable but becomes untagged, and untagged is what"
-            echo "GHCR retention deletes."
+            echo "**This digest will not move.** Since 2026-09-13 k8scc skips building a commit"
+            echo "it has already published, so \`<short-sha>\` is written once and stays on one"
+            echo "digest (k8scc#3). A pin to it keeps its tag, so GHCR retention has no untagged"
+            echo "version to collect. The one exception is a deliberate \`force_rebuild\` dispatch,"
+            echo "which says so in its own run summary."
             echo
             echo "**Not auto-merged on purpose.** This repo's main reaches every cluster through"
             echo "Flux, so merging is this repo's call after its own review."
