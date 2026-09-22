@@ -155,7 +155,7 @@ RUN records=$(mktemp); \
     probe dig      dig -v && \
     probe python3  python3 --version && \
     probe date     date --version && \
-    probe ip       ip -o link show lo && \
+    probe ip       ip link show lo && \
     probe tar      sh -c 'd=$(mktemp -d); echo x > "$d/f"; tar -cf "$d/a.tar" -C "$d" f && tar -tf "$d/a.tar"' && \
     present host && \
     present nc && \
