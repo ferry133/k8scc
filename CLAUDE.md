@@ -14,6 +14,10 @@ GitHub Actions workflow: `.github/workflows/build.yaml`
 - Triggers: push to `main`, `workflow_dispatch`
 - Builds multi-arch image: `linux/amd64`, `linux/arm64`
 - Pushes to GHCR with `latest` tag (main branch) + short SHA tag
+- One workflow, three images into one GHCR repository, distinguished by tag
+  prefix: base (`<sha>`), factory (`factory-<sha>`, from the same `Dockerfile`)
+  and ops (`ops-<sha>`, from `Dockerfile.ops`). See the per-variant sections
+  below — each has its own reason for the prefix and its own build gate.
 
 ## GHCR Authentication — Important
 
@@ -147,6 +151,109 @@ A long-lived Go process holding a COSI watch (`safe.StateWatchKind` on `MachineS
 - **Not started by `entrypoint.sh`.** It needs an Omni credential and the terminal container must not hold one — the same split as the `talos-mcp` sidecar. Run it as its own container (`command: ["/usr/local/bin/omni-machine-watch"]`) or from a shell that already has the credential in its environment.
 - **`go build` in `omni-machine-watch/` drops a ~100MB binary next to the source.** Nothing in the build needs it there — the builder stage writes to `/out` — and this repo carries no ignore rule for it (`.gitignore` is excluded globally on the author's machine). Build to a path outside the tree, or delete it before staging.
 - **Testable without an Omni**: `stream()` takes a `state.CoreState`, so `main_test.go` drives it against an in-memory COSI state. This is not decoration — a live watch on an idle instance emits no changes, so "no `updated` events" there cannot distinguish a quiet cluster from a broken post-bootstrap stream. `go test` runs in the builder stage, so a regression fails the image build.
+
+## Ops Variant (`ops-*` tags) — a third image, from `Dockerfile.ops`
+
+Pre-baked tools for jg-base's four base workloads, which `apk add` on **every
+execution** today (k8scc#11). On an appliance node measured at ~100 KB/s that
+install was over 11 minutes while the work itself was seconds — and a backup
+Job with `concurrencyPolicy: Forbid` that runs long enough makes the *previous
+day's* archive read as today's.
+
+**Image layers are cached by containerd; `apk add` is not.** Same bytes, paid
+once per node instead of once per scheduling. That is the whole mechanism.
+
+| Target | Tags | Base |
+|--------|------|------|
+| `ops` (in `Dockerfile.ops`) | `ops-<short-sha>`, `ops-latest` | `alpine:3.20` |
+
+Same GHCR repository and the same reasoning as the factory variant: a sibling
+package is created private and bound to `k8scc`, so every consumer would need a
+pull secret and a visibility flip before it could pull anything. The tag prefix
+carries the distinction. A clearer package name is available any time someone
+is willing to do that flip — it is a one-time manual step, not a blocker worth
+paying up front.
+
+**A separate Dockerfile, not a third target in the main one.** The main file's
+last stage is `factory`, and a build with no `--target` gets the last stage;
+appending an alpine stage there would silently change what a targetless build
+produces. That is the same trap the `target: base` comment in the workflow
+exists for.
+
+### Why one image and not two
+
+Measured from Alpine's own APKINDEX (v3.20, 2026-09-22), summing the compressed
+download of each dependency closure — the number that matters on a 100 KB/s
+link, because it is what crosses the wire either way:
+
+| set | packages | download | at 100 KB/s |
+|---|---|---|---|
+| backup | `bash age aws-cli kubectl postgresql16-client` | 53.4 MB | 8.9 min |
+| daily-check | `bash curl jq msmtp ca-certificates bind-tools openssl coreutils aws-cli` | 39.9 MB | 6.6 min |
+| lan-address | `kubectl` | 16.9 MB | 2.8 min |
+| **union of all four** | | **60.8 MB** | **10.1 min** |
+
+The union costs **7.4 MB more than `backup` alone already pulls**, because
+`kubectl`, `aws-cli` and `python3` dominate and are shared. A second
+kubectl-only image would save 43.9 MB once, on one node, and only when that
+node runs none of the CronJobs — against a second tag to pin, bump and scan
+forever. Hence one image. A narrower tag stays additive if a node profile ever
+makes that 43.9 MB matter.
+
+(8.9 min for the backup set is also an independent corroboration of the ">11
+min" measured on the appliance: same order, different source, neither one an
+estimate.)
+
+### `kubectl` comes from upstream, not from `apk`
+
+Alpine v3.20 ships kubectl **1.30.9**; jg-jiahd's API server measured
+**v1.36.0** (2026-09-22). Six minors against a supported skew of one — so both
+`apk add kubectl` sites are out of skew today and nothing says so. It is
+pinned by `ARG KUBECTL_VERSION` to the same number the base image pins, and
+**verified against `dl.k8s.io`'s published `.sha256`** rather than by matching
+a version string: a printed version can agree with the ARG for reasons that
+have nothing to do with the bytes.
+
+This also removes daily-check's runtime `curl dl.k8s.io` — a second download on
+the critical path that additionally hardcodes `linux/amd64`.
+
+### What the image guarantees, and what it only claims
+
+`/usr/local/share/ops-toolchain.json`, written by an execution *inside* the
+image, per platform:
+
+- `packages` — the apk-resolved version of every requested package. Checked
+  against the installed set, because `apk add` can exit 0 while a name resolves
+  to something else.
+- `binaries.kubectl` — the pinned version, checksum-verified above.
+- `commands` — **ran in this layer, on this platform, and printed something.**
+- `present_only` — `host`, `nc`, `arping`: an executable file on PATH, *not*
+  executed. `nc` needs a peer, `arping` needs `CAP_NET_RAW`, and bind-tools'
+  `host` has no version flag. The two lists are named differently on purpose —
+  a probe that quietly degrades into a presence check reads like a probe that
+  passed.
+
+A consumer that wants to assert the image still carries what it needs should
+read that file. The reverse guard — "jg-base's scripts call nothing the image
+lacks" — cannot live here, because jg-base's scripts are not visible at build
+time. It belongs in jg-base.
+
+`test/assert-ops-controls.sh` drives `probe()` and `present()` — **extracted
+from `Dockerfile.ops`, not copied**, so they cannot keep passing after the
+originals change — against inputs that must be accepted and inputs that must be
+rejected, including the easy-to-miss one: exit 0 with no output. It runs in CI
+before anything is built. Writing it found a real hole: `grep -m1 .` accepts a
+whitespace-only line, so a command that "ran and printed nothing" was passing.
+
+### The gate treats `ops-<sha>` separately, and that is load-bearing
+
+The build gate tests base and factory as "both or neither". `ops-<sha>` is
+gated on its own, because folding a third tag into that test would make every
+commit published before `Dockerfile.ops` existed read as *half*-published — and
+half-published rebuilds base and factory, **moving the very tags jg-base pins**
+(k8scc#3). The absence of `ops-<sha>` must only ever cause the ops image to be
+built. Verified by running the gate against `35f411b` before the first ops
+build: `build=false`, `build-ops=true`.
 
 ## Runtime Configuration
 

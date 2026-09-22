@@ -36,6 +36,11 @@ jobs:
       # a normal re-run is one everyone learns to ignore, which is the
       # blindness the bump job exists to remove.
       base-digest: ${{ steps.build-base.outputs.digest || steps.gate.outputs.base-digest }}
+      # Same shape for the ops variant, so a run that skipped its build can
+      # still say which digest `ops-<sha>` serves. Nothing consumes this yet;
+      # it is here because the alternative when jg-base asks is to look it up
+      # by hand and call that a measurement.
+      ops-digest: ${{ steps.build-ops.outputs.digest || steps.gate.outputs.ops-digest }}
 
     steps:
       - name: Checkout repository
@@ -48,6 +53,13 @@ jobs:
       # caught in this repo rather than by someone reading the image later.
       - name: Check the version-assertion controls
         run: test/assert-controls.sh
+
+      # Same reason, for Dockerfile.ops's probe()/present(). Separate script
+      # because it drives different functions out of a different file -- one
+      # script covering both would pass while half of it had stopped being
+      # extracted.
+      - name: Check the ops-image probe controls
+        run: test/assert-ops-controls.sh
 
       - name: Set up QEMU (multi-arch)
         uses: docker/setup-qemu-action@v3
@@ -91,6 +103,7 @@ jobs:
 
           if [ "${FORCE}" = "true" ]; then
             echo "build=true" >> "$GITHUB_OUTPUT"
+            echo "build-ops=true" >> "$GITHUB_OUTPUT"
             echo "::warning::force_rebuild: rebuilding ${SHORT}. Its tags move, and any digest pinned to them becomes untagged."
             exit 0
           fi
@@ -197,6 +210,40 @@ jobs:
             fi
           fi
 
+          # The ops image is gated on its OWN tag, and that separation is
+          # load-bearing rather than tidy. Folding a third tag into the "both
+          # or neither" test above would make every commit published before
+          # Dockerfile.ops existed read as half-published -- and
+          # half-published rebuilds base and factory, moving the very tags
+          # jg-base pins. The absence of `ops-<sha>` must only ever cause the
+          # ops image to be built.
+          lookup "ops-${SHORT}"
+          case "${CODE}" in
+            200)
+              if [ -z "${DIGEST}" ]; then
+                echo "::error::ops-${SHORT}: HTTP 200 with no docker-content-digest header"
+                exit 1
+              fi
+              echo "build-ops=false" >> "$GITHUB_OUTPUT"
+              echo "ops-digest=${DIGEST}" >> "$GITHUB_OUTPUT"
+              echo "ops-${SHORT} -> ${DIGEST}"
+              {
+                echo
+                echo "\`ops-${SHORT}\` is already published -- ops build skipped."
+                echo
+                echo "    ghcr.io/${IMAGE_NAME}:ops-${SHORT}@${DIGEST}"
+              } >> "$GITHUB_STEP_SUMMARY"
+              ;;
+            404)
+              echo "build-ops=true" >> "$GITHUB_OUTPUT"
+              echo "ops-${SHORT} -> not published"
+              ;;
+            *)
+              echo "::error::ops-${SHORT}: registry returned HTTP ${CODE}, so it cannot be told apart from an unpublished tag. Refusing to build, because building moves the tag if it does exist."
+              exit 1
+              ;;
+          esac
+
       - name: Extract Docker metadata (base)
         id: meta
         uses: docker/metadata-action@v5
@@ -248,6 +295,64 @@ jobs:
           labels: ${{ steps.meta-factory.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Extract Docker metadata (ops variant)
+        id: meta-ops
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=sha,prefix=ops-,format=short
+            type=raw,value=ops-latest,enable=${{ github.ref == 'refs/heads/main' }}
+
+      # Same GHCR repository as base and factory, distinguished by the tag
+      # prefix -- for the reason already written down for the factory variant:
+      # a sibling package is created private and bound to k8scc, so every
+      # consumer would need a pull secret and a visibility flip before it could
+      # pull anything. The clearer name is not worth a delivery that cannot be
+      # pulled.
+      #
+      # A separate Dockerfile rather than a third target in the main one:
+      # that file's last stage is `factory`, and a build with no `--target`
+      # gets the last stage. Appending an alpine stage there would silently
+      # change what a targetless build produces -- which is the trap the
+      # `target: base` comment above exists for.
+      #
+      # Its own cache scope: nothing is shared with the debian images, so one
+      # scope would just evict the other.
+      - name: Build and push ops variant
+        id: build-ops
+        if: steps.gate.outputs.build-ops == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.ops
+          target: ops
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta-ops.outputs.tags }}
+          labels: ${{ steps.meta-ops.outputs.labels }}
+          cache-from: type=gha,scope=ops
+          cache-to: type=gha,mode=max,scope=ops
+
+      # jg-base pins `tag@digest` (jg-base#66: spegel answers tag queries from
+      # node cache, so a tag alone can serve months-old bytes). Printing the
+      # pair here is what lets k8scc#11 be answered with a digest that was
+      # read off this run rather than looked up afterwards and assumed to be
+      # the same one.
+      - name: Say what ops-<sha> serves
+        if: steps.build-ops.outputs.digest != ''
+        env:
+          OPS_DIGEST: ${{ steps.build-ops.outputs.digest }}
+        run: |
+          SHORT="${GITHUB_SHA:0:7}"
+          {
+            echo "### ops variant published"
+            echo
+            echo '```'
+            echo "ghcr.io/${IMAGE_NAME}:ops-${SHORT}@${OPS_DIGEST}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
   # ---------------------------------------------------------------------------
   # Bump jg-base's `im` pin to the image this build just pushed.

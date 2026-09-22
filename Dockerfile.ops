@@ -1,0 +1,204 @@
+# syntax=docker/dockerfile:1
+#
+# ops-tools -- the tools jg-base's base workloads install at runtime today.
+#
+# k8scc#11 (filed by jgb-handler [20db54], measured by FO-openspec [8e8ef1]):
+# four base workloads `apk add` on every execution. On an appliance node whose
+# inbound link measures ~100 KB/s that install was over 11 minutes while the
+# work itself was seconds -- and `concurrencyPolicy: Forbid` plus a 600-second
+# waiter turned "slow" into "yesterday's archive read as today's".
+#
+# Image layers are cached by containerd. `apk add` is not. That is the whole
+# difference: these bytes are paid once per node here, and once per scheduling
+# there.
+#
+# WHY ONE IMAGE AND NOT TWO -- measured from Alpine's own APKINDEX (v3.20,
+# 2026-09-22), summing the compressed download of each dependency closure:
+#
+#   backup       bash age aws-cli kubectl postgresql16-client     53.4 MB
+#   daily-check  bash curl jq msmtp ca-certificates bind-tools
+#                openssl coreutils aws-cli                        39.9 MB
+#   lan-address  kubectl                                          16.9 MB
+#   union of all four                                             60.8 MB
+#
+# The union costs 7.4 MB more than what `backup` alone already pulls, because
+# kubectl, aws-cli and python3 dominate and are shared. A second kubectl-only
+# image would save 43.9 MB once, on one node, and only when that node runs
+# none of the CronJobs -- against a second tag to pin, bump and scan forever.
+# So: one image. If a node profile ever makes that 43.9 MB matter, a narrower
+# tag is additive and can be added then.
+#
+# 53.4 MB at 100 KB/s is 8.9 minutes of download alone, which is where the
+# ">11 min" measured on the appliance comes from. Two independent sources,
+# one of them nobody's estimate.
+
+ARG ALPINE_VERSION=3.20
+
+# Deliberately the same Alpine the four workloads run today, so this image is
+# their current userland minus the install, not a new one. Bumping it changes
+# bash, coreutils, openssl and aws-cli under scripts this repo cannot run --
+# a separate decision, kept to one ARG so it can be reviewed on its own.
+# v3.22 was checked and carries every package below (postgresql16-client
+# included, at 16.15), so the bump is known to be available when someone
+# wants it.
+FROM alpine:${ALPINE_VERSION} AS ops
+
+LABEL org.opencontainers.image.source="https://github.com/ferry133/k8scc"
+LABEL org.opencontainers.image.description="Pre-baked tools for jg-base's base workloads (backup, daily-check, lan-address)"
+
+# The union of what the four `apk add` lines install, verbatim, minus kubectl.
+# Derived from the workloads rather than from what seemed useful: a list
+# invented here would be missing exactly the things nobody thought to name.
+#
+#   backup/app/cronjob.yaml              bash age aws-cli kubectl postgresql16-client
+#   daily-check/app/configmap.yaml       bash curl jq msmtp ca-certificates bind-tools openssl coreutils aws-cli
+#   daily-check/app/cronjob.yaml         bash bind-tools
+#   network/lan-address/app/deployment.yaml  kubectl
+#
+# `tar`, `ip`, `nc` and `arping` are busybox applets already in the base
+# image; they are still checked below, because "the script calls it" and
+# "the image has it" are different claims.
+ARG OPS_PACKAGES="bash age aws-cli postgresql16-client curl jq msmtp ca-certificates bind-tools openssl coreutils"
+
+RUN apk add --no-cache ${OPS_PACKAGES}
+
+# kubectl comes from upstream, NOT from apk, and that is a fix rather than a
+# preference. Alpine v3.20 ships kubectl 1.30.9; jg-jiahd's API server
+# measured v1.36.0 on 2026-09-22. Six minors, against a supported skew of one
+# -- so both `apk add kubectl` sites are out of skew today and nothing says
+# so. daily-check already works around it by curling dl.k8s.io at runtime,
+# which is a second download on the critical path AND hardcodes linux/amd64.
+#
+# Pinned to the same number the base image pins. It has to track the fleet's
+# API server; that is why it is an ARG and not a `stable.txt` lookup.
+ARG KUBECTL_VERSION=v1.36.0
+ARG TARGETARCH
+
+# Checksum-verified, unlike the base image's kubectl. A version string printed
+# by a binary can agree with the ARG for reasons that have nothing to do with
+# the bytes; dl.k8s.io publishes the digest of the artifact the URL names, so
+# this cannot pass for a build that is not the one asked for. It is also why
+# no version-string match is needed for kubectl below.
+RUN set -eu; \
+    url="https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${TARGETARCH}/kubectl"; \
+    curl -fsSL -o /usr/local/bin/kubectl "${url}"; \
+    want="$(curl -fsSL "${url}.sha256")"; \
+    got="$(sha256sum /usr/local/bin/kubectl | cut -d' ' -f1)"; \
+    if [ "${want}" != "${got}" ]; then \
+      printf 'kubectl %s/%s: sha256 mismatch\n  want %s\n  got  %s\n' \
+        "${KUBECTL_VERSION}" "${TARGETARCH}" "${want}" "${got}"; \
+      exit 1; \
+    fi; \
+    chmod 0755 /usr/local/bin/kubectl; \
+    printf 'kubectl %s %s sha256 %s\n' "${KUBECTL_VERSION}" "${TARGETARCH}" "${got}"
+
+# ---------------------------------------------------------------------------
+# Verify, per target platform, under emulation.
+#
+# probe() is what makes this image claim "the command runs here" rather than
+# "the package manager did not error". `apk add` succeeding says a package was
+# unpacked; it says nothing about whether the binary executes on this
+# architecture, and an arm64 layer that cannot run reads exactly like one that
+# can until something schedules onto an arm64 node at 3am.
+#
+# Three ways to fail, all reachable: nonzero exit, a command that is not there
+# at all, and -- the one that is easy to miss -- exit 0 with no output, which
+# is what a wrapper that silently does nothing looks like.
+#
+# present() is deliberately a WEAKER claim, used only where a build sandbox
+# cannot make the stronger one: `nc` needs a peer and `arping` needs
+# CAP_NET_RAW, so "it ran" is not available and "it is an executable file on
+# PATH" is what there is. `host` is there too -- bind-tools' host has no
+# version flag and every invocation that does not resolve a name exits
+# nonzero. Naming the two functions differently is the point: a probe that
+# quietly degrades into a presence check reads like a probe that passed.
+#
+# Both are driven by test/assert-ops-controls.sh, which EXTRACTS them from
+# this file rather than copying them, so the controls cannot keep passing
+# after these change.
+RUN records=$(mktemp); \
+    weak=$(mktemp); \
+    probe() { \
+      name="$1"; shift; \
+      rc=0; out=$("$@" 2>&1) || rc=$?; \
+      if [ "$rc" -ne 0 ]; then \
+        printf '%-10s FAILED (exit %s): %s\n' "$name" "$rc" "$out"; \
+        return 1; \
+      fi; \
+      line=$(printf '%s\n' "$out" | grep -m1 '[^[:space:]]' || true); \
+      if [ -z "$line" ]; then \
+        printf '%-10s FAILED: ran but printed nothing\n' "$name"; \
+        return 1; \
+      fi; \
+      printf '%-10s %s\n' "$name" "$line"; \
+      printf '%s\n' "$name" >> "$records"; \
+    }; \
+    present() { \
+      name="$1"; path=$(command -v "$1" 2>/dev/null || true); \
+      if [ -z "$path" ] || [ ! -x "$path" ]; then \
+        printf '%-10s FAILED: not an executable on PATH\n' "$name"; \
+        return 1; \
+      fi; \
+      printf '%-10s %s (present only)\n' "$name" "$path"; \
+      printf '%s\n' "$name" >> "$weak"; \
+    }; \
+    probe bash     bash --version && \
+    probe kubectl  kubectl version --client=true && \
+    probe age      age --version && \
+    probe aws      aws --version && \
+    probe pg_dump  pg_dump --version && \
+    probe psql     psql --version && \
+    probe curl     curl --version && \
+    probe jq       jq --version && \
+    probe msmtp    msmtp --version && \
+    probe openssl  openssl version && \
+    probe dig      dig -v && \
+    probe python3  python3 --version && \
+    probe date     date --version && \
+    probe ip       ip -o link show lo && \
+    probe tar      sh -c 'd=$(mktemp -d); echo x > "$d/f"; tar -cf "$d/a.tar" -C "$d" f && tar -tf "$d/a.tar"' && \
+    present host && \
+    present nc && \
+    present arping && \
+    apk info -v | sort > /tmp/installed && \
+    python3 - /usr/local/share/ops-toolchain.json "$records" "$weak" "${KUBECTL_VERSION}" "${OPS_PACKAGES}" <<'PY'
+import json, os, re, sys
+
+manifest, records, weak, kubectl_version, requested = sys.argv[1:6]
+
+installed = {}
+for line in open("/tmp/installed"):
+    m = re.match(r"^(.*)-(\d[^-]*-r\d+)$", line.strip())
+    if m:
+        installed[m.group(1)] = m.group(2)
+
+# A package can be requested, `apk add` can exit 0, and the name can still not
+# be in the installed set -- a virtual, or a `provides` that resolves to
+# something else. Checked rather than assumed, so the manifest cannot report a
+# package that is not there.
+wanted = requested.split()
+absent = [p for p in wanted if p not in installed]
+if absent:
+    sys.exit("requested but not installed: " + " ".join(absent))
+
+doc = {
+    "alpine": open("/etc/alpine-release").read().strip(),
+    "packages": {p: installed[p] for p in wanted},
+    "binaries": {"kubectl": kubectl_version},
+    # The contract a consumer may assert against. `commands` were executed in
+    # this layer, on this platform, and printed something. `present_only` were
+    # not run -- see present() above for why.
+    "commands": sorted(set(open(records).read().split())),
+    "present_only": sorted(set(open(weak).read().split())),
+}
+
+open(manifest, "w").write(json.dumps(doc, indent=2, sort_keys=True) + "\n")
+os.chmod(manifest, 0o444)
+os.remove("/tmp/installed")
+os.remove(records)
+os.remove(weak)
+print("--- " + manifest + " ---")
+print(open(manifest).read(), end="")
+PY
+
+CMD ["/bin/bash"]
