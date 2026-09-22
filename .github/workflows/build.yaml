@@ -392,29 +392,45 @@ jobs:
                      -m "Opened by ferry133/k8scc CI. k8scc#8 - jg-base#66"
           git push -f origin "${BRANCH}"
 
-          # `gh pr list --json number`, not `gh pr view "${BRANCH}"`. The view
-          # form went non-zero against an OPEN pull request on 2026-09-13 (run
-          # 34762498432: it exited 1 at 14:23:31, and `gh pr create` found
-          # jg-base#107 -- open, merged only at 14:28 -- one second later), so
-          # the job pushed the branch and then went red on the duplicate.
+          # `gh api` on the REST pulls endpoint -- not `gh pr view`, and not
+          # `gh pr list` either. All three answer the same question; only this
+          # one is already known to work with the token this job actually has.
           #
-          # Cause, measured 2026-09-22 rather than inferred from the log: `gh
-          # pr view` asks for `projectItems` and `statusCheckRollup`, and
-          # `projectItems` needs the `read:project` scope. GHCR_TOKEN is a
-          # classic PAT carrying `write:packages` (plus `repo`, which is what
-          # the checkout above uses) -- so the field is refused and gh exits 1
-          # while every narrower PR query on the same token succeeds. Not
-          # proven, because the call discarded its own stderr and the secret
-          # cannot be read from outside CI; consistent with everything that is
-          # observable. `gh pr list --json number` was checked the same way and
-          # requests only `number`/`headRefName`/`states` -- none scope-gated.
+          # What broke (run 34762498432, 2026-09-13): `gh pr view "${BRANCH}"`
+          # exited 1 against an OPEN jg-base#107 at 14:23:31 -- one second
+          # before `gh pr create` found that same open PR -- so the job pushed
+          # the branch and then went red on the duplicate. Every re-run made
+          # while the bump PR is unmerged lands there, which is most of the
+          # window in which one gets re-run at all.
+          #
+          # Cause, measured 2026-09-22 rather than read off the log, which has
+          # nothing because the call discarded its own stderr: `gh pr view`
+          # requests `projectItems`, and that field needs `read:project`.
+          # GHCR_TOKEN is a classic PAT carrying `write:packages` plus the
+          # `repo` the checkout uses. Consistent with everything observable;
+          # NOT proven, because the secret cannot be read from outside CI.
+          #
+          # Which is exactly why the replacement is picked to rest on nothing
+          # unproven. A `gh pr list --json` guard would be a GraphQL query
+          # whose scope needs are a second inference of the same kind. This
+          # REST endpoint needs `repo` -- and the token step at the top of this
+          # job already calls `gh api repos/ferry133/jg-base` with this very
+          # token and gets an answer (its "using GHCR_TOKEN" line is in that
+          # same failing run). Same token, same API, already observed working
+          # in the job this runs in.
+          #
+          # Controls, run live 2026-09-22: returns the number for an open PR
+          # addressed by head branch (cli/cli#14485, slash-bearing branch name
+          # included), empty for a head that does not exist, and against
+          # jg-base#107 answers 107 under `state=all` and empty under
+          # `state=open` now that it is merged.
           #
           # Three outcomes, not two. A query that could not be answered is not
-          # "no PR is open": folding it into that runs `gh pr create` on a
-          # branch that already has one, which is exactly how that run failed.
-          if ! EXISTING="$(gh pr list --repo ferry133/jg-base --base main \
-                             --head "${BRANCH}" --state open \
-                             --json number --jq '.[0].number // empty')"; then
+          # "no PR is open": folding it into that is what ran `gh pr create` on
+          # a branch that already had one.
+          if ! EXISTING="$(gh api \
+                "repos/ferry133/jg-base/pulls?head=ferry133:${BRANCH}&base=main&state=open" \
+                --jq '.[0].number // empty')"; then
             echo "::error::could not ask jg-base whether a PR for ${BRANCH} is open. The branch is pushed; open the PR by hand."
             exit 1
           fi
