@@ -117,7 +117,7 @@ Matching translates `.` to `_` on both sides before `grep -wF`, so dots count as
 
 `test/assert-controls.sh` drives that function — **extracted from the Dockerfile, not copied**, so it cannot keep passing after the original changes — against outputs recorded from real builds *and* against pins that must be rejected (moved pin, truncated pin, nonzero exit, missing binary). It runs in CI before anything is built.
 
-The confirmed versions are written to **`/usr/local/share/factory-toolchain.json`** inside the image. Anything downstream that needs to know what is installed should read that rather than infer it from this Dockerfile or from an image label — it is the record of an execution *inside* the image.
+The confirmed versions are written to **`/usr/local/share/factory-toolchain.json`** inside the image. Anything downstream that needs to know what the build installed should read that rather than infer it from this Dockerfile or from an image label — it is the record of an execution *inside* the image. It is **not** a statement about what a running container will execute; see the ops variant's section below for why that distinction bites.
 
 One exception, because it bites: **`makejinja --version` reports the wrong number.** `cli.py` uses `@click.version_option(None)`, whose auto-detection resolves to the wrong distribution and prints rich-click's version (`1.9.8`) for makejinja `2.8.2`. It is asserted from the installed distribution's metadata instead, both at install time and in the final layer. Do not "fix" a future version bump by trusting that flag.
 
@@ -233,7 +233,20 @@ image, per platform:
   a probe that quietly degrades into a presence check reads like a probe that
   passed.
 
-A consumer that wants to assert the image still carries what it needs should
+**It is a record written by an execution, not an execution** — and the two stop
+agreeing the moment anything downstream replaces a binary. A later layer, or a
+volume mount over `/usr/local/bin`, leaves the JSON reporting the version that
+was installed at build time, **and it still reads exactly like a reading**.
+(`jgb-handler [20db54]`, 2026-09-22, while writing `jg-base#130` against it.)
+
+So the two uses are different questions. A guard that asks "what is this
+container about to run" must **call the binary** (`kubectl version --client`);
+the JSON answers "what did the build intend", which is worth having and is not
+the same thing. The two disagreeing is itself a finding worth reporting.
+
+The same applies verbatim to `factory-toolchain.json` above.
+
+A consumer that wants to assert what the image was *built* to carry should
 read that file. The reverse guard — "jg-base's scripts call nothing the image
 lacks" — cannot live here, because jg-base's scripts are not visible at build
 time. It belongs in jg-base.
