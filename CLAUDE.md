@@ -288,6 +288,66 @@ rejected, including the easy-to-miss one: exit 0 with no output. It runs in CI
 before anything is built. Writing it found a real hole: `grep -m1 .` accepts a
 whitespace-only line, so a command that "ran and printed nothing" was passing.
 
+### ⚠️ One image means `backup` silently changes `date`, `ls`, `wc`, `tr`
+
+A consequence of the one-image decision that nobody listed when it was made,
+and that no script will announce:
+
+| | `date` / `ls` / `wc` / `tr` come from |
+|---|---|
+| backup's container today (`bash age aws-cli kubectl postgresql16-client`) | **busybox applets** |
+| this image (carries `coreutils`, which daily-check needs) | **GNU coreutils** |
+
+Measured, not inferred: `coreutils` is absent from the closure of backup's own
+`apk add` line and present in this image's, and this image's own verify layer
+prints `date (GNU coreutils) 9.5`. Alpine puts GNU at `/usr/bin` and busybox at
+`/bin`, and `/usr/bin` comes first on PATH.
+
+**Today there is no difference** — `jgb-handler [20db54]` checked every `date`
+call site in `backup.sh` (2026-09-22): all four are `-u '+fmt'` or
+`-d @<epoch>`, the spellings both implementations accept. **"Today there is no
+difference" and "there will be no difference" are two statements.**
+
+The direction matters. GNU accepts a superset, so nothing breaks on the way in
+— but it means **a future GNU-only flag would work here and fail nowhere**,
+until something runs the script in a plain alpine container again. That is the
+same shape as a guard that only exists on the machine that tests it, inverted:
+the permissive environment is the one doing the validating.
+
+This is not hypothetical for this script. It died once on exactly this seam:
+`date -d '30 days ago'` is GNU-only, busybox rejected it, and the fallback
+turned "I cannot compute the cutoff" into "delete everything before today" —
+jgt-appliance, 2026-08-16, the first two archives that system ever wrote were
+pruned the day after it wrote them. The surviving comment in `backup.sh` says
+`-d @<epoch>` is the one spelling both accept. **Keep it that way, and do not
+let this image's tolerance be the reason a GNU-only spelling survives review.**
+
+### Verifying that something is *gone* needs a stronger method, not a weaker one
+
+Earned here on 2026-09-22 while confirming `postgresql16-client` had been
+removed. The first check was `grep -ci postgresql` over the build log, expecting
+0. It returned **6** — every hit a git commit message carried inside the SLSA
+provenance payload, because the commit was titled `drop postgresql16-client`.
+The grep was measuring whether a *word* appeared in a *narrative*, not whether
+a package was installed.
+
+**What caught it was the number coming back higher than the previous build's,
+not the method.** Had it returned 0, a check that reads commit messages would
+have been reported as confirmation of removal — and that report reads exactly
+like a real one.
+
+Generalised by `jgb-handler [20db54]`, who had the sentence this repo was
+missing:
+
+> **A check expecting 0 also returns 0 when the method is broken. A check
+> expecting non-zero at least shows a crack when it breaks.**
+
+So an absence is confirmed against **state**, never against narrative output:
+here, the `packages` map in `/usr/local/share/ops-toolchain.json`, which the
+image writes about itself. Logs, `kubectl` event streams and object references
+are all narrative; reaching for the most convenient output and treating it as
+authoritative is the same mistake in three costumes.
+
 ### The gate treats `ops-<sha>` separately, and that is load-bearing
 
 The build gate tests base and factory as "both or neither". `ops-<sha>` is
