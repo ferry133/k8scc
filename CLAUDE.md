@@ -182,27 +182,57 @@ exists for.
 
 ### Why one image and not two
 
-Measured from Alpine's own APKINDEX (v3.20, 2026-09-22), summing the compressed
-download of each dependency closure — the number that matters on a 100 KB/s
-link, because it is what crosses the wire either way:
+Measured from Alpine's own APKINDEX (v3.20), summing the compressed download of
+each dependency closure — the number that matters on a 100 KB/s link, because
+it is what crosses the wire either way. **Re-measured 2026-09-22** after
+`postgresql16-client` was dropped; the earlier figures are not carried over,
+because a number quoted after its inputs changed has a citation and no
+measurement behind it.
 
 | set | packages | download | at 100 KB/s |
 |---|---|---|---|
-| backup | `bash age aws-cli kubectl postgresql16-client` | 53.4 MB | 8.9 min |
+| backup, as its `apk add` line reads today | `bash age aws-cli kubectl postgresql16-client` | 53.4 MB | 8.9 min |
+| backup, as `backup.sh` actually uses | `bash age aws-cli kubectl` | 51.5 MB | 8.6 min |
 | daily-check | `bash curl jq msmtp ca-certificates bind-tools openssl coreutils aws-cli` | 39.9 MB | 6.6 min |
 | lan-address | `kubectl` | 16.9 MB | 2.8 min |
-| **union of all four** | | **60.8 MB** | **10.1 min** |
+| **union, as shipped here (no psql)** | | **59.3 MB** | **9.9 min** |
 
-The union costs **7.4 MB more than `backup` alone already pulls**, because
+The union costs **7.8 MB more than `backup` alone already pulls**, because
 `kubectl`, `aws-cli` and `python3` dominate and are shared. A second
-kubectl-only image would save 43.9 MB once, on one node, and only when that
+kubectl-only image would save 42.4 MB once, on one node, and only when that
 node runs none of the CronJobs — against a second tag to pin, bump and scan
 forever. Hence one image. A narrower tag stays additive if a node profile ever
-makes that 43.9 MB matter.
+makes that 42.4 MB matter.
 
-(8.9 min for the backup set is also an independent corroboration of the ">11
+⚠️ **Note the direction.** Dropping psql moved that margin from +7.4 MB to
++7.8 MB — slightly *against* the one-image case, not for it. The conclusion
+holds anyway; the number was re-read rather than assumed to have improved in
+the convenient direction.
+
+(8.6 min for the backup set is also an independent corroboration of the ">11
 min" measured on the appliance: same order, different source, neither one an
 estimate.)
+
+### `postgresql16-client` is not in the image, and is dead in jg-base too
+
+`backup.sh` never runs a database client locally. It builds `$cmd` as a
+single-quoted string, and the only thing that executes it is
+`kubectl -n "$ns" exec "deploy/${deploy}" -- sh -c "$cmd"` — so `pg_dump` runs
+inside the database's own pod, at a version matching its server by
+construction. The script says so three lines above the install: *"The dump runs
+inside the database's own container, so nothing is installed here for it"*.
+Command-position search for `pg_dump|psql|mariadb-dump|mysqldump`: zero hits,
+and no branch falls back to a local dump.
+
+(Found by `jgb-handler [20db54]` while verifying k8scc#11's coverage condition;
+confirmed here against jg-base `5c83d74` before removal.)
+
+It is 1.5 MB, so this is **not** a size fix. A package the image carries and
+nothing uses is a claim that something uses it — and it would appear under
+`packages` in `ops-toolchain.json`, where the next reader takes it as evidence
+that dumps happen here. Same shape as everything else on this page, at 1.5 MB
+rather than for free. jg-base's own `apk add` line still lists it; that
+cleanup is jg-base's, tracked with `jg-base#124`.
 
 ### `kubectl` comes from upstream, not from `apk`
 
