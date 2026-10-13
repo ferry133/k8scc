@@ -64,6 +64,11 @@ settings_of() { cat "$1/.claude/settings.json"; }
 allow_of() { python3 -c 'import json,sys; print(json.dumps(json.load(open(sys.argv[1])).get("permissions",{}).get("allow")))' "$1/.claude/settings.json"; }
 ask_of()   { python3 -c 'import json,sys; print(json.dumps(json.load(open(sys.argv[1])).get("permissions",{}).get("ask")))' "$1/.claude/settings.json"; }
 has_perms() { python3 -c 'import json,sys; sys.exit(0 if "permissions" in json.load(open(sys.argv[1])) else 1)' "$1/.claude/settings.json"; }
+# mtime via python, not stat(1): GNU `stat -f %m FILE` reads `%m` as a file
+# name and prints FILE's *file-system* stats to stdout (rc 1), so a
+# `stat -f … || stat -c …` chain captures free-block counts that move between
+# calls -- red on Linux, green on macOS (CI run 38475915481, 2026-10-13).
+mtime_of() { python3 -c 'import os,sys; print(os.stat(sys.argv[1]).st_mtime_ns)' "$1/.claude/settings.json"; }
 
 READS='["mcp__talos__get_node_status", "mcp__talos__get_etcd_members", "mcp__talos__get_link_status", "mcp__talos__get_service_logs"]'
 
@@ -76,12 +81,16 @@ check "fresh pod: ask holds reboot_node"            [ "$(ask_of "$h")" = '["mcp_
 check "fresh pod: the initial env key survives"    grep -q '"DISABLE_AUTOUPDATER": "1"' "$h/.claude/settings.json"
 check "fresh pod: tmux was exec'd with claude"      grep -q '^tmux -u new-session -A -s claude -- claude$' "$h/fake.log"
 check "fresh pod: talos registered"                 grep -q '^claude mcp add --transport sse --scope local talos http://127.0.0.1:8765/sse$' "$h/fake.log"
-before=$(settings_of "$h"); mtime1=$(stat -f %m "$h/.claude/settings.json" 2>/dev/null || stat -c %Y "$h/.claude/settings.json")
+before=$(settings_of "$h"); mtime1=$(mtime_of "$h")
 sleep 1
 run_session "$h" TALOS_MCP_URL=http://127.0.0.1:8765/sse >/dev/null
-mtime2=$(stat -f %m "$h/.claude/settings.json" 2>/dev/null || stat -c %Y "$h/.claude/settings.json")
+mtime2=$(mtime_of "$h")
 check "second run: bytes identical"                 [ "$(settings_of "$h")" = "$before" ]
 check "second run: file not rewritten (mtime)"      [ "$mtime1" = "$mtime2" ]
+# control: the reading must move when the file IS rewritten, or the line
+# above cannot fail (the sleep covers filesystems with 1 s mtime granularity)
+sleep 1; touch "$h/.claude/settings.json"
+check_not "control: mtime reading moves on a rewrite" [ "$(mtime_of "$h")" = "$mtime2" ]
 
 # customer rules survive, order kept, no duplicates
 h="$work/customer"
