@@ -53,7 +53,9 @@ case "$outcome" in
   denied)
     echo "rpc error: code = PermissionDenied desc = not authorized" >&2; exit 1 ;;
   hang)
-    sleep 60; exit 1 ;;
+    # exec: the server SIGKILLs the shim on timeout; a forked sleep would
+    # outlive it as an orphan (CI reaped two on run 38475915481)
+    exec sleep 60 ;;
   *)
     echo "shim: unknown outcome '$outcome'" >&2; exit 99 ;;
 esac
