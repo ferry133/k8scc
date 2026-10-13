@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# Fake kubectl for test/test_talos_mcp_server.py. Logs like the talosctl shim.
+#   SHIM_KUBECTL — ok | fail   (default ok)
+#   SHIM_NODES   — what `get nodes -o jsonpath=…InternalIP…` prints (space-separated)
+set -u
+{ printf 'kubectl'; printf '\t%s' "$@"; printf '\n'; } >> "${SHIM_LOG:-/dev/null}"
+case "${SHIM_KUBECTL:-ok}" in
+  fail) echo "Unable to connect to the server: dial tcp 10.96.0.1:443: i/o timeout" >&2; exit 1 ;;
+esac
+case "${1:-}" in
+  auth) echo yes; exit 0 ;;
+  get)  printf '%s' "${SHIM_NODES:-}"; exit 0 ;;
+  *)    echo "shim: unexpected kubectl $*" >&2; exit 98 ;;
+esac

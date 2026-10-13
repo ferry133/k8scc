@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+# Fake talosctl for test/test_talos_mcp_server.py. Never talks to anything.
+#
+# Every invocation appends one tab-separated line to $SHIM_LOG:
+#   talosctl<TAB>arg1<TAB>arg2…   — one field per argv element, so the test can
+#   assert that a value arrived as ONE element (injection control).
+#
+# Outcome is chosen by env, per path:
+#   SHIM_OMNI    — when called WITHOUT --endpoints (the Omni-proxied path)
+#   SHIM_DIRECT  — when called WITH --endpoints (the direct-LAN path)
+#   values: ok | transport | denied | hang   (default ok)
+#   SHIM_CONFIG_INFO — stdout for `config info` (exit 0); unset → exit 1 like a
+#                      file talosctl cannot parse
+#   SHIM_REBOOT_RC   — exit code for `reboot` (default 0)
+set -u
+{ printf 'talosctl'; printf '\t%s' "$@"; printf '\n'; } >> "${SHIM_LOG:-/dev/null}"
+
+path=omni
+sub=""
+for a in "$@"; do
+  case "$a" in
+    --endpoints) path=direct ;;
+  esac
+done
+# first non-flag, non-flag-value word is the subcommand
+skip=0
+for a in "$@"; do
+  if [ "$skip" = 1 ]; then skip=0; continue; fi
+  case "$a" in
+    --talosconfig=*) ;;
+    --endpoints|--nodes) skip=1 ;;
+    -*) ;;
+    *) sub="$a"; break ;;
+  esac
+done
+
+if [ "$sub" = config ]; then
+  if [ -n "${SHIM_CONFIG_INFO:-}" ]; then printf '%s\n' "$SHIM_CONFIG_INFO"; exit 0; fi
+  echo "error reading config: EOF" >&2; exit 1
+fi
+
+if [ "$path" = omni ]; then outcome="${SHIM_OMNI:-ok}"; else outcome="${SHIM_DIRECT:-ok}"; fi
+
+case "$outcome" in
+  ok)
+    if [ "$sub" = reboot ]; then
+      echo "reboot sequence via $path: shim did not reboot anything"
+      exit "${SHIM_REBOOT_RC:-0}"
+    fi
+    echo "answer via $path: $sub"; exit 0 ;;
+  transport)
+    echo "rpc error: code = Unavailable desc = connection error: context deadline exceeded" >&2; exit 1 ;;
+  denied)
+    echo "rpc error: code = PermissionDenied desc = not authorized" >&2; exit 1 ;;
+  hang)
+    sleep 60; exit 1 ;;
+  *)
+    echo "shim: unknown outcome '$outcome'" >&2; exit 99 ;;
+esac

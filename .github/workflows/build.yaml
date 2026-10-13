@@ -61,6 +61,22 @@ jobs:
       - name: Check the ops-image probe controls
         run: test/assert-ops-controls.sh
 
+      # talos_mcp_server.py is imported for real against the same mcp pin the
+      # Dockerfile installs (read from it, not copied here), with fake talosctl
+      # and kubectl ahead on PATH. Every case carries a negative control; the
+      # mutating tool's "said == ran" check is here, before the image exists.
+      - name: Check the talos-mcp server controls
+        run: |
+          pin=$(grep -o '"mcp==[0-9.]*"' Dockerfile | tr -d '"')
+          test -n "$pin" || { echo "no mcp pin found in Dockerfile"; exit 1; }
+          python3 -m pip install --quiet "$pin"
+          python3 test/test_talos_mcp_server.py
+
+      # claude-session runs as shipped with HOME redirected and fake claude /
+      # tmux binaries: the permission profile merge and the inbox notice.
+      - name: Check the claude-session controls
+        run: test/claude-session-controls.sh
+
       - name: Set up QEMU (multi-arch)
         uses: docker/setup-qemu-action@v3
 

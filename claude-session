@@ -1,9 +1,15 @@
 #!/bin/bash
 # Runs inside the ttyd terminal session.
 # 1. Ensure per-user HOME directories exist
-# 2. Inject MCP memory server into settings.json if DATABASE_URL is set
-# 3. exec bash
+# 2. Register MCP servers (memory if DATABASE_URL, talos if TALOS_MCP_URL) and,
+#    for talos, merge the permission profile into settings.json
+# 3. Announce ~/workspace/inbox/ if it holds anything unread
+# 4. exec tmux → claude
 # CLAUDE_USER_ID is set by the pod environment (oauth2-proxy handles auth externally)
+
+# HOME is /home/claude in the image (Dockerfile pins it); the fallback only
+# matters when the controls in test/ run this script with HOME redirected.
+CLAUDE_HOME="${HOME:-/home/claude}"
 
 # Prefer email injected by oauth2-proxy via X-Forwarded-Email: ttyd is run
 # with --auth-header X-Forwarded-Email, which surfaces the value as TTYD_USER.
@@ -14,10 +20,64 @@ else
     export CLAUDE_USER_ID="${CLAUDE_USER_ID:-claude_code}"
 fi
 
-# Initialize settings.json on first login
-mkdir -p /home/claude/.claude
-if [ ! -f /home/claude/.claude/settings.json ]; then
-    echo '{"env":{"DISABLE_AUTOUPDATER":"1"}}' > /home/claude/.claude/settings.json
+# --- helpers -----------------------------------------------------------------
+# test/claude-session-controls.sh runs this whole script against fake `claude`
+# and `tmux` binaries, so these are exercised as shipped, not as copied.
+
+# Merge the Talos MCP permission profile into settings.json: the four read
+# tools auto-allowed, reboot_node always asked (never allowed — the approval
+# belongs to whoever is at this terminal). Appends without duplicates, never
+# removes or reorders what the customer put there, and writes nothing when the
+# result is byte-identical, so a second run is a no-op. python3 rather than
+# jq: python3 is in the base image for the MCP servers; jq only in factory.
+# A file it cannot parse is left exactly as it was and the failure is said.
+merge_talos_permissions() {
+    python3 - "$1" <<'PY'
+import json, pathlib, sys
+
+ALLOW = ["mcp__talos__get_node_status", "mcp__talos__get_etcd_members",
+         "mcp__talos__get_link_status", "mcp__talos__get_service_logs"]
+ASK = ["mcp__talos__reboot_node"]
+
+path = pathlib.Path(sys.argv[1])
+raw = path.read_text() if path.exists() else ""
+try:
+    data = json.loads(raw) if raw.strip() else {}
+except json.JSONDecodeError as exc:
+    sys.exit(f"{path}: not valid JSON ({exc}); left untouched")
+if not isinstance(data, dict):
+    sys.exit(f"{path}: top level is not an object; left untouched")
+perms = data.setdefault("permissions", {})
+if not isinstance(perms, dict):
+    sys.exit(f"{path}: permissions is not an object; left untouched")
+for key, wanted in (("allow", ALLOW), ("ask", ASK)):
+    current = perms.setdefault(key, [])
+    if not isinstance(current, list):
+        sys.exit(f"{path}: permissions.{key} is not a list; left untouched")
+    for entry in wanted:
+        if entry not in current:
+            current.append(entry)
+new = json.dumps(data, indent=2, ensure_ascii=False) + "\n"
+if new != raw:
+    path.write_text(new)
+PY
+}
+
+# Print one line when the inbox directory holds a file not yet marked read
+# (anything not ending in `.read`). Counts files; never opens them. Prints
+# nothing when the directory is absent, empty, or fully read.
+inbox_notice() {
+    local dir="$1" n
+    [ -d "$dir" ] || return 0
+    n=$(find "$dir" -mindepth 1 -maxdepth 1 -type f ! -name '*.read' | wc -l | tr -d ' ')
+    [ "$n" -gt 0 ] || return 0
+    printf '📥 inbox: %s file(s) — read %s/ before anything else\n' "$n" "${dir/#"$HOME"/\~}"
+}
+
+# --- settings.json -------------------------------------------------------------
+mkdir -p "${CLAUDE_HOME}/.claude"
+if [ ! -f "${CLAUDE_HOME}/.claude/settings.json" ]; then
+    echo '{"env":{"DISABLE_AUTOUPDATER":"1"}}' > "${CLAUDE_HOME}/.claude/settings.json"
 fi
 
 # Register MCP servers via `claude mcp add --scope local` (writes to
@@ -42,7 +102,7 @@ if [ -n "${DATABASE_URL}" ]; then
             -e DATABASE_URL="${DATABASE_URL}" \
             -e CLAUDE_USER_ID="${CLAUDE_USER_ID}" \
             -- python3 /usr/local/bin/memory_mcp_server.py \
-            >>/home/claude/.claude/mcp-add.log 2>&1; then
+            >>"${CLAUDE_HOME}/.claude/mcp-add.log" 2>&1; then
             echo "⚠ claude mcp add memory 失敗——見 ~/.claude/mcp-add.log" >&2
         fi
     fi
@@ -50,21 +110,35 @@ fi
 
 # Register the talos-mcp sidecar (if present) as a *remote* MCP server --
 # unlike memory (a local stdio subprocess of this shell), talos-mcp runs in
-# its own container so its os:reader Talos credential never touches this
-# shell's filesystem/env. TALOS_MCP_URL is set by the HelmRelease only when
-# the sidecar container exists.
+# its own container so its Talos credentials never touch this shell's
+# filesystem/env. TALOS_MCP_URL is set by the HelmRelease only when the
+# sidecar container exists -- the same gate decides whether the permission
+# profile below is written: no sidecar, `permissions` is not touched.
 if [ -n "${TALOS_MCP_URL}" ]; then
     if ! claude mcp get talos >/dev/null 2>&1; then
         if ! claude mcp add --transport sse --scope local talos "${TALOS_MCP_URL}" \
-            >>/home/claude/.claude/mcp-add.log 2>&1; then
+            >>"${CLAUDE_HOME}/.claude/mcp-add.log" 2>&1; then
             echo "⚠ claude mcp add talos 失敗——見 ~/.claude/mcp-add.log" >&2
         fi
+    fi
+    if ! merge_talos_permissions "${CLAUDE_HOME}/.claude/settings.json"; then
+        echo "⚠ settings.json 的 talos permission 設定沒有寫入（見上一行）——reboot_node 仍會提示，但 get_* 每次都會問" >&2
     fi
 fi
 
 echo ""
 echo "✓ 歡迎，${CLAUDE_USER_ID}"
 echo ""
+
+# The operator company drops hand-over notes into ~/workspace/inbox/ (on the
+# workspace PVC). Say so before the agent starts. tmux clears the screen the
+# moment it attaches, so the line gets a short, Enter-skippable pause --
+# otherwise it is on screen for one frame, which is the same as not printed.
+if notice=$(inbox_notice "${CLAUDE_HOME}/workspace/inbox") && [ -n "${notice}" ]; then
+    echo "${notice}"
+    read -r -t 8 -p "（按 Enter 繼續；8 秒後自動繼續）" _ 2>/dev/null || true
+    echo ""
+fi
 
 # -A: attach to the "claude" tmux session if it already exists (a
 # reconnecting ttyd WebSocket after an idle disconnect) instead of forking

@@ -22,8 +22,9 @@ Part of: `jg-base` / `im-onsite-operator-tools` —— sidecar 層的設計（�
 不碰 `TALOS_NODES`（insideman 4.7 裁定它不是邊界、而且會過期）。`kubectl` 失敗 → **fail closed**，拒絕並回傳錯誤原文。
 - *替代*：從 operator talosconfig 的 `endpoints` 讀——那是公司鑄憑證時填的，不是叢集的真相。
 
-**3. 自己坐的節點不帶 `--wait`。**
-hostNetwork → `POD_IP`（downward API）＝ node IP。`node == POD_IP` 時指令不帶 `--wait`、回傳「已下令；本 pod 將隨節點重啟，重開後用 `get_node_status` 確認」。否則 `--wait`、timeout 600 秒（10-11 實測 22 秒 ＋ 1 分鐘回 Ready；單節點 Longhorn 叢集會更久）。
+**3. 自己坐的節點 `--wait=false`。**
+hostNetwork → `POD_IP`（downward API）＝ node IP。`node == POD_IP` 時指令帶 `--wait=false`、回傳「已下令；本 pod 將隨節點重啟，重開後用 `get_node_status` 確認」。否則 `--wait=true --timeout=600s`（10-11 實測 22 秒 ＋ 1 分鐘回 Ready；單節點 Longhorn 叢集會更久）。
+- ⚠️ **2026-10-13 實作時量到：`talosctl reboot --wait` 預設是 true**（talosctl 1.12 `--help`），所以 proposal 原本寫的「不帶 `--wait`」照字面做會等自己死掉——必須明寫 `--wait=false`。spec 已同步改。
 
 **4. audit 一行 JSON 到 stdout，含被拒的呼叫。**
 `{"ts","tool":"reboot_node","node","phase":"token|execute|refused","reason","rc","user":$CLAUDE_USER_ID}`。sidecar 的 stdout 進 `kubectl logs -c talos-mcp`——這是 10-11 im 自己說它會去讀的地方（`x-sidero-signature` 那段），退路路徑沒有 Omni 稽核，這行是唯一的紀錄。
@@ -32,13 +33,14 @@ hostNetwork → `POD_IP`（downward API）＝ node IP。`node == POD_IP` 時指�
 `_run` 的 Omni 路徑回 timeout、或 stderr 含 `Unavailable`／`no route to host`／`context deadline` → 且 `OPERATOR_CONFIG` 在場 → `talosctl --talosconfig $OPERATOR --endpoints <node> --nodes <node> …` 一次；輸出首行 `[via direct LAN]`／`[via Omni]`。其他錯誤（`PermissionDenied`、參數錯）不重試——那些不是路的問題。
 
 **6. 憑證到期檢查在啟動時做一次，寫成模組級常數，與 `MISSING_CONFIG` 同一個理由。**
-`talosctl --talosconfig $OPERATOR config info` 解析 `Certificate expires`；過期 → 視為缺席並記原因；< 30 天 → 前綴警告。檔案 0 byte → 缺席（root spec 的「空字串與缺席同義」）。
+`talosctl --talosconfig $OPERATOR config info` 解析 `Certificate expires: … (YYYY-MM-DD)`（格式以合成 talosconfig 量到）；到期日 ≤ 今天 → 視為缺席並記日期；< 30 天 → 前綴警告。檔案 0 byte → 缺席（root spec 的「空字串與缺席同義」）。**讀不到到期日（`config info` 失敗或沒有那一行）→ 也視為缺席，理由帶 talosctl 的錯誤**——fail closed；一把「到期日不明」的憑證若照用，會一直好用到某天無聲失效。
 
-**7. `claude-session` 用 `python3 -c` 合併 `permissions`，不用 `jq`（映像裡不一定有），不覆寫既有鍵。**
-`allow += ["mcp__talos__get_node_status","mcp__talos__get_etcd_members","mcp__talos__get_link_status","mcp__talos__get_service_logs"]`、`ask += ["mcp__talos__reboot_node"]`，去重。只在 `TALOS_MCP_URL` 設定時做（與註冊同一個 gate）。
+**7. `claude-session` 用 `python3 -` 合併 `permissions`，不用 `jq`（映像裡不一定有），不覆寫既有鍵。**
+`allow += ["mcp__talos__get_node_status","mcp__talos__get_etcd_members","mcp__talos__get_link_status","mcp__talos__get_service_logs"]`、`ask += ["mcp__talos__reboot_node"]`，去重、保序。只在 `TALOS_MCP_URL` 設定時做（與註冊同一個 gate）。結果與原檔逐位元相同就不寫（第二次跑連 mtime 都不動）；解析不了的檔**原樣留著**並在終端機說一句——靜默蓋掉客戶的設定與靜默失敗在紀錄上長得一樣。
 
 **8. inbox：`~/workspace/inbox/` 非空時印一行到 ttyd；不解析內容。**
-`ls` 到任何非 `*.read` 的檔就印 `📥 inbox: N file(s) — read ~/workspace/inbox/ before anything else`。agent 讀完自己 `mv x x.read`。
+`find` 到任何非 `*.read` 的檔就印 `📥 inbox: N file(s) — read ~/workspace/inbox/ before anything else`。agent 讀完自己 `mv x x.read`。
+- 那一行後面接一個 8 秒、按 Enter 可跳過的停頓：`tmux` 一 attach 就清螢幕，印了只亮一格的字與沒印在人眼裡是同一件事。只在有未讀檔時停。
 
 ## Risks / Trade-offs
 
@@ -49,7 +51,7 @@ hostNetwork → `POD_IP`（downward API）＝ node IP。`node == POD_IP` 時指�
 
 ## Migration Plan
 
-1. 改 server 與測試（`test/` 下用假 `talosctl` shim 跑四種結果：主路成功／主路失敗退路成功／無 operator／token 流程）。
+1. 改 server 與測試（`test/` 下用假 `talosctl`／`kubectl` shim；每個案例配一個負對照；2026-10-13 另以三個故意的突變——永不退路／token 不作廢／自己的節點照等——確認測試會轉紅）。
 2. 改 `claude-session`；在本機容器跑一次確認 `settings.json` 合併正確且冪等。
 3. `CLAUDE.md` env 表加 `TALOS_OPERATOR_CONFIG`、`POD_IP`；sidecar 段落改寫。
 4. CI 重建、tag 回報給 root（jg-base／jg-cluster-template 的 HelmRelease 由那邊 bump）。
