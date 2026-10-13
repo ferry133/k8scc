@@ -38,15 +38,15 @@ Every `reboot_node` call SHALL resolve the set of permitted nodes at that moment
 
 ### Requirement: Own node is rebooted without waiting
 
-When `node` equals the sidecar's own host address (`POD_IP`, since the pod is hostNetwork), the confirmed call SHALL issue the reboot without `--wait` and return immediately with a statement that this pod will restart with the node; otherwise it SHALL use `--wait` with a 600-second timeout.
+When `node` equals the sidecar's own host address (`POD_IP`, since the pod is hostNetwork), the confirmed call SHALL issue the reboot with `--wait=false` and return immediately with a statement that this pod will restart with the node; otherwise it SHALL use `--wait=true` with a 600-second timeout (`--timeout=600s`). The flag is spelled out because `talosctl reboot --wait` defaults to true (measured on talosctl 1.12): a bare `reboot` waits, so "without `--wait`" cannot mean omitting it.
 
 #### Scenario: Rebooting the node this pod runs on
 - **WHEN** a confirmed `reboot_node` targets `POD_IP`
-- **THEN** the command runs without `--wait`, the response says the pod itself will restart, and no timeout error is produced
+- **THEN** the command runs with `--wait=false` and no `--timeout`, the response says the pod itself will restart, and no timeout error is produced
 
 #### Scenario: Rebooting another node waits for it
 - **WHEN** a confirmed `reboot_node` targets a different node
-- **THEN** the command runs with `--wait` and returns talosctl's sequence output when the node is back, or a timeout error after 600 seconds
+- **THEN** the command runs with `--wait=true --timeout=600s` and returns talosctl's sequence output when the node is back, or a timeout error after 600 seconds
 
 ### Requirement: Every mutating call is audited to the sidecar's stdout
 
@@ -62,7 +62,7 @@ Each `reboot_node` call — token issue, execute, or refusal — SHALL write one
 
 ### Requirement: Read tools fall back to the direct LAN path once
 
-Each read-only tool SHALL first call through the Omni-proxied reader credential; when that attempt fails with a transport-class error (timeout, `Unavailable`, `no route to host`, `context deadline exceeded`) and an operator credential is configured, it SHALL retry exactly once directly against the named node with `--endpoints <node>` and the operator credential. The first line of every read response SHALL be `[via Omni]` or `[via direct LAN]`.
+Each read-only tool SHALL first call through the Omni-proxied reader credential; when that attempt fails with a transport-class error (timeout, `Unavailable`, `no route to host`, `context deadline exceeded`) and an operator credential is configured, it SHALL retry exactly once directly against the named node with `--endpoints <node>` and the operator credential. Every read response that reached a Talos API SHALL begin with `[via Omni]` or `[via direct LAN]`, immediately after the expiry warning line when one is present. A refusal made before any path is attempted (reader credential not configured, `TALOS_NODES` miss) carries no marker — nothing was *via* anything, and a marker there would be a reading of a path that was never taken.
 
 #### Scenario: Omni path works
 - **WHEN** the Omni-proxied call succeeds
@@ -82,7 +82,7 @@ Each read-only tool SHALL first call through the Omni-proxied reader credential;
 
 ### Requirement: Operator credential expiry is surfaced
 
-At startup the server SHALL read the operator credential's certificate expiry; an expired credential SHALL be treated as absent with the expiry date recorded as the reason, and a credential expiring in fewer than 30 days SHALL cause every tool response to begin with a warning line naming the date.
+At startup the server SHALL read the operator credential's certificate expiry (`talosctl config info`, the `Certificate expires: … (YYYY-MM-DD)` line); an expired credential (date on or before today) SHALL be treated as absent with the expiry date recorded as the reason; a credential whose expiry cannot be read SHALL likewise be treated as absent with the read error as the reason (fail closed); and a credential expiring in fewer than 30 days SHALL cause every tool response to begin with a warning line naming the date.
 
 #### Scenario: Near expiry warns on every response
 - **WHEN** the operator credential expires in fewer than 30 days
@@ -91,3 +91,7 @@ At startup the server SHALL read the operator credential's certificate expiry; a
 #### Scenario: Expired reads as absent
 - **WHEN** the operator credential's certificate has expired
 - **THEN** `reboot_node` is not registered and the fallback-unavailable message names the expiry date
+
+#### Scenario: Unreadable expiry reads as absent
+- **WHEN** the operator credential file is non-empty but `talosctl config info` fails or prints no expiry line
+- **THEN** `reboot_node` is not registered and the fallback-unavailable message carries talosctl's error
