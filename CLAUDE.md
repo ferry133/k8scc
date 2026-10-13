@@ -103,7 +103,7 @@ Why it exists: 2026-10-11 on jg-jiahd, `im` diagnosed the fault correctly and co
   4. **`permissions.ask`** in the agent (below) — the fourth layer, not the first.
 
   Own node: `POD_IP` (downward API `status.podIP`; hostNetwork ⇒ the node's address). `node == POD_IP` ⇒ `--wait=false`, and the response says this pod restarts with it; any other node ⇒ `--wait=true --timeout=600s`. ⚠️ **`talosctl reboot --wait` defaults to true** (talosctl 1.12), so "without `--wait`" has to be spelled `--wait=false` — a bare `reboot` would wait on its own death.
-- **Audit**: every `reboot_node` call — token, execute, refused — writes one JSON line to the sidecar's stdout (`ts`, `tool`, `node`, `phase`, `reason` or `rc`, `user`), i.e. `kubectl logs -c talos-mcp`. The direct-LAN path never passes Omni, so this is its only record. `user` is the sidecar's own `CLAUDE_USER_ID` env as set by the pod spec — **not** the ttyd session's identity, which lives in `app` and does not cross.
+- **Audit**: every `reboot_node` call — token, execute, refused — writes one JSON line to the sidecar's stdout (`ts`, `tool`, `node`, `phase`, `reason` or `rc`, `user`), i.e. `kubectl logs -c talos-mcp`. The direct-LAN path never passes Omni, so this is its only record. `user` is the sidecar's own `CLAUDE_USER_ID` env — **not** the ttyd session's identity, which lives in `app` and does not cross. jg-base's HelmRelease deliberately does not set it on the `talos-mcp` container (root decision, 2026-10-13), so today the field is empty.
 - **Approval comes from the person at the ttyd session — the customer — not from the operator company.** `claude-session` writes `permissions.allow` for the four `mcp__talos__get_*` tools and `permissions.ask` for `mcp__talos__reboot_node` whenever `TALOS_MCP_URL` is set. It merges rather than overwrites: customer entries keep their order, a second run is byte-identical (the file is not even rewritten), and an unparseable file is left alone and the terminal told. Reboot is never placed under `allow`. **Whether `ask` holds the prompt in auto mode or counts down to an auto-deny is unmeasured** (root tasks 5.6 in `jg-base`); until it is, the server-side token is the gate and the prompt is a courtesy. If it does auto-deny: switch to manual mode before a reboot.
 
 ### Inbox convention (`~/workspace/inbox/`)
@@ -341,7 +341,7 @@ build: `build=false`, `build-ops=true`.
 | `TALOS_OPERATOR_CONFIG` (talos-mcp only) | **Optional.** Path to the direct-LAN `os:operator` talosconfig (`/etc/talos-mcp/operator-talosconfig`, mounted from the Secret key `operatorConfig`). Absent, 0 bytes, unreadable expiry or expired ⇒ reader-only behaviour, with the reason named in responses. Present and valid ⇒ read fallback over the direct LAN and `reboot_node` registered |
 | `POD_IP` (talos-mcp only) | Downward API `status.podIP`. hostNetwork makes it the node's own address, so a confirmed `reboot_node` of that node is issued with `--wait=false` |
 | `TALOS_MCP_READ_TIMEOUT` (talos-mcp only) | Seconds per talosctl read attempt, default 15; a timeout is a transport-class failure and triggers the direct-LAN retry |
-| `CLAUDE_USER_ID` (talos-mcp only) | Recorded as `user` in `reboot_node` audit lines. The sidecar's own env — the ttyd session's identity never crosses from `app` |
+| `CLAUDE_USER_ID` (talos-mcp only) | Recorded as `user` in `reboot_node` audit lines. The sidecar's own env — the ttyd session's identity never crosses from `app`. jg-base leaves it unset on this container, so the field is empty |
 
 ## Persistent Memory
 

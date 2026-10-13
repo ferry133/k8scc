@@ -50,7 +50,7 @@ When `node` equals the sidecar's own host address (`POD_IP`, since the pod is ho
 
 ### Requirement: Every mutating call is audited to the sidecar's stdout
 
-Each `reboot_node` call — token issue, execute, or refusal — SHALL write one JSON line to stdout containing timestamp, tool, node, phase, reason (for refusals), exit code (for executes) and the `CLAUDE_USER_ID` of the session, so that `kubectl logs -c talos-mcp` is a complete record of mutating activity, including the direct-LAN path that Omni never sees.
+Each `reboot_node` call — token issue, execute, or refusal — SHALL write one JSON line to stdout containing timestamp, tool, node, phase, reason (for refusals), exit code (for executes) and the `CLAUDE_USER_ID` of the sidecar's environment (empty when the pod spec does not set it — root's decision for the `talos-mcp` container, since the ttyd session's identity lives in `app` and does not cross), so that `kubectl logs -c talos-mcp` is a complete record of mutating activity, including the direct-LAN path that Omni never sees.
 
 #### Scenario: Refused call is still logged
 - **WHEN** a call is refused for any reason
