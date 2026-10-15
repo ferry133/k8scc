@@ -43,15 +43,16 @@ hostNetwork → `POD_IP`（downward API）＝ node IP。`node == POD_IP` 時指�
 - 那一行後面接一個 8 秒、按 Enter 可跳過的停頓：`tmux` 一 attach 就清螢幕，印了只亮一格的字與沒印在人眼裡是同一件事。只在有未讀檔時停。
 
 **9. 守衛在伺服端、兩段都查（2026-10-15 裁定後，root 7.2）。**
-同一次 `kubectl get nodes -o json` 同時供 allowlist 與 quorum：其他 control-plane（label `node-role.kubernetes.io/control-plane`）任一 `Ready≠True` 就拒、點名那台；目標自己不 Ready 不算（那通常正是要重啟的理由）；worker 不算。冷卻 600 秒＝一個 `--wait` 視窗，從下令那刻起算，存記憶體（sidecar 重啟歸零——自身節點重啟本來就會）；數字寫進 token 回應（`cooldown_after`）與拒絕訊息。`reason` 必填，在 MCP schema 層就是 required；空字串在任何查詢之前拒；寫進每一行 audit 的 `stated_reason`——與 refused 行既有的 `reason`（拒絕原因）是兩個欄位，不混用。自身節點時兩段回應都明說 im 隨之停擺、單節點叢集等於整個服務、回來前無人能看結果。
+同一次 `kubectl get nodes -o json` 同時供 allowlist 與 quorum：其他 control-plane（label `node-role.kubernetes.io/control-plane`）任一 `Ready≠True` 就拒、點名那台；目標自己不 Ready 不算（那通常正是要重啟的理由）；worker 不算。冷卻 600 秒＝一個 `--wait` 視窗，從下令那刻起算，存記憶體（sidecar 重啟歸零）；**自身節點改從它上次開機起算**（`/proc/uptime`，不受 namespace 隔離、讀到的是 host 的開機秒數）——自身節點重啟一定連 sidecar 一起重啟，記憶體裡的紀錄活不過它要記的那件事（fleet-ops-77 2026-10-15 在拋棄式三 CP 量到）；任何一次開機都算，讀不到就拒（fail closed）；數字寫進 token 回應（`cooldown_after`）與拒絕訊息。`reason` 必填，在 MCP schema 層就是 required；空字串在任何查詢之前拒；寫進每一行 audit 的 `stated_reason`——與 refused 行既有的 `reason`（拒絕原因）是兩個欄位，不混用。自身節點時兩段回應都明說 im 隨之停擺、單節點叢集等於整個服務、回來前無人能看結果。
 - *替代*：quorum 只在目標是 control-plane 時查——root 7.2 的字面是「另一台控制平面不 Ready 就拒」，不分目標；叢集已降級時多一次重啟是風險不是修復。
-- *替代*：冷卻存到 PVC——sidecar 沒掛 PVC，而且自身節點重啟後 pod 本來就回不到同一段記憶；接受，並在 spec 寫明。
+- *替代*：冷卻存到 PVC／emptyDir 或 node annotation——前者要 jg-base 加掛載、而 emptyDir 能否活過節點重啟沒量過；後者要新增 `patch nodes` RBAC。開機時鐘不用新權限、不用新掛載，而且量的正是要防的那件事（節點剛起來）。
 
 ## Risks / Trade-offs
 
 - **[Risk] `kubectl` 在 sidecar 內要有 SA token** → automount 預設開、同 pod 同 SA；啟動時 `kubectl auth can-i list nodes` 一次，失敗記進 `MISSING_CONFIG` 類的啟動讀數（不擋唯讀工具）。
 - **[Risk] token 存在記憶體，sidecar 重啟就失效** → 可接受，agent 重拿一次。
-- **[Risk] 冷卻只在記憶體** → 自身節點重啟後歸零；agent 若在 pod 回來後立刻再下一次，守衛不擋，audit 看得見（兩行 `execute` 相隔 < 600 s）。
+- **[Risk] 其他節點的冷卻只在記憶體** → sidecar 因別的原因重啟（換映像、被重排）會歸零；audit 看得見（兩行 `execute` 相隔 < 600 s），quorum 守衛仍在。自身節點已改用開機時鐘，不在此列。
+- **[Risk] 自身節點開機後 600 秒內一律拒** → 包括不是 im 下令的開機（停電回來）。這是刻意的：剛起來的節點再被重啟，正是冷卻要擋的迴圈。
 - **[Risk] 直連退路被誤用成「平時也直連」** → 只在主路失敗後、只重試一次、首行標記；測試裡斷言主路成功時 `[via Omni]`。
 - **[Trade-off] `permissions.ask` 在 auto mode 的實際行為** → 2026-10-15 之後與本設計無關（reboot 在 `allow`）；root 5.6 的讀數只剩歷史價值。設計的底線一直是 server 端：兩段式 token 加第 9 條的守衛。
 

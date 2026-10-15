@@ -55,13 +55,15 @@ class Harness:
         self.operator.write_text("context: operator\n")
         self.empty = d / "empty-talosconfig"
         self.empty.write_bytes(b"")
+        self.uptime = d / "uptime"   # stands in for /proc/uptime: the own node's boot clock
         self.mod = None
 
     def close(self):
         self.tmp.cleanup()
 
     def load(self, *, reader=True, operator="ok", expires_days=365, omni="ok", direct="ok",
-             kubectl="ok", nodes=f"{NODE_A} {NODE_B}", cp="", notready="", pod_ip="", known_nodes="", read_timeout="15"):
+             kubectl="ok", nodes=f"{NODE_A} {NODE_B}", cp="", notready="", pod_ip="", known_nodes="", read_timeout="15",
+             uptime="86400.00 170000.00"):
         for k in ENV_KEYS:
             os.environ.pop(k, None)
         if reader:
@@ -92,9 +94,17 @@ class Harness:
             self.log.unlink()
         import talos_mcp_server
         self.mod = importlib.reload(talos_mcp_server)
+        self.set_uptime(uptime)
+        self.mod.UPTIME_FILE = str(self.uptime)
         if self.log.exists():
             self.log.unlink()   # drop the startup config-info / can-i calls
         return self.mod
+
+    def set_uptime(self, content):
+        if content is None:
+            self.uptime.unlink(missing_ok=True)
+        else:
+            self.uptime.write_text(content)
 
     def calls(self, binary=None):
         if not self.log.exists():
@@ -295,6 +305,28 @@ class OperatorCredentialState(unittest.TestCase):
         with self.subTest(control="readable: registered"):
             self.h.load(operator="ok")
             self.assertIn("reboot_node", self.h.tools())
+
+
+class StartupReadings(unittest.TestCase):
+    """The lines printed under __main__ come from _startup_readings(), which an
+    in-process rig can call directly (fleet-ops-77 could not read them, 2026-10-15)."""
+    def setUp(self):
+        self.h = Harness()
+        self.addCleanup(self.h.close)
+
+    def test_guards_line_names_every_guard_and_the_boot_clock(self):
+        m = self.h.load(pod_ip=NODE_A, uptime="1234.56 2000.00")
+        guards = [r for r in m._startup_readings() if r.startswith("reboot_node guards:")]
+        self.assertEqual(len(guards), 1, m._startup_readings())
+        for part in ("stated reason required", "(quorum)", "600 s per-node cooldown",
+                     f"own node ({NODE_A}) counted from boot", "uptime 1234 s"):
+            self.assertIn(part, guards[0])
+        with self.subTest(control="unreadable clock is said, not hidden"):
+            self.h.set_uptime(None)
+            self.assertIn("uptime unreadable", next(r for r in m._startup_readings() if r.startswith("reboot_node guards:")))
+        with self.subTest(control="no operator credential: no guards line"):
+            m = self.h.load(operator="absent")
+            self.assertFalse([r for r in m._startup_readings() if r.startswith("reboot_node guards:")])
 
 
 class RebootNode(unittest.TestCase):
@@ -507,6 +539,45 @@ class RebootNode(unittest.TestCase):
         with self.subTest(control="the window ends: the same node is accepted again"):
             m._now = lambda: t0 + 601
             self.assertIn("token", json.loads(self.h.call(m.reboot_node, NODE_A, REASON)[0]))
+
+    def test_own_node_cooldown_counts_from_boot_not_from_memory(self):
+        # The own-node reboot restarts this sidecar, so _LAST_EXECUTE is empty when
+        # the pod is back (fleet-ops-77, 2026-10-15). A fresh module with the node
+        # 100 s after boot is exactly that state.
+        m = self.h.load(pod_ip=NODE_A, uptime="100.00 300.00")
+        out, audit = self.h.call(m.reboot_node, NODE_A, REASON)
+        self.assertTrue(out.startswith("refused:"), out)
+        self.assertIn("booted 100 s ago", out)
+        self.assertIn("500 s left", out)
+        self.assertIn("Any boot counts", out)       # why a refusal right after power returns is not a bug
+        self.assertIn("power loss", out)
+        self.assertEqual(self.h.calls("talosctl"), [])
+        self.assertEqual(audit[-1]["phase"], "refused")
+        self.assertEqual(audit[-1]["stated_reason"], REASON)
+        with self.subTest(control="another node is not on this node's boot clock"):
+            self.assertIn("token", json.loads(self.h.call(m.reboot_node, NODE_B, REASON)[0]))
+        with self.subTest(control="the window ends: 601 s after boot the own node is accepted"):
+            self.h.set_uptime("601.00 1200.00")
+            self.assertIn("token", json.loads(self.h.call(m.reboot_node, NODE_A, REASON)[0]))
+        with self.subTest(control="checked again at execute"):
+            body = json.loads(self.h.call(m.reboot_node, NODE_A, REASON)[0])
+            self.h.set_uptime("30.00 60.00")
+            out, _ = self.h.call(m.reboot_node, NODE_A, REASON, confirm=body["token"])
+            self.assertIn("booted 30 s ago", out)
+            self.assertEqual(self.reboots(), [])
+
+    def test_unreadable_boot_clock_fails_closed_for_the_own_node_only(self):
+        m = self.h.load(pod_ip=NODE_A, uptime=None)
+        out, _ = self.h.call(m.reboot_node, NODE_A, REASON)
+        self.assertTrue(out.startswith("refused:"), out)
+        self.assertIn("boot clock", out)
+        self.assertIn("fail closed", out)
+        self.assertEqual(self.h.calls("talosctl"), [])
+        with self.subTest(control="garbage reads as unreadable too"):
+            self.h.set_uptime("not-a-number")
+            self.assertIn("fail closed", self.h.call(m.reboot_node, NODE_A, REASON)[0])
+        with self.subTest(control="another node does not consult the own node's clock"):
+            self.assertIn("token", json.loads(self.h.call(m.reboot_node, NODE_B, REASON)[0]))
 
     def test_own_node_responses_say_im_goes_down_with_it(self):
         m = self.h.load(pod_ip=NODE_A)
