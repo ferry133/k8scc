@@ -1,14 +1,36 @@
 #!/usr/bin/env bash
 # Fake kubectl for test/test_talos_mcp_server.py. Logs like the talosctl shim.
-#   SHIM_KUBECTL — ok | fail   (default ok)
-#   SHIM_NODES   — what `get nodes -o jsonpath=…InternalIP…` prints (space-separated)
+#   SHIM_KUBECTL  — ok | fail   (default ok)
+#   SHIM_NODES    — InternalIPs the NodeList carries (space-separated)
+#   SHIM_CP       — which of those carry the control-plane role label
+#   SHIM_NOTREADY — which of those report Ready=False
 set -u
 { printf 'kubectl'; printf '\t%s' "$@"; printf '\n'; } >> "${SHIM_LOG:-/dev/null}"
 case "${SHIM_KUBECTL:-ok}" in
   fail) echo "Unable to connect to the server: dial tcp 10.96.0.1:443: i/o timeout" >&2; exit 1 ;;
 esac
-case "${1:-}" in
-  auth) echo yes; exit 0 ;;
-  get)  printf '%s' "${SHIM_NODES:-}"; exit 0 ;;
-  *)    echo "shim: unexpected kubectl $*" >&2; exit 98 ;;
+case "${1:-} ${2:-}" in
+  "auth can-i") echo yes; exit 0 ;;
+  "get nodes")
+    python3 - <<'NODELIST'
+import json, os
+cp = set(os.environ.get("SHIM_CP", "").split())
+down = set(os.environ.get("SHIM_NOTREADY", "").split())
+items = []
+for ip in os.environ.get("SHIM_NODES", "").split():
+    name = "node-" + ip.replace(".", "-")
+    labels = {"kubernetes.io/hostname": name}
+    if ip in cp:
+        labels["node-role.kubernetes.io/control-plane"] = ""
+    items.append({
+        "metadata": {"name": name, "labels": labels},
+        "status": {
+            "addresses": [{"type": "InternalIP", "address": ip}, {"type": "Hostname", "address": name}],
+            "conditions": [{"type": "Ready", "status": "False" if ip in down else "True"}],
+        },
+    })
+print(json.dumps({"kind": "NodeList", "items": items}))
+NODELIST
+    exit 0 ;;
+  *) echo "shim: unexpected kubectl $*" >&2; exit 98 ;;
 esac

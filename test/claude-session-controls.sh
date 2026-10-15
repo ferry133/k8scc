@@ -70,14 +70,15 @@ has_perms() { python3 -c 'import json,sys; sys.exit(0 if "permissions" in json.l
 # calls -- red on Linux, green on macOS (CI run 38475915481, 2026-10-13).
 mtime_of() { python3 -c 'import os,sys; print(os.stat(sys.argv[1]).st_mtime_ns)' "$1/.claude/settings.json"; }
 
-READS='["mcp__talos__get_node_status", "mcp__talos__get_etcd_members", "mcp__talos__get_link_status", "mcp__talos__get_service_logs"]'
+# all five tools under allow since the 2026-10-15 ruling; reboot_node is never under ask
+PROFILE='["mcp__talos__get_node_status", "mcp__talos__get_etcd_members", "mcp__talos__get_link_status", "mcp__talos__get_service_logs", "mcp__talos__reboot_node"]'
 
 echo "permission profile"
 # fresh pod, sidecar present
 h="$work/fresh"
 out=$(run_session "$h" TALOS_MCP_URL=http://127.0.0.1:8765/sse)
-check "fresh pod: allow holds the four read tools" [ "$(allow_of "$h")" = "$READS" ]
-check "fresh pod: ask holds reboot_node"            [ "$(ask_of "$h")" = '["mcp__talos__reboot_node"]' ]
+check "fresh pod: allow holds all five tools"      [ "$(allow_of "$h")" = "$PROFILE" ]
+check "fresh pod: no ask key is written"            [ "$(ask_of "$h")" = "null" ]
 check "fresh pod: the initial env key survives"    grep -q '"DISABLE_AUTOUPDATER": "1"' "$h/.claude/settings.json"
 check "fresh pod: tmux was exec'd with claude"      grep -q '^tmux -u new-session -A -s claude -- claude$' "$h/fake.log"
 check "fresh pod: talos registered"                 grep -q '^claude mcp add --transport sse --scope local talos http://127.0.0.1:8765/sse$' "$h/fake.log"
@@ -92,17 +93,31 @@ check "second run: file not rewritten (mtime)"      [ "$mtime1" = "$mtime2" ]
 sleep 1; touch "$h/.claude/settings.json"
 check_not "control: mtime reading moves on a rewrite" [ "$(mtime_of "$h")" = "$mtime2" ]
 
-# customer rules survive, order kept, no duplicates
-h="$work/customer"
+# existing rules survive, order kept, no duplicates
+h="$work/existing"
 mkdir -p "$h/.claude"
 cat > "$h/.claude/settings.json" <<'EOF'
 {"env":{"DISABLE_AUTOUPDATER":"1"},"permissions":{"allow":["Bash(ls:*)","mcp__talos__get_link_status"],"deny":["Bash(rm:*)"]},"theme":"dark"}
 EOF
 run_session "$h" TALOS_MCP_URL=http://127.0.0.1:8765/sse >/dev/null
-check "customer: own allow entry stays first"       [ "$(allow_of "$h")" = '["Bash(ls:*)", "mcp__talos__get_link_status", "mcp__talos__get_node_status", "mcp__talos__get_etcd_members", "mcp__talos__get_service_logs"]' ]
-check "customer: deny list untouched"               grep -q '"Bash(rm:\*)"' "$h/.claude/settings.json"
-check "customer: unrelated top-level key kept"      grep -q '"theme": "dark"' "$h/.claude/settings.json"
-check "customer: ask added"                         [ "$(ask_of "$h")" = '["mcp__talos__reboot_node"]' ]
+check "existing: own allow entry stays first"       [ "$(allow_of "$h")" = '["Bash(ls:*)", "mcp__talos__get_link_status", "mcp__talos__get_node_status", "mcp__talos__get_etcd_members", "mcp__talos__get_service_logs", "mcp__talos__reboot_node"]' ]
+check "existing: deny list untouched"               grep -q '"Bash(rm:\*)"' "$h/.claude/settings.json"
+check "existing: unrelated top-level key kept"      grep -q '"theme": "dark"' "$h/.claude/settings.json"
+check "existing: no ask key invented"               [ "$(ask_of "$h")" = "null" ]
+
+# migration: a pod that ran the previous image carries reboot_node under ask on
+# its PVC; only that entry leaves ask, anything else under ask stays
+h="$work/migrate"
+mkdir -p "$h/.claude"
+cat > "$h/.claude/settings.json" <<'EOF'
+{"env":{"DISABLE_AUTOUPDATER":"1"},"permissions":{"allow":["mcp__talos__get_node_status","mcp__talos__get_etcd_members","mcp__talos__get_link_status","mcp__talos__get_service_logs"],"ask":["mcp__talos__reboot_node","Bash(curl:*)"]}}
+EOF
+run_session "$h" TALOS_MCP_URL=http://127.0.0.1:8765/sse >/dev/null
+check "migrate: reboot_node moved out of ask"       [ "$(ask_of "$h")" = '["Bash(curl:*)"]' ]
+check "migrate: reboot_node now under allow"        [ "$(allow_of "$h")" = "$PROFILE" ]
+before=$(settings_of "$h")
+run_session "$h" TALOS_MCP_URL=http://127.0.0.1:8765/sse >/dev/null
+check "migrate: second run changes nothing"         [ "$(settings_of "$h")" = "$before" ]
 
 # negative control: sidecar absent -> permissions never appears
 h="$work/nosidecar"

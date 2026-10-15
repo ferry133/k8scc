@@ -24,20 +24,25 @@ fi
 # test/claude-session-controls.sh runs this whole script against fake `claude`
 # and `tmux` binaries, so these are exercised as shipped, not as copied.
 
-# Merge the Talos MCP permission profile into settings.json: the four read
-# tools auto-allowed, reboot_node always asked (never allowed — the approval
-# belongs to whoever is at this terminal). Appends without duplicates, never
-# removes or reorders what the customer put there, and writes nothing when the
-# result is byte-identical, so a second run is a no-op. python3 rather than
-# jq: python3 is in the base image for the MCP servers; jq only in factory.
-# A file it cannot parse is left exactly as it was and the failure is said.
+# Merge the Talos MCP permission profile into settings.json: all five tools
+# auto-allowed -- reboot_node included since the 2026-10-15 ruling (im is the
+# company's tool and only company staff reach this ttyd; the reboot's gates are
+# the sidecar's own, not a prompt). The entry this profile used to put under
+# `ask` is moved out: pods that ran the previous image carry it on the PVC, and
+# one name under both lists is a question the permission layer answers however
+# it likes. Appends without duplicates, never removes or reorders anything
+# else, and writes nothing when the result is byte-identical, so a second run
+# is a no-op. python3 rather than jq: python3 is in the base image for the MCP
+# servers; jq only in factory. A file it cannot parse is left exactly as it was
+# and the failure is said.
 merge_talos_permissions() {
     python3 - "$1" <<'PY'
 import json, pathlib, sys
 
 ALLOW = ["mcp__talos__get_node_status", "mcp__talos__get_etcd_members",
-         "mcp__talos__get_link_status", "mcp__talos__get_service_logs"]
-ASK = ["mcp__talos__reboot_node"]
+         "mcp__talos__get_link_status", "mcp__talos__get_service_logs",
+         "mcp__talos__reboot_node"]
+LEAVE_ASK = ["mcp__talos__reboot_node"]   # where this profile put it before 2026-10-15
 
 path = pathlib.Path(sys.argv[1])
 raw = path.read_text() if path.exists() else ""
@@ -50,13 +55,17 @@ if not isinstance(data, dict):
 perms = data.setdefault("permissions", {})
 if not isinstance(perms, dict):
     sys.exit(f"{path}: permissions is not an object; left untouched")
-for key, wanted in (("allow", ALLOW), ("ask", ASK)):
-    current = perms.setdefault(key, [])
-    if not isinstance(current, list):
-        sys.exit(f"{path}: permissions.{key} is not a list; left untouched")
-    for entry in wanted:
-        if entry not in current:
-            current.append(entry)
+allow = perms.setdefault("allow", [])
+if not isinstance(allow, list):
+    sys.exit(f"{path}: permissions.allow is not a list; left untouched")
+for entry in ALLOW:
+    if entry not in allow:
+        allow.append(entry)
+ask = perms.get("ask")
+if ask is not None:
+    if not isinstance(ask, list):
+        sys.exit(f"{path}: permissions.ask is not a list; left untouched")
+    perms["ask"] = [entry for entry in ask if entry not in LEAVE_ASK]
 new = json.dumps(data, indent=2, ensure_ascii=False) + "\n"
 if new != raw:
     path.write_text(new)
@@ -122,7 +131,7 @@ if [ -n "${TALOS_MCP_URL}" ]; then
         fi
     fi
     if ! merge_talos_permissions "${CLAUDE_HOME}/.claude/settings.json"; then
-        echo "⚠ settings.json 的 talos permission 設定沒有寫入（見上一行）——reboot_node 仍會提示，但 get_* 每次都會問" >&2
+        echo "⚠ settings.json 的 talos permission 設定沒有寫入（見上一行）——mcp__talos__* 每次都會問" >&2
     fi
 fi
 
@@ -130,8 +139,8 @@ echo ""
 echo "✓ 歡迎，${CLAUDE_USER_ID}"
 echo ""
 
-# The operator company drops hand-over notes into ~/workspace/inbox/ (on the
-# workspace PVC). Say so before the agent starts. tmux clears the screen the
+# Company colleagues who are not at this ttyd drop hand-over notes for im into
+# ~/workspace/inbox/ (on the workspace PVC). Say so before the agent starts. tmux clears the screen the
 # moment it attaches, so the line gets a short, Enter-skippable pause --
 # otherwise it is on screen for one frame, which is the same as not printed.
 if notice=$(inbox_notice "${CLAUDE_HOME}/workspace/inbox") && [ -n "${notice}" ]; then

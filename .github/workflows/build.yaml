@@ -77,6 +77,11 @@ jobs:
       - name: Check the claude-session controls
         run: test/claude-session-controls.sh
 
+      # im's managed policy (root 7.3b): shipped to /etc/claude-code/CLAUDE.md
+      # and saying what the 2026-10-15 ruling requires, with a control per line.
+      - name: Check the im policy controls
+        run: test/im-policy-controls.sh
+
       - name: Set up QEMU (multi-arch)
         uses: docker/setup-qemu-action@v3
 

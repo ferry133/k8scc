@@ -82,6 +82,8 @@ USER_ID = os.environ.get("CLAUDE_USER_ID", "")
 TOKEN_TTL = 120            # seconds a reboot token stays valid
 REBOOT_WAIT_TIMEOUT = 600  # seconds to wait for another node to come back
 REBOOT_NOWAIT_TIMEOUT = 30 # seconds for the fire-and-forget own-node case
+REBOOT_COOLDOWN = 600      # seconds after an execute before the same node may be rebooted again:
+                           # one --wait window, so a second call during the first's wait is inside it
 EXPIRY_WARN_DAYS = 30
 
 # Transport-class failures of the Omni-proxied path: the road, not the
@@ -301,13 +303,56 @@ def get_service_logs(node: str, service: str, lines: int = 50) -> str:
 _TOKENS: dict[str, tuple[str, float]] = {}   # token -> (node, expires_at)
 
 
-def _cluster_nodes() -> "tuple[set[str] | None, str]":
-    """InternalIPs of the nodes in the cluster right now, via this pod's own SA."""
-    jsonpath = '{.items[*].status.addresses[?(@.type=="InternalIP")].address}'
-    result = _exec([KUBECTL, "get", "nodes", "-o", f"jsonpath={jsonpath}"], timeout=20)
+@dataclass(frozen=True)
+class NodeInfo:
+    name: str
+    ip: str
+    control_plane: bool
+    ready: bool
+
+
+def _cluster_inventory() -> "tuple[dict[str, NodeInfo] | None, str]":
+    """The cluster's nodes right now, keyed by InternalIP, via this pod's own SA.
+    One `kubectl get nodes -o json` serves both the allowlist and the quorum
+    guard, so the two never disagree about what the cluster looked like."""
+    result = _exec([KUBECTL, "get", "nodes", "-o", "json"], timeout=20)
     if not result.ok:
         return None, (result.stderr or result.stdout).strip() or f"kubectl exit {result.rc}"
-    return set(result.stdout.split()), ""
+    try:
+        items = json.loads(result.stdout)["items"]
+    except (ValueError, KeyError, TypeError) as exc:
+        return None, f"kubectl get nodes did not return a NodeList ({exc})"
+    inventory: dict[str, NodeInfo] = {}
+    for item in items:
+        meta = item.get("metadata") or {}
+        status = item.get("status") or {}
+        ips = [a.get("address") for a in status.get("addresses") or [] if a.get("type") == "InternalIP"]
+        if not ips:
+            continue   # unaddressable: neither a reboot target nor checkable
+        ready = any(c.get("type") == "Ready" and c.get("status") == "True" for c in status.get("conditions") or [])
+        info = NodeInfo(name=meta.get("name") or ips[0], ip=ips[0],
+                        control_plane="node-role.kubernetes.io/control-plane" in (meta.get("labels") or {}),
+                        ready=ready)
+        for ip in ips:
+            inventory[ip] = info
+    return inventory, ""
+
+
+_LAST_EXECUTE: dict[str, float] = {}   # node -> _now() at its last execute (in-memory: a sidecar restart forgets it)
+
+
+def _quorum_block(node: str, inventory: "dict[str, NodeInfo]") -> str:
+    """The first *other* control-plane node that is not Ready, as 'name (ip)', else ''.
+    The target itself may be NotReady -- that is usually why it is being rebooted."""
+    for info in sorted({i.ip: i for i in inventory.values()}.values(), key=lambda i: i.ip):
+        if info.control_plane and info.ip != node and not info.ready:
+            return f"{info.name} ({info.ip})"
+    return ""
+
+
+def _cooldown_left(node: str, now: float) -> int:
+    last = _LAST_EXECUTE.get(node)
+    return 0 if last is None else max(0, int(REBOOT_COOLDOWN - (now - last)))
 
 
 def _audit(**fields: object) -> None:
@@ -318,8 +363,8 @@ def _audit(**fields: object) -> None:
     print(json.dumps(line, ensure_ascii=False), flush=True)
 
 
-def _refuse(node: str, reason: str) -> str:
-    _audit(node=node, phase="refused", reason=reason)
+def _refuse(node: str, reason: str, **extra: object) -> str:
+    _audit(node=node, phase="refused", reason=reason, **extra)
     return _respond(f"refused: {reason}")
 
 
@@ -335,6 +380,11 @@ CORDON_NOTE = ("If the node comes back SchedulingDisabled, find out who cordoned
                "already on the node before the reboot survives it, and reboot_node never uncordons.")
 
 
+OWN_NODE_NOTE = ("This is the node im itself runs on: rebooting it takes im down with it -- on a "
+                 "single-node cluster that is the whole service -- and nobody can see the result "
+                 "until the pod is back.")
+
+
 def _reboot_argv(node: str) -> list[str]:
     argv = [TALOSCTL, f"--talosconfig={OPERATOR_CONFIG}", "--endpoints", node, "--nodes", node, "reboot"]
     if node == POD_IP:
@@ -344,31 +394,48 @@ def _reboot_argv(node: str) -> list[str]:
     return argv
 
 
-def reboot_node(node: str, confirm: str = "") -> str:
-    """優雅重啟一個節點（graceful reboot），兩段式確認。
-    第一段：只給 node → 不動作，回傳一次性 token（120 秒內有效）與將執行的指令；
-    把它拿給終端機前的人看。第二段：node 加 confirm=<token> → 真的執行，token 作廢。
-    node 必須是叢集當下某個節點的 InternalIP（每次呼叫向 API server 查）。
-    重啟本 pod 所在的節點時不等待（pod 會跟著重開）。"""
-    allowed, err = _cluster_nodes()
-    if allowed is None:
-        return _refuse(node, f"node allowlist unavailable, refusing (fail closed): kubectl get nodes: {err}")
-    if node not in allowed:
-        return _refuse(node, f"{node!r} is not an InternalIP of any node currently in this cluster ({', '.join(sorted(allowed)) or 'no nodes returned'})")
-
+def reboot_node(node: str, reason: str, confirm: str = "") -> str:
+    """優雅重啟一個節點（graceful reboot），兩段式確認，守衛在伺服端。
+    第一段：node 與 reason → 不動作，回傳一次性 token（120 秒內有效）與將執行的指令——
+    這是 agent 自己重讀 will_run 與 reason 的第二眼，不是交給人按。第二段：加
+    confirm=<token> → 真的執行，token 作廢。
+    reason 必填，寫進每一行 audit。守衛（兩段都查）：node 必須是叢集當下某個節點的
+    InternalIP；其他 control-plane 節點任一不 Ready 就拒（quorum）；同一節點在上一次
+    執行後 600 秒內再呼叫被拒（冷卻）。重啟本 pod 所在的節點時不等待（pod 會跟著重開）。"""
+    stated = reason.strip()
+    if not stated:
+        return _refuse(node, "reason is required: state the diagnosis that calls for this reboot", stated_reason=stated)
+    inventory, err = _cluster_inventory()
+    if inventory is None:
+        return _refuse(node, f"node inventory unavailable, refusing (fail closed): kubectl get nodes: {err}", stated_reason=stated)
+    if node not in inventory:
+        return _refuse(node, f"{node!r} is not an InternalIP of any node currently in this cluster ({', '.join(sorted(inventory)) or 'no nodes returned'})", stated_reason=stated)
+    blocked_by = _quorum_block(node, inventory)
+    if blocked_by:
+        return _refuse(node, f"control-plane node {blocked_by} is not Ready; rebooting {node} now would risk etcd quorum (quorum guard)", stated_reason=stated)
     now = _now()
+    left = _cooldown_left(node, now)
+    if left:
+        return _refuse(node, f"{node} was rebooted by this sidecar {REBOOT_COOLDOWN - left} s ago; cooldown is {REBOOT_COOLDOWN} s, {left} s left", stated_reason=stated)
+
+    own_node = node == POD_IP
     if not confirm:
         token = secrets.token_urlsafe(24)
         _TOKENS[token] = (node, now + TOKEN_TTL)
-        _audit(node=node, phase="token")
+        _audit(node=node, phase="token", stated_reason=stated)
+        note = ("No action was taken. Re-read will_run against your reason; if it still holds, "
+                f"call reboot_node(node, reason, confirm=<token>) within {TOKEN_TTL} s to execute. "
+                "The token is single-use and bound to this node; the guards (control-plane quorum, "
+                f"{REBOOT_COOLDOWN} s per-node cooldown) are checked again at execute. " + CORDON_NOTE)
+        if own_node:
+            note += " " + OWN_NODE_NOTE
         body = {
             "token": token,
             "node": node,
             "expires_in": TOKEN_TTL,
+            "cooldown_after": REBOOT_COOLDOWN,
             "will_run": " ".join(_reboot_argv(node)),
-            "note": "No action was taken. Show this to the person at the terminal; "
-                    f"call reboot_node(node, confirm=<token>) within {TOKEN_TTL} s to execute. "
-                    "The token is single-use and bound to this node. " + CORDON_NOTE,
+            "note": note,
         }
         _prune_tokens(now, keep=token)
         return _respond(json.dumps(body, indent=2))
@@ -376,28 +443,30 @@ def reboot_node(node: str, confirm: str = "") -> str:
     entry = _TOKENS.get(confirm)
     if entry is None:
         _prune_tokens(now)
-        return _refuse(node, "unknown or already-used token — call reboot_node(node) again for a fresh one")
+        return _refuse(node, "unknown or already-used token — call reboot_node(node, reason) again for a fresh one", stated_reason=stated)
     token_node, expires_at = entry
     if token_node != node:
         _prune_tokens(now, keep=confirm)
-        return _refuse(node, f"token was issued for {token_node}, not {node}")
+        return _refuse(node, f"token was issued for {token_node}, not {node}", stated_reason=stated)
     if now > expires_at:
         del _TOKENS[confirm]
         _prune_tokens(now)
-        return _refuse(node, f"token expired ({TOKEN_TTL} s) — call reboot_node(node) again for a fresh one")
+        return _refuse(node, f"token expired ({TOKEN_TTL} s) — call reboot_node(node, reason) again for a fresh one", stated_reason=stated)
 
-    # Consume before running: a crash mid-run must not leave it replayable.
+    # Consume before running: a crash mid-run must not leave it replayable. The
+    # cooldown clock starts here too, so a second call during a long --wait is
+    # already inside the window.
     del _TOKENS[confirm]
     _prune_tokens(now)
+    _LAST_EXECUTE[node] = now
     argv = _reboot_argv(node)
-    own_node = node == POD_IP
     result = _exec(argv, REBOOT_NOWAIT_TIMEOUT if own_node else REBOOT_WAIT_TIMEOUT)
-    _audit(node=node, phase="execute", rc=result.rc, wait=not own_node, command=" ".join(argv))
+    _audit(node=node, phase="execute", rc=result.rc, wait=not own_node, command=" ".join(argv), stated_reason=stated)
     lines = []
     if own_node:
         lines.append(
             f"reboot ordered with --wait=false: this pod runs on {node} and will restart "
-            "with it; once the terminal is back, confirm with get_node_status."
+            "with it; once the terminal is back, confirm with get_node_status. " + OWN_NODE_NOTE
         )
     lines.append(result.transcript())
     lines.append(CORDON_NOTE)
@@ -426,6 +495,9 @@ def _startup_readings() -> list[str]:
         ),
         "reboot_node: " + ("registered" if OPERATOR.ok else "not registered"),
     ]
+    if OPERATOR.ok:
+        readings.append("reboot_node guards: stated reason required; other control-plane nodes must be Ready "
+                        f"(quorum); {REBOOT_COOLDOWN} s per-node cooldown")
     if EXPIRY_WARNING:
         readings.append(EXPIRY_WARNING)
     # Informational: reboot_node's allowlist needs `get nodes` through this

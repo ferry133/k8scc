@@ -194,6 +194,11 @@ COPY memory_mcp_server.py /usr/local/bin/memory_mcp_server.py
 COPY talos_mcp_server.py /usr/local/bin/talos_mcp_server.py
 COPY auth0_login.py /usr/local/bin/auth0_login.py
 COPY claude-session /usr/local/bin/claude-session
+# im's managed policy (root 7.3b, 2026-10-15): Claude Code loads
+# /etc/claude-code/CLAUDE.md first, for every user, and personal settings
+# cannot drop it. The repo copy is not named CLAUDE.md on purpose, so that a
+# session working in this repo does not take im's orders as its own.
+COPY im-policy.md /etc/claude-code/CLAUDE.md
 RUN chmod +x /usr/local/bin/memory_mcp_server.py \
              /usr/local/bin/talos_mcp_server.py \
              /usr/local/bin/auth0_login.py \

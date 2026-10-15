@@ -2,14 +2,14 @@
 
 ### Requirement: Two-phase confirmed graceful reboot
 
-The Talos MCP server SHALL expose `reboot_node(node, confirm)` only while a non-empty, unexpired operator credential is configured. A call without `confirm` SHALL perform no action and return a single-use token bound to `node` with a 120-second expiry plus the exact command that a confirmed call will run; a call with a valid token SHALL run `talosctl --endpoints <node> --nodes <node> reboot` with the operator credential and invalidate the token. No other mutating verb SHALL be reachable through any tool argument.
+The Talos MCP server SHALL expose `reboot_node(node, reason, confirm)` only while a non-empty, unexpired operator credential is configured. A call without `confirm` SHALL perform no action and return a single-use token bound to `node` with a 120-second expiry, the exact command that a confirmed call will run, and the per-node cooldown it will start (`cooldown_after`); a call with a valid token SHALL run `talosctl --endpoints <node> --nodes <node> reboot` with the operator credential and invalidate the token. The server-side guards below (reason, quorum, cooldown) apply to both phases. No other mutating verb SHALL be reachable through any tool argument.
 
 #### Scenario: First call returns a token and does nothing
-- **WHEN** the agent calls `reboot_node(node="10.9.9.23")`
-- **THEN** no Talos API call is made, and the response carries a token, the node, `expires_in: 120`, and the literal command the confirmed call will execute
+- **WHEN** the agent calls `reboot_node(node="10.9.9.23", reason="…")`
+- **THEN** no Talos API call is made, and the response carries a token, the node, `expires_in: 120`, `cooldown_after: 600`, and the literal command the confirmed call will execute
 
 #### Scenario: Confirmed call reboots once
-- **WHEN** the agent calls `reboot_node(node="10.9.9.23", confirm=<that token>)` within 120 seconds
+- **WHEN** the agent calls `reboot_node(node="10.9.9.23", reason="…", confirm=<that token>)` within 120 seconds
 - **THEN** exactly one `talosctl … reboot` is executed against that node, the response contains talosctl's output and exit code, and the same token is refused if presented again
 
 #### Scenario: Token bound to node and time
@@ -36,13 +36,53 @@ Every `reboot_node` call SHALL resolve the set of permitted nodes at that moment
 - **WHEN** `kubectl get nodes` fails
 - **THEN** the call is refused with the kubectl error text; no reboot is attempted
 
+### Requirement: Caller states a reason
+
+`reason` SHALL be a required argument of `reboot_node` in the MCP tool schema; a call whose `reason` is empty or whitespace SHALL be refused before any lookup, and the stated text SHALL be written as `stated_reason` on every audit line the call produces (token, execute, refused). The server records it and does not judge it: the reader of the reason is the company, afterwards, in `kubectl logs -c talos-mcp`. (`reason` on a refused line remains the refusal cause; the two are different fields.)
+
+#### Scenario: Empty reason is refused first
+- **WHEN** `reboot_node` is called with `reason=""` or whitespace
+- **THEN** the call is refused with "reason is required", no `kubectl` or `talosctl` call is made, and the audit line carries `"stated_reason": ""`
+
+#### Scenario: Stated reason reaches both audit lines
+- **WHEN** a token is issued and then confirmed, each call carrying a reason
+- **THEN** both the `token` and the `execute` audit lines carry that text under `stated_reason`
+
+### Requirement: Control-plane quorum guard
+
+Both phases SHALL refuse when any control-plane node *other than the target* (label `node-role.kubernetes.io/control-plane`) does not report `Ready=True` in the same `kubectl get nodes` reading that produced the allowlist, naming that node in the refusal. The target's own readiness is not consulted — a NotReady target is usually why it is being rebooted — and worker nodes do not count.
+
+#### Scenario: Another control plane NotReady
+- **WHEN** a control-plane node other than `node` reports `Ready=False`
+- **THEN** the call is refused before any Talos API call, the refusal names that node and says "quorum", and the audit line records `phase: refused`
+
+#### Scenario: Target NotReady, peers Ready
+- **WHEN** only `node` itself reports `Ready=False`, or the NotReady node is a worker
+- **THEN** the call proceeds to the token or execute phase
+
+#### Scenario: Guard re-read at execute
+- **WHEN** a token was issued while every other control plane was Ready and one has since gone NotReady
+- **THEN** the confirmed call is refused and no reboot runs
+
+### Requirement: Per-node cooldown
+
+After a confirmed reboot is issued, the server SHALL refuse both phases for the same node for 600 seconds, counted from the moment the command was issued (so a second call during the first's `--wait` is inside the window). The refusal SHALL state the cooldown length and the seconds remaining; the token response SHALL carry the length as `cooldown_after`. Other nodes are unaffected. The record lives in the sidecar's memory: a sidecar restart — the own-node reboot included — starts with no history.
+
+#### Scenario: Second reboot inside the window
+- **WHEN** `reboot_node` is called for a node this sidecar rebooted fewer than 600 seconds ago
+- **THEN** the call is refused with "cooldown is 600 s" and the seconds left, and no Talos API call is made
+
+#### Scenario: Window over, or another node
+- **WHEN** 600 seconds have passed, or the call names a different node
+- **THEN** the call proceeds
+
 ### Requirement: Own node is rebooted without waiting
 
-When `node` equals the sidecar's own host address (`POD_IP`, since the pod is hostNetwork), the confirmed call SHALL issue the reboot with `--wait=false` and return immediately with a statement that this pod will restart with the node; otherwise it SHALL use `--wait=true` with a 600-second timeout (`--timeout=600s`). The flag is spelled out because `talosctl reboot --wait` defaults to true (measured on talosctl 1.12): a bare `reboot` waits, so "without `--wait`" cannot mean omitting it.
+When `node` equals the sidecar's own host address (`POD_IP`, since the pod is hostNetwork), the confirmed call SHALL issue the reboot with `--wait=false` and return immediately with a statement that this pod will restart with the node, and both the token response and the execute response SHALL say that im itself goes down with the node — on a single-node cluster the whole service — and that nobody can see the result until the pod is back; otherwise it SHALL use `--wait=true` with a 600-second timeout (`--timeout=600s`). The flag is spelled out because `talosctl reboot --wait` defaults to true (measured on talosctl 1.12): a bare `reboot` waits, so "without `--wait`" cannot mean omitting it.
 
 #### Scenario: Rebooting the node this pod runs on
 - **WHEN** a confirmed `reboot_node` targets `POD_IP`
-- **THEN** the command runs with `--wait=false` and no `--timeout`, the response says the pod itself will restart, and no timeout error is produced
+- **THEN** the command runs with `--wait=false` and no `--timeout`, the response says the pod itself will restart and that im goes down with it (as did the token response), and no timeout error is produced
 
 #### Scenario: Rebooting another node waits for it
 - **WHEN** a confirmed `reboot_node` targets a different node
@@ -50,7 +90,7 @@ When `node` equals the sidecar's own host address (`POD_IP`, since the pod is ho
 
 ### Requirement: Every mutating call is audited to the sidecar's stdout
 
-Each `reboot_node` call — token issue, execute, or refusal — SHALL write one JSON line to stdout containing timestamp, tool, node, phase, reason (for refusals), exit code (for executes) and the `CLAUDE_USER_ID` of the sidecar's environment (empty when the pod spec does not set it — root's decision for the `talos-mcp` container, since the ttyd session's identity lives in `app` and does not cross), so that `kubectl logs -c talos-mcp` is a complete record of mutating activity, including the direct-LAN path that Omni never sees.
+Each `reboot_node` call — token issue, execute, or refusal — SHALL write one JSON line to stdout containing timestamp, tool, node, phase, the caller's `stated_reason`, reason (for refusals), exit code (for executes) and the `CLAUDE_USER_ID` of the sidecar's environment (empty when the pod spec does not set it — root's decision for the `talos-mcp` container, since the ttyd session's identity lives in `app` and does not cross), so that `kubectl logs -c talos-mcp` is a complete record of mutating activity, including the direct-LAN path that Omni never sees.
 
 #### Scenario: Refused call is still logged
 - **WHEN** a call is refused for any reason
