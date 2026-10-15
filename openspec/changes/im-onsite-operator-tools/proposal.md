@@ -11,14 +11,14 @@ Root change 的 Why 不在這裡複述（見 `jg-base/openspec/changes/im-onsite
 - `talos_mcp_server.py`：
   - 讀第二個環境變數 `TALOS_OPERATOR_CONFIG`（檔案路徑，直連 LAN 的 `os:operator` talosconfig）。不在場時行為與今天完全相同。
   - 四個 `get_*` 工具：Omni 代理路徑失敗（timeout／`Unavailable`／`no route`）且 operator 憑證在場時，以 `--endpoints <node>` 直連重試一次；回傳開頭標 `[via direct LAN]` 或 `[via Omni]`。
-  - 新工具 `reboot_node(node, confirm="")`：`confirm` 留空 → 回傳一次性 token（含 node、到期 120 秒）與將執行的指令，**不動作**；帶正確 token → `talosctl --endpoints <node> --nodes <node> reboot --wait`；allowlist 由 `kubectl get nodes -o jsonpath` 的 InternalIP 在呼叫當下取得（不依賴 `TALOS_NODES`）；每次呼叫（含被拒）寫一行結構化 audit 到 stdout。只在 operator 憑證在場時註冊。
+  - 新工具 `reboot_node(node, confirm="")`：`confirm` 留空 → 回傳一次性 token（含 node、到期 120 秒）與將執行的指令，**不動作**；帶正確 token → `talosctl --endpoints <node> --nodes <node> reboot --wait`；allowlist 由 `kubectl get nodes -o jsonpath` 的 InternalIP 在呼叫當下取得（不依賴 `TALOS_NODES`）；每次呼叫（含被拒）寫一行結構化 audit 到 stdout。只在 operator 憑證在場時註冊。**2026-10-15 裁定後（root 7.2）守衛在伺服端**：其他 control-plane 不 Ready 就拒（quorum）、每節點冷卻 600 秒、必填 `reason` 進每行 audit、自身節點兩段都明說 im 隨之停擺。
 - `claude-session`：初始化 `settings.json` 時加 `permissions.allow: ["mcp__talos__get_node_status", …]`、`permissions.ask: ["mcp__talos__reboot_node"]`；合併而非覆寫既有檔。`inbox/` 非空時在 session 開頭印一行。
 - `Dockerfile`／CI：重建映像；`CLAUDE.md` 的 sidecar 段落與 env 表更新。
 
 ## Capabilities
 
 ### New Capabilities
-- `talos-operator-escalation`：`reboot_node` 的契約——兩段式 confirm、呼叫時推導的 allowlist、graceful only、audit 行格式、operator 憑證缺席時工具不存在；以及讀取工具的直連退路與路徑標記。
+- `talos-operator-escalation`：`reboot_node` 的契約——兩段式 confirm、呼叫時推導的 allowlist、伺服端守衛（必填 reason、control-plane quorum、每節點冷卻）、graceful only、audit 行格式、operator 憑證缺席時工具不存在；以及讀取工具的直連退路與路徑標記。
 - `im-permission-profile`：agent 在 ttyd 內對 MCP 工具的權限面——哪些不提示、哪些必提示、提示由誰按、不得出現「無提示自動拒絕」。
 - `operator-inbox`：`~/workspace/inbox/` 的交辦慣例——誰寫、im 何時讀、讀完怎麼標記。
 

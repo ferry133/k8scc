@@ -38,8 +38,10 @@ ENV_KEYS = [
     "TALOSCONFIG", "TALOS_OPERATOR_CONFIG", "POD_IP", "TALOS_NODES", "TALOS_MCP_READ_TIMEOUT",
     "OMNI_SERVICE_ACCOUNT_KEY", "OMNI_ENDPOINT", "CLAUDE_USER_ID",
     "SHIM_LOG", "SHIM_OMNI", "SHIM_DIRECT", "SHIM_CONFIG_INFO", "SHIM_REBOOT_RC", "SHIM_KUBECTL", "SHIM_NODES",
+    "SHIM_CP", "SHIM_NOTREADY",
 ]
 NODE_A, NODE_B, STRANGER = "10.9.9.23", "10.9.9.24", "10.9.9.99"
+REASON = "etcd member on this node unhealthy since the SideroLink loss; graceful reboot per runbook"
 
 
 class Harness:
@@ -59,7 +61,7 @@ class Harness:
         self.tmp.cleanup()
 
     def load(self, *, reader=True, operator="ok", expires_days=365, omni="ok", direct="ok",
-             kubectl="ok", nodes=f"{NODE_A} {NODE_B}", pod_ip="", known_nodes="", read_timeout="15"):
+             kubectl="ok", nodes=f"{NODE_A} {NODE_B}", cp="", notready="", pod_ip="", known_nodes="", read_timeout="15"):
         for k in ENV_KEYS:
             os.environ.pop(k, None)
         if reader:
@@ -82,7 +84,7 @@ class Harness:
             raise ValueError(operator)
         os.environ.update({
             "SHIM_LOG": str(self.log), "SHIM_OMNI": omni, "SHIM_DIRECT": direct,
-            "SHIM_KUBECTL": kubectl, "SHIM_NODES": nodes, "POD_IP": pod_ip,
+            "SHIM_KUBECTL": kubectl, "SHIM_NODES": nodes, "SHIM_CP": cp, "SHIM_NOTREADY": notready, "POD_IP": pod_ip,
             "TALOS_NODES": known_nodes, "TALOS_MCP_READ_TIMEOUT": read_timeout,
             "CLAUDE_USER_ID": "tester@example",
         })
@@ -268,7 +270,7 @@ class OperatorCredentialState(unittest.TestCase):
         soon = (dt.datetime.now(dt.timezone.utc).date() + dt.timedelta(days=10)).isoformat()
         for fn, args in ((m.get_node_status, (NODE_A,)), (m.get_etcd_members, (NODE_A,)),
                          (m.get_link_status, (NODE_A,)), (m.get_service_logs, (NODE_A, "etcd")),
-                         (m.reboot_node, (NODE_A,))):
+                         (m.reboot_node, (NODE_A, REASON))):
             out, _ = self.h.call(fn, *args)
             self.assertIn(soon, first_line(out), fn.__name__)
             self.assertIn("talos-operator-credential rotate", first_line(out), fn.__name__)
@@ -305,7 +307,7 @@ class RebootNode(unittest.TestCase):
 
     def test_first_call_issues_token_and_does_nothing(self):
         m = self.h.load()
-        out, audit = self.h.call(m.reboot_node, NODE_A)
+        out, audit = self.h.call(m.reboot_node, NODE_A, REASON)
         body = json.loads(out)
         self.assertEqual(body["node"], NODE_A)
         self.assertEqual(body["expires_in"], 120)
@@ -317,14 +319,14 @@ class RebootNode(unittest.TestCase):
         self.assertEqual(audit[0]["user"], "tester@example")
         self.assertIn("uncordon", body["note"])   # the node may come back cordoned (jg-jiahd 2026-10-15)
         with self.subTest(control="the same call plus the token DOES reach talosctl"):
-            self.h.call(m.reboot_node, NODE_A, confirm=body["token"])
+            self.h.call(m.reboot_node, NODE_A, REASON, confirm=body["token"])
             self.assertEqual(len(self.reboots()), 1)
 
     def test_confirmed_call_runs_exactly_what_it_said_once(self):
         m = self.h.load()
-        out, _ = self.h.call(m.reboot_node, NODE_A)
+        out, _ = self.h.call(m.reboot_node, NODE_A, REASON)
         body = json.loads(out)
-        out2, audit = self.h.call(m.reboot_node, NODE_A, confirm=body["token"])
+        out2, audit = self.h.call(m.reboot_node, NODE_A, REASON, confirm=body["token"])
         reboots = self.reboots()
         self.assertEqual(len(reboots), 1)
         self.assertEqual(reboots[0][1:], body["will_run"].split()[1:])   # said == ran, element by element
@@ -339,62 +341,64 @@ class RebootNode(unittest.TestCase):
         self.assertEqual(audit[-1]["phase"], "execute")
         self.assertEqual(audit[-1]["rc"], 0)
         with self.subTest(control="replaying the token is refused and runs nothing"):
-            out3, audit3 = self.h.call(m.reboot_node, NODE_A, confirm=body["token"])
+            t0 = m._now(); m._now = lambda: t0 + m.REBOOT_COOLDOWN + 1   # past the cooldown, so the refusal names the token
+            out3, audit3 = self.h.call(m.reboot_node, NODE_A, REASON, confirm=body["token"])
             self.assertTrue(out3.startswith("refused:"), out3)
             self.assertIn("already-used", out3)
             self.assertEqual(len(self.reboots()), 1)
             self.assertEqual(audit3[-1]["phase"], "refused")
         with self.subTest(control="a nonzero talosctl exit is audited as such"):
             os.environ["SHIM_REBOOT_RC"] = "3"
-            body = json.loads(self.h.call(m.reboot_node, NODE_A)[0])
-            out4, audit4 = self.h.call(m.reboot_node, NODE_A, confirm=body["token"])
+            t0 = m._now(); m._now = lambda: t0 + m.REBOOT_COOLDOWN + 1   # past NODE_A's cooldown
+            body = json.loads(self.h.call(m.reboot_node, NODE_A, REASON)[0])
+            out4, audit4 = self.h.call(m.reboot_node, NODE_A, REASON, confirm=body["token"])
             self.assertEqual(audit4[-1]["rc"], 3)
             self.assertIn("talosctl exit 3", out4)   # was "(exit 3)" from text(); the verb now states it uniformly
             self.assertIn("reboot sequence via direct", out4)
 
     def test_token_is_bound_to_node(self):
         m = self.h.load()
-        body = json.loads(self.h.call(m.reboot_node, NODE_A)[0])
-        out, audit = self.h.call(m.reboot_node, NODE_B, confirm=body["token"])
+        body = json.loads(self.h.call(m.reboot_node, NODE_A, REASON)[0])
+        out, audit = self.h.call(m.reboot_node, NODE_B, REASON, confirm=body["token"])
         self.assertIn(f"issued for {NODE_A}, not {NODE_B}", out)
         self.assertEqual(self.reboots(), [])
         self.assertEqual(audit[-1]["phase"], "refused")
         with self.subTest(control="the right node with the same token executes"):
-            self.h.call(m.reboot_node, NODE_A, confirm=body["token"])
+            self.h.call(m.reboot_node, NODE_A, REASON, confirm=body["token"])
             self.assertEqual(len(self.reboots()), 1)
 
     def test_token_expires_after_120_seconds(self):
         m = self.h.load()
         real_now = m._now
-        body = json.loads(self.h.call(m.reboot_node, NODE_A)[0])
+        body = json.loads(self.h.call(m.reboot_node, NODE_A, REASON)[0])
         issued = real_now()
         m._now = lambda: issued + 121
-        out, audit = self.h.call(m.reboot_node, NODE_A, confirm=body["token"])
+        out, audit = self.h.call(m.reboot_node, NODE_A, REASON, confirm=body["token"])
         self.assertIn("token expired", out)
         self.assertEqual(self.reboots(), [])
         self.assertEqual(audit[-1]["phase"], "refused")
         with self.subTest(control="at 119 s the same token executes"):
-            body = json.loads(self.h.call(m.reboot_node, NODE_A)[0])
+            body = json.loads(self.h.call(m.reboot_node, NODE_A, REASON)[0])
             issued = m._now()
             m._now = lambda: issued + 119
-            self.h.call(m.reboot_node, NODE_A, confirm=body["token"])
+            self.h.call(m.reboot_node, NODE_A, REASON, confirm=body["token"])
             self.assertEqual(len(self.reboots()), 1)
 
     def test_node_outside_cluster_is_refused_before_any_talos_call(self):
         m = self.h.load(nodes=f"{NODE_A} {NODE_B}")
-        out, audit = self.h.call(m.reboot_node, STRANGER)
+        out, audit = self.h.call(m.reboot_node, STRANGER, REASON)
         self.assertTrue(out.startswith("refused:"))
         self.assertIn("not an InternalIP of any node currently in this cluster", out)
         self.assertEqual(self.h.calls("talosctl"), [])
         self.assertEqual(audit, [{**audit[0], "phase": "refused"}])
         with self.subTest(control="the allowlist is read at call time: add the node, same process accepts it"):
             os.environ["SHIM_NODES"] = f"{NODE_A} {NODE_B} {STRANGER}"
-            out, audit = self.h.call(m.reboot_node, STRANGER)
+            out, audit = self.h.call(m.reboot_node, STRANGER, REASON)
             self.assertIn("token", json.loads(out))
 
     def test_kubectl_failure_fails_closed(self):
         m = self.h.load(kubectl="fail")
-        out, audit = self.h.call(m.reboot_node, NODE_A)
+        out, audit = self.h.call(m.reboot_node, NODE_A, REASON)
         self.assertTrue(out.startswith("refused:"))
         self.assertIn("fail closed", out)
         self.assertIn("Unable to connect to the server", out)
@@ -402,21 +406,21 @@ class RebootNode(unittest.TestCase):
         self.assertEqual(audit[-1]["phase"], "refused")
         with self.subTest(control="kubectl back: token issued"):
             os.environ["SHIM_KUBECTL"] = "ok"
-            out, _ = self.h.call(m.reboot_node, NODE_A)
+            out, _ = self.h.call(m.reboot_node, NODE_A, REASON)
             self.assertIn("token", json.loads(out))
 
     def test_own_node_is_rebooted_without_waiting(self):
         m = self.h.load(pod_ip=NODE_A)
-        body = json.loads(self.h.call(m.reboot_node, NODE_A)[0])
+        body = json.loads(self.h.call(m.reboot_node, NODE_A, REASON)[0])
         self.assertTrue(body["will_run"].endswith("reboot --wait=false"), body["will_run"])
-        out, audit = self.h.call(m.reboot_node, NODE_A, confirm=body["token"])
+        out, audit = self.h.call(m.reboot_node, NODE_A, REASON, confirm=body["token"])
         self.assertEqual(self.reboots()[0][-1], "--wait=false")
         self.assertNotIn("--timeout=600s", self.reboots()[0])
         self.assertIn("this pod runs on", out)
         self.assertIs(audit[-1]["wait"], False)
         with self.subTest(control="another node from the same pod waits"):
-            body = json.loads(self.h.call(m.reboot_node, NODE_B)[0])
-            out, audit = self.h.call(m.reboot_node, NODE_B, confirm=body["token"])
+            body = json.loads(self.h.call(m.reboot_node, NODE_B, REASON)[0])
+            out, audit = self.h.call(m.reboot_node, NODE_B, REASON, confirm=body["token"])
             self.assertEqual(self.reboots()[-1][-2:], ["--wait=true", "--timeout=600s"])
             self.assertNotIn("this pod runs on", out)
             self.assertIs(audit[-1]["wait"], True)
@@ -425,23 +429,106 @@ class RebootNode(unittest.TestCase):
         m = self.h.load()
         for hostile in (f"{NODE_A} --mode powercycle", f"{NODE_A};shutdown", "--nodes", f"{NODE_A}\n{NODE_B}"):
             with self.subTest(node=hostile):
-                out, _ = self.h.call(m.reboot_node, hostile)
+                out, _ = self.h.call(m.reboot_node, hostile, REASON)
                 self.assertTrue(out.startswith("refused:"), out)
                 self.assertEqual(self.h.calls("talosctl"), [])
-        body = json.loads(self.h.call(m.reboot_node, NODE_A)[0])
-        self.h.call(m.reboot_node, NODE_A, confirm=body["token"] + " --mode powercycle")
+        body = json.loads(self.h.call(m.reboot_node, NODE_A, REASON)[0])
+        self.h.call(m.reboot_node, NODE_A, REASON, confirm=body["token"] + " --mode powercycle")
         self.assertEqual(self.reboots(), [])
         with self.subTest(control="the clean token runs the literal verb"):
-            self.h.call(m.reboot_node, NODE_A, confirm=body["token"])
+            self.h.call(m.reboot_node, NODE_A, REASON, confirm=body["token"])
             self.assertEqual(self.reboots()[0][6], "reboot")
+
+    # --- root 7.2 (ferry133 ruling 2026-10-15): the gates are the server's, nobody is prompted
+
+    def test_reason_is_required_and_lands_in_every_audit_line(self):
+        m = self.h.load()
+        schema = next(t for t in asyncio.run(m.app.list_tools()) if t.name == "reboot_node").inputSchema
+        self.assertEqual(set(schema["required"]), {"node", "reason"})   # the MCP contract itself, not just the function
+        for empty in ("", "   "):
+            with self.subTest(reason=repr(empty)):
+                out, audit = self.h.call(m.reboot_node, NODE_A, empty)
+                self.assertTrue(out.startswith("refused:"), out)
+                self.assertIn("reason is required", out)
+                self.assertEqual(self.h.calls("kubectl"), [])   # refused before anything is looked up
+                self.assertEqual(audit[-1]["phase"], "refused")
+                self.assertEqual(audit[-1]["stated_reason"], "")
+        with self.subTest(control="a stated reason is accepted and written to the token and execute lines"):
+            out, audit = self.h.call(m.reboot_node, NODE_A, REASON)
+            body = json.loads(out)
+            self.assertEqual(audit[-1]["phase"], "token")
+            self.assertEqual(audit[-1]["stated_reason"], REASON)
+            _, audit = self.h.call(m.reboot_node, NODE_A, REASON, confirm=body["token"])
+            self.assertEqual(audit[-1]["phase"], "execute")
+            self.assertEqual(audit[-1]["stated_reason"], REASON)
+
+    def test_quorum_guard_refuses_while_another_control_plane_is_not_ready(self):
+        m = self.h.load(cp=f"{NODE_A} {NODE_B}", notready=NODE_B)
+        out, audit = self.h.call(m.reboot_node, NODE_A, REASON)
+        self.assertTrue(out.startswith("refused:"), out)
+        self.assertIn("quorum", out)
+        self.assertIn(NODE_B, out)
+        self.assertEqual(self.h.calls("talosctl"), [])
+        self.assertEqual(audit[-1]["phase"], "refused")
+        with self.subTest(control="every other control plane Ready: token issued"):
+            os.environ["SHIM_NOTREADY"] = ""
+            self.assertIn("token", json.loads(self.h.call(m.reboot_node, NODE_A, REASON)[0]))
+        with self.subTest(control="the target itself NotReady is not a quorum block (that is why it is being rebooted)"):
+            os.environ["SHIM_NOTREADY"] = NODE_A
+            self.assertIn("token", json.loads(self.h.call(m.reboot_node, NODE_A, REASON)[0]))
+        with self.subTest(control="a NotReady worker does not block"):
+            os.environ["SHIM_CP"] = NODE_A
+            os.environ["SHIM_NOTREADY"] = NODE_B
+            self.assertIn("token", json.loads(self.h.call(m.reboot_node, NODE_A, REASON)[0]))
+        with self.subTest(control="checked again at execute: a token issued while quorum held is refused once it does not"):
+            os.environ["SHIM_CP"] = f"{NODE_A} {NODE_B}"
+            os.environ["SHIM_NOTREADY"] = ""
+            body = json.loads(self.h.call(m.reboot_node, NODE_A, REASON)[0])
+            os.environ["SHIM_NOTREADY"] = NODE_B
+            out, _ = self.h.call(m.reboot_node, NODE_A, REASON, confirm=body["token"])
+            self.assertIn("quorum", out)
+            self.assertEqual(self.reboots(), [])
+
+    def test_cooldown_refuses_a_second_reboot_of_the_same_node(self):
+        m = self.h.load()
+        body = json.loads(self.h.call(m.reboot_node, NODE_A, REASON)[0])
+        self.assertEqual(body["cooldown_after"], 600)   # the number is in the response, not only in the code
+        t0 = m._now()
+        self.h.call(m.reboot_node, NODE_A, REASON, confirm=body["token"])
+        self.assertEqual(len(self.reboots()), 1)
+        m._now = lambda: t0 + 30
+        out, audit = self.h.call(m.reboot_node, NODE_A, REASON)
+        self.assertTrue(out.startswith("refused:"), out)
+        self.assertIn("cooldown is 600 s", out)
+        self.assertIn("570 s left", out)
+        self.assertEqual(audit[-1]["phase"], "refused")
+        with self.subTest(control="another node is not in this node's cooldown"):
+            self.assertIn("token", json.loads(self.h.call(m.reboot_node, NODE_B, REASON)[0]))
+        with self.subTest(control="the window ends: the same node is accepted again"):
+            m._now = lambda: t0 + 601
+            self.assertIn("token", json.loads(self.h.call(m.reboot_node, NODE_A, REASON)[0]))
+
+    def test_own_node_responses_say_im_goes_down_with_it(self):
+        m = self.h.load(pod_ip=NODE_A)
+        body = json.loads(self.h.call(m.reboot_node, NODE_A, REASON)[0])
+        self.assertIn("takes im down with it", body["note"])
+        self.assertIn("single-node cluster", body["note"])
+        out, _ = self.h.call(m.reboot_node, NODE_A, REASON, confirm=body["token"])
+        self.assertIn("takes im down with it", out)
+        with self.subTest(control="another node's responses do not carry the outage sentence"):
+            body = json.loads(self.h.call(m.reboot_node, NODE_B, REASON)[0])
+            self.assertNotIn("takes im down with it", body["note"])
+            out, _ = self.h.call(m.reboot_node, NODE_B, REASON, confirm=body["token"])
+            self.assertNotIn("takes im down with it", out)
 
     def test_audit_lines_are_json_with_the_required_fields(self):
         m = self.h.load()
-        _, refused = self.h.call(m.reboot_node, STRANGER)
-        body = json.loads(self.h.call(m.reboot_node, NODE_A)[0])
-        _, executed = self.h.call(m.reboot_node, NODE_A, confirm=body["token"])
-        self.assertEqual(set(refused[0]) >= {"ts", "tool", "node", "phase", "reason", "user"}, True, refused)
-        self.assertEqual(set(executed[0]) >= {"ts", "tool", "node", "phase", "rc", "user"}, True, executed)
+        _, refused = self.h.call(m.reboot_node, STRANGER, REASON)
+        body = json.loads(self.h.call(m.reboot_node, NODE_A, REASON)[0])
+        _, executed = self.h.call(m.reboot_node, NODE_A, REASON, confirm=body["token"])
+        self.assertEqual(set(refused[0]) >= {"ts", "tool", "node", "phase", "reason", "user", "stated_reason"}, True, refused)
+        self.assertEqual(set(executed[0]) >= {"ts", "tool", "node", "phase", "rc", "user", "stated_reason"}, True, executed)
+        self.assertEqual(executed[0]["stated_reason"], REASON)
         for line in refused + executed:
             self.assertEqual(line["tool"], "reboot_node")
             dt.datetime.fromisoformat(line["ts"])
