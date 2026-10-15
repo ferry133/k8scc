@@ -13,11 +13,11 @@
 
 ## 3. 文件與映像
 
-- [x] 3.1 `CLAUDE.md`：sidecar 段落改寫（兩把憑證、四層門檻、退路標記）；env 表加 `TALOS_OPERATOR_CONFIG`、`POD_IP`；新增「inbox 慣例」與「reboot 的批准來自 ttyd 前的人；auto mode 下若提示會倒數自動拒絕，切 manual」（後半句待 root 5.6 量到再定稿）。
+- [x] 3.1 `CLAUDE.md`：sidecar 段落改寫（兩把憑證、四層門檻、退路標記）；env 表加 `TALOS_OPERATOR_CONFIG`、`POD_IP`；新增「inbox 慣例」與「reboot 的批准來自 ttyd 前的人；auto mode 下若提示會倒數自動拒絕，切 manual」（後半句待 root 5.6 量到再定稿）。**2026-10-15 裁定後這句作廢，改寫見 4.2。**
 - [ ] 3.2 CI 重建映像；把 tag 回報到 root（`jg-base/openspec/changes/im-onsite-operator-tools/tasks.md` 3.2）。
 - [ ] 3.3 archive 本 sub-change 時回頭更新 root（四條規則第一條）；root 的 `talos-mcp-sidecar` delta 引用了本 repo 的 `talos-operator-escalation`，兩邊的工具名與路徑標記字串要逐字一致——archive 前 grep 一次。
 
 ## 4. 2026-10-15 裁定後（root tasks §7：im 是公司的工具，坐在 ttyd 前的只有公司員工，守衛在伺服端）
 
 - [x] 4.1（root 7.2）`reboot_node` 伺服端守衛：(a) 另一台 control-plane 不 Ready 就拒，與 allowlist 同一次 `kubectl get nodes -o json`；(b) 每節點冷卻 600 秒，寫進 token 回應與拒絕訊息；(c) 自身節點兩段回應明說 im 隨之停擺；(d) 必填 `reason`（MCP schema required）→ 每行 audit 的 `stated_reason`。每格負對照（CP NotReady fixture、目標自己 NotReady 仍過、冷卻內第二次、空 reason）；四個突變（關 quorum／關冷卻／收空 reason／execute 不重查）各轉紅。
-- [ ] 4.2（root 7.3，不可先於 4.1）`claude-session` 的 `mcp__talos__reboot_node` 從 `ask` 改 `allow`，並把自己先前寫進 `ask` 的那一項遷走；`test/claude-session-controls.sh` 的斷言翻面並留負對照；九處前提句子（server docstring／note、`claude-session` 註解、`im-permission-profile` spec、design／proposal／tasks 3.1、`CLAUDE.md` 103／107）一起改；`CLAUDE.md` 寫明「reboot 在 im 的權限內，依診斷執行，事後向公司回報（inbox／health mail）」；inbox 敘述改「公司同仁 → im」。
+- [x] 4.2（root 7.3，不可先於 4.1）`claude-session` 的 `mcp__talos__reboot_node` 從 `ask` 改 `allow`，並把自己先前寫進 `ask` 的那一項遷走；`test/claude-session-controls.sh` 的斷言翻面並留負對照；九處前提句子（server docstring／note、`claude-session` 註解、`im-permission-profile` spec、design／proposal／tasks 3.1、`CLAUDE.md` 103／107）一起改；`CLAUDE.md` 寫明「reboot 在 im 的權限內，依診斷執行，事後向公司回報（inbox／health mail）」；inbox 敘述改「公司同仁 → im」。

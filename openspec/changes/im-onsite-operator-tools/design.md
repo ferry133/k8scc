@@ -14,9 +14,9 @@ Part of: `jg-base` / `im-onsite-operator-tools` —— sidecar 層的設計（�
 ## Decisions
 
 **1. 兩段式 confirm，token 由 server 發。**
-`reboot_node(node, confirm="")`：`confirm` 空 → 回傳 `{token, node, expires_in: 120, will_run: "talosctl --endpoints N --nodes N reboot --wait"}` 並**不動作**；帶 token → 比對（同 node、未過期、未用過）→ 執行 → token 作廢。agent 必須把第一段的輸出給人看、人按 `ask` 提示、第二段才跑。
+`reboot_node(node, reason, confirm="")`：`confirm` 空 → 回傳 `{token, node, expires_in: 120, cooldown_after: 600, will_run: "talosctl --endpoints N --nodes N reboot --wait=true --timeout=600s"}` 並**不動作**；帶 token → 比對（同 node、未過期、未用過）→ 執行 → token 作廢。第一段是 agent 自己重讀 `will_run` 與 reason 的第二眼——2026-10-15 裁定後沒有人按提示（原設計「給人看、人按 `ask`」作廢，見第 9 條）。
 - *替代*：`confirm: bool`——LLM 會直接填 `true`，等於沒有門。
-- *替代*：只靠 `permissions.ask`——提示在 manual／auto 兩種模式下行為不同（10-11 量到 auto 會倒數後自動拒絕），server 端的門不能依賴它。
+- *替代*：只靠 `permissions.ask`——提示在 manual／auto 兩種模式下行為不同（10-11 量到 auto 會倒數後自動拒絕），server 端的門不能依賴它。（2026-10-15 之後反過來也成立：門在伺服端，所以 `ask` 不再需要。）
 
 **2. allowlist 在呼叫當下從 `kubectl get nodes -o jsonpath='{.items[*].status.addresses[?(@.type=="InternalIP")].address}'` 推。**
 不碰 `TALOS_NODES`（insideman 4.7 裁定它不是邊界、而且會過期）。`kubectl` 失敗 → **fail closed**，拒絕並回傳錯誤原文。
@@ -36,7 +36,7 @@ hostNetwork → `POD_IP`（downward API）＝ node IP。`node == POD_IP` 時指�
 `talosctl --talosconfig $OPERATOR config info` 解析 `Certificate expires: … (YYYY-MM-DD)`（格式以合成 talosconfig 量到）；到期日 ≤ 今天 → 視為缺席並記日期；< 30 天 → 前綴警告。檔案 0 byte → 缺席（root spec 的「空字串與缺席同義」）。**讀不到到期日（`config info` 失敗或沒有那一行）→ 也視為缺席，理由帶 talosctl 的錯誤**——fail closed；一把「到期日不明」的憑證若照用，會一直好用到某天無聲失效。
 
 **7. `claude-session` 用 `python3 -` 合併 `permissions`，不用 `jq`（映像裡不一定有），不覆寫既有鍵。**
-`allow += ["mcp__talos__get_node_status","mcp__talos__get_etcd_members","mcp__talos__get_link_status","mcp__talos__get_service_logs"]`、`ask += ["mcp__talos__reboot_node"]`，去重、保序。只在 `TALOS_MCP_URL` 設定時做（與註冊同一個 gate）。結果與原檔逐位元相同就不寫（第二次跑連 mtime 都不動）；解析不了的檔**原樣留著**並在終端機說一句——靜默蓋掉客戶的設定與靜默失敗在紀錄上長得一樣。
+`allow += ["mcp__talos__get_node_status","mcp__talos__get_etcd_members","mcp__talos__get_link_status","mcp__talos__get_service_logs","mcp__talos__reboot_node"]`，去重、保序；`ask` 裡若有 `mcp__talos__reboot_node`（前一個映像寫的，PVC 上留著）就拿掉，其他 `ask` 項不動——同一個名字同時在兩張表上，權限層怎麼解是它的事，不留這個問題。2026-10-15 之前這裡是 `ask += ["mcp__talos__reboot_node"]`。只在 `TALOS_MCP_URL` 設定時做（與註冊同一個 gate）。結果與原檔逐位元相同就不寫（第二次跑連 mtime 都不動）；解析不了的檔**原樣留著**並在終端機說一句——靜默蓋掉客戶的設定與靜默失敗在紀錄上長得一樣。
 
 **8. inbox：`~/workspace/inbox/` 非空時印一行到 ttyd；不解析內容。**
 `find` 到任何非 `*.read` 的檔就印 `📥 inbox: N file(s) — read ~/workspace/inbox/ before anything else`。agent 讀完自己 `mv x x.read`。
@@ -53,7 +53,7 @@ hostNetwork → `POD_IP`（downward API）＝ node IP。`node == POD_IP` 時指�
 - **[Risk] token 存在記憶體，sidecar 重啟就失效** → 可接受，agent 重拿一次。
 - **[Risk] 冷卻只在記憶體** → 自身節點重啟後歸零；agent 若在 pod 回來後立刻再下一次，守衛不擋，audit 看得見（兩行 `execute` 相隔 < 600 s）。
 - **[Risk] 直連退路被誤用成「平時也直連」** → 只在主路失敗後、只重試一次、首行標記；測試裡斷言主路成功時 `[via Omni]`。
-- **[Trade-off] `permissions.ask` 在 auto mode 的實際行為是否仍會倒數自動拒絕** → 本 repo 量不到，要在真 im 上量（root tasks 的 jg-jiahd 驗證那格）；若會，設計的底線仍是 server 端的兩段式 confirm，提示只是第四層。
+- **[Trade-off] `permissions.ask` 在 auto mode 的實際行為** → 2026-10-15 之後與本設計無關（reboot 在 `allow`）；root 5.6 的讀數只剩歷史價值。設計的底線一直是 server 端：兩段式 token 加第 9 條的守衛。
 
 ## Migration Plan
 

@@ -396,8 +396,9 @@ def _reboot_argv(node: str) -> list[str]:
 
 def reboot_node(node: str, reason: str, confirm: str = "") -> str:
     """優雅重啟一個節點（graceful reboot），兩段式確認，守衛在伺服端。
-    第一段：node 與 reason → 不動作，回傳一次性 token（120 秒內有效）與將執行的指令；
-    把它拿給終端機前的人看。第二段：加 confirm=<token> → 真的執行，token 作廢。
+    第一段：node 與 reason → 不動作，回傳一次性 token（120 秒內有效）與將執行的指令——
+    這是 agent 自己重讀 will_run 與 reason 的第二眼，不是交給人按。第二段：加
+    confirm=<token> → 真的執行，token 作廢。
     reason 必填，寫進每一行 audit。守衛（兩段都查）：node 必須是叢集當下某個節點的
     InternalIP；其他 control-plane 節點任一不 Ready 就拒（quorum）；同一節點在上一次
     執行後 600 秒內再呼叫被拒（冷卻）。重啟本 pod 所在的節點時不等待（pod 會跟著重開）。"""
@@ -422,7 +423,7 @@ def reboot_node(node: str, reason: str, confirm: str = "") -> str:
         token = secrets.token_urlsafe(24)
         _TOKENS[token] = (node, now + TOKEN_TTL)
         _audit(node=node, phase="token", stated_reason=stated)
-        note = ("No action was taken. Show this to the person at the terminal; "
+        note = ("No action was taken. Re-read will_run against your reason; if it still holds, "
                 f"call reboot_node(node, reason, confirm=<token>) within {TOKEN_TTL} s to execute. "
                 "The token is single-use and bound to this node; the guards (control-plane quorum, "
                 f"{REBOOT_COOLDOWN} s per-node cooldown) are checked again at execute. " + CORDON_NOTE)
