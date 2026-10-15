@@ -48,13 +48,15 @@ class Order(unittest.TestCase):
         os.chdir(cls.cwd)
         cls.tmp.cleanup()
 
-    def run_script(self, on_branch, new):
-        r = subprocess.run([sys.executable, str(SCRIPT), on_branch, new], capture_output=True, text=True)
+    def run_script(self, on_branch, new, main=None):
+        # main defaults to c1, the oldest, so the branch-only cases are not decided by main
+        main = self.c["c1"] if main is None else main
+        r = subprocess.run([sys.executable, str(SCRIPT), on_branch, new, main], capture_output=True, text=True)
         return r.returncode, r.stdout.split("\t", 1)[0]
 
     def test_newer_pushes(self):
         self.assertEqual(bump_order.order(self.c["c2"], self.c["c3"])[0], "newer")
-        self.assertEqual(self.run_script(self.c["c1"], self.c["c3"]), (0, "newer"))
+        self.assertEqual(self.run_script(self.c["c2"], self.c["c3"]), (0, "newer"))
 
     def test_older_does_not_push(self):
         # 2026-10-15's would-be race: c3 already on the branch, c2's build finishes last.
@@ -64,7 +66,7 @@ class Order(unittest.TestCase):
             self.assertEqual(self.run_script(self.c["c2"], self.c["c3"]), (0, "newer"))
 
     def test_absent_pushes(self):
-        self.assertEqual(self.run_script("", self.c["c1"]), (0, "absent"))
+        self.assertEqual(self.run_script("", self.c["c2"]), (0, "absent"))
 
     def test_same_does_not_push(self):
         self.assertEqual(self.run_script(self.c["c2"], self.c["c2"]), (1, "same"))
@@ -82,6 +84,31 @@ class Order(unittest.TestCase):
                 self.assertEqual((rc, outcome), (1, "unknown"))
         with self.subTest(control="the diverged commit's own ancestor line still reads newer"):
             self.assertEqual(self.run_script(self.c["c1"], self.c["s1"]), (0, "newer"))
+
+    # --- after a merge: jg-base deleted the branch, main carries the merged pin
+    # (jg-base-0a [4e5e8d] on k8scc#32: the race moved to after the merge)
+
+    def test_branch_absent_main_newer_does_not_push(self):
+        # main pins c3 (just merged); c2's build finishes last and finds no branch.
+        self.assertEqual(self.run_script("", self.c["c2"], self.c["c3"]), (1, "older"))
+        with self.subTest(control="the same absent branch with main older pushes"):
+            self.assertEqual(self.run_script("", self.c["c3"], self.c["c2"]), (0, "absent"))
+
+    def test_main_equal_does_not_push(self):
+        self.assertEqual(self.run_script("", self.c["c3"], self.c["c3"]), (1, "same"))
+
+    def test_main_unreadable_never_pushes(self):
+        for main in ("", "<unreadable>", "deadbee"):
+            with self.subTest(main=main):
+                self.assertEqual(self.run_script("", self.c["c3"], main), (1, "unknown"))
+
+    def test_both_must_say_newer(self):
+        # newer than main but older than the branch: leave it
+        self.assertEqual(self.run_script(self.c["c3"], self.c["c2"], self.c["c1"]), (1, "older"))
+        # newer than the branch but older than main: leave it
+        self.assertEqual(self.run_script(self.c["c1"], self.c["c2"], self.c["c3"]), (1, "older"))
+        with self.subTest(control="newer than both pushes"):
+            self.assertEqual(self.run_script(self.c["c2"], self.c["c3"], self.c["c1"]), (0, "newer"))
 
 
 if __name__ == "__main__":
