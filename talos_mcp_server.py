@@ -323,14 +323,16 @@ def _refuse(node: str, reason: str) -> str:
     return _respond(f"refused: {reason}")
 
 
-# Talos cordons (and drains) the node for a graceful reboot and is meant to
-# uncordon it after boot. On jg-jiahd (2026-10-15, k8scc#22) the node came back
-# Ready but still SchedulingDisabled 19 minutes later, and the agent — which has
-# no cordon tool — stopped there. Say so in both phases, so the follow-up is
-# expected rather than discovered.
-CORDON_NOTE = ("The node may come back cordoned (SchedulingDisabled): Talos cordons it for the "
-               "graceful reboot and the boot-time uncordon does not always happen. Check "
-               "`kubectl get nodes` afterwards and `kubectl uncordon <node>` if it stayed that way.")
+# Nothing here cordons or uncordons. On jg-jiahd (2026-10-15, k8scc#22) the node
+# came back Ready but SchedulingDisabled; the events show it had been cordoned
+# four minutes before the token was issued, by someone outside this tool, and
+# that cordon survived the reboot (fleet-ops uncordoned by hand 19 min later).
+# Whether Talos undoes its *own* graceful-reboot cordon at boot is unmeasured
+# (root 5.5, throwaway cluster) -- so the note asserts neither; it says what to
+# check before uncordoning.
+CORDON_NOTE = ("If the node comes back SchedulingDisabled, find out who cordoned it before you "
+               "uncordon (`kubectl get events` and the node's annotations): a cordon that was "
+               "already on the node before the reboot survives it, and reboot_node never uncordons.")
 
 
 def _reboot_argv(node: str) -> list[str]:
