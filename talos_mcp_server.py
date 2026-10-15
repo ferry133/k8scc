@@ -142,6 +142,18 @@ class Result:
             output += f"\n(exit {self.rc}) {self.stderr}"
         return output.strip() or "(empty response)"
 
+    def transcript(self) -> str:
+        """Everything the command said, with its exit code stated — for a verb
+        whose progress goes to stderr and whose success is rc 0 with an empty
+        stdout. `talosctl reboot --wait` is one: measured live on jg-jiahd
+        (2026-10-15, k8scc#22), text() answered "(empty response)" for a reboot
+        that had happened, and the agent had to go and look."""
+        if self.timed_out:
+            return f"error: talosctl timed out after {self.timeout}s"
+        parts = [f"talosctl exit {self.rc}"]
+        parts += [stream.strip() for stream in (self.stderr, self.stdout) if stream.strip()]
+        return "\n".join(parts)
+
 
 def _exec(argv: list[str], timeout: int) -> Result:
     """Run argv as given — every value is one argv element, never a shell word."""
@@ -311,6 +323,18 @@ def _refuse(node: str, reason: str) -> str:
     return _respond(f"refused: {reason}")
 
 
+# Nothing here cordons or uncordons. On jg-jiahd (2026-10-15, k8scc#22) the node
+# came back Ready but SchedulingDisabled; the events show it had been cordoned
+# four minutes before the token was issued, by someone outside this tool, and
+# that cordon survived the reboot (fleet-ops uncordoned by hand 19 min later).
+# Whether Talos undoes its *own* graceful-reboot cordon at boot is unmeasured
+# (root 5.5, throwaway cluster) -- so the note asserts neither; it says what to
+# check before uncordoning.
+CORDON_NOTE = ("If the node comes back SchedulingDisabled, find out who cordoned it before you "
+               "uncordon (`kubectl get events` and the node's annotations): a cordon that was "
+               "already on the node before the reboot survives it, and reboot_node never uncordons.")
+
+
 def _reboot_argv(node: str) -> list[str]:
     argv = [TALOSCTL, f"--talosconfig={OPERATOR_CONFIG}", "--endpoints", node, "--nodes", node, "reboot"]
     if node == POD_IP:
@@ -344,7 +368,7 @@ def reboot_node(node: str, confirm: str = "") -> str:
             "will_run": " ".join(_reboot_argv(node)),
             "note": "No action was taken. Show this to the person at the terminal; "
                     f"call reboot_node(node, confirm=<token>) within {TOKEN_TTL} s to execute. "
-                    "The token is single-use and bound to this node.",
+                    "The token is single-use and bound to this node. " + CORDON_NOTE,
         }
         _prune_tokens(now, keep=token)
         return _respond(json.dumps(body, indent=2))
@@ -375,7 +399,8 @@ def reboot_node(node: str, confirm: str = "") -> str:
             f"reboot ordered with --wait=false: this pod runs on {node} and will restart "
             "with it; once the terminal is back, confirm with get_node_status."
         )
-    lines.append(result.text())
+    lines.append(result.transcript())
+    lines.append(CORDON_NOTE)
     return _respond(*lines)
 
 
