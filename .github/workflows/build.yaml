@@ -67,6 +67,11 @@ jobs:
       - name: Check the bump-explanation controls
         run: python3 test/test_bump_explain.py
 
+      # The fixed bump branch only moves forward (k8scc#31): newer / older /
+      # same / absent / unknown against a throwaway git history.
+      - name: Check the bump-order controls
+        run: python3 test/test_bump_order.py
+
       # talos_mcp_server.py is imported for real against the same mcp pin the
       # Dockerfile installs (read from it, not copied here), with fake talosctl
       # and kubectl ahead on PATH. Every case carries a negative control; the
@@ -552,6 +557,38 @@ jobs:
 
           if git diff --quiet; then
             echo "::notice::jg-base already pins this digest -- nothing to do."
+            exit 0
+          fi
+
+          # The branch only moves forward (k8scc#31). Builds of consecutive
+          # merges run side by side; without this, an older commit's build that
+          # finished last would force-push the older pin back, and the PR would
+          # read normal, just stale. Read the pin the branch carries now and let
+          # k8scc's own history decide, against the branch AND against jg-base
+          # main's pin (OLD_SHORT): merging deletes the branch, so "absent" alone
+          # would let a late, older build open a downgrade PR. "Could not tell"
+          # never pushes.
+          F=kubernetes/apps/base/claudecode/claude-code/im/enabled/helmrelease.yaml
+          ON_BRANCH=""
+          LS_RC=0; git ls-remote --exit-code --heads origin "${BRANCH}" >/dev/null 2>&1 || LS_RC=$?
+          if [ "${LS_RC}" -eq 0 ]; then
+            if git fetch -q origin "${BRANCH}" 2>/dev/null; then
+              ON_BRANCH=$(git show "FETCH_HEAD:${F}" 2>/dev/null | grep -oE 'tag: [0-9a-f]{7}@' | sort -u \
+                          | sed -E 's/tag: ([0-9a-f]{7})@/\1/' | paste -sd, -)
+            fi
+            # Empty or several pins on an existing branch is unreadable, not absent.
+            case "${ON_BRANCH}" in ""|*,*) ON_BRANCH="<unreadable:${ON_BRANCH:-none}>" ;; esac
+          elif [ "${LS_RC}" -ne 2 ]; then
+            ON_BRANCH="<ls-remote-exit-${LS_RC}>"   # 2 = no such branch; anything else = could not ask
+          fi
+          VERDICT_RC=0
+          VERDICT=$(cd ../k8scc && python3 .github/scripts/bump_order.py "${ON_BRANCH}" "${SHORT}" "${OLD_SHORT}") || VERDICT_RC=$?
+          echo "branch order: ${VERDICT}"
+          if [ "${VERDICT_RC}" -ne 0 ]; then
+            case "${VERDICT}" in
+              unknown*) echo "::warning::not moving ${BRANCH}: ${VERDICT#*$'\t'}" ;;
+              *)        echo "::notice::not moving ${BRANCH}: ${VERDICT#*$'\t'}" ;;
+            esac
             exit 0
           fi
 
