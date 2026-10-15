@@ -66,7 +66,7 @@ Both phases SHALL refuse when any control-plane node *other than the target* (la
 
 ### Requirement: Per-node cooldown
 
-After a confirmed reboot is issued, the server SHALL refuse both phases for the same node for 600 seconds, counted from the moment the command was issued (so a second call during the first's `--wait` is inside the window). The refusal SHALL state the cooldown length and the seconds remaining; the token response SHALL carry the length as `cooldown_after`. Other nodes are unaffected. The record lives in the sidecar's memory: a sidecar restart — the own-node reboot included — starts with no history.
+After a confirmed reboot is issued, the server SHALL refuse both phases for the same node for 600 seconds, counted from the moment the command was issued (so a second call during the first's `--wait` is inside the window). The refusal SHALL state the cooldown length and the seconds remaining; the token response SHALL carry the length as `cooldown_after`. Other nodes are unaffected. For other nodes the record lives in the sidecar's memory, so a sidecar restart starts with no history. For the node the sidecar runs on (`POD_IP`), the window SHALL instead be counted from that node's last boot (`/proc/uptime`), because the own-node reboot restarts the sidecar and erases the in-memory record; any boot counts, and a boot clock that cannot be read SHALL refuse the own node (fail closed) with the read error as the reason.
 
 #### Scenario: Second reboot inside the window
 - **WHEN** `reboot_node` is called for a node this sidecar rebooted fewer than 600 seconds ago
@@ -75,6 +75,14 @@ After a confirmed reboot is issued, the server SHALL refuse both phases for the 
 #### Scenario: Window over, or another node
 - **WHEN** 600 seconds have passed, or the call names a different node
 - **THEN** the call proceeds
+
+#### Scenario: Own node after its own reboot
+- **WHEN** `reboot_node` names `POD_IP` and that node booted fewer than 600 seconds ago, whatever the sidecar remembers
+- **THEN** the call is refused in both phases, stating the seconds since boot and the seconds left, and no Talos API call is made
+
+#### Scenario: Own node's boot clock unreadable
+- **WHEN** `reboot_node` names `POD_IP` and `/proc/uptime` cannot be read or parsed
+- **THEN** the call is refused naming the read error, and calls naming other nodes are unaffected
 
 ### Requirement: Own node is rebooted without waiting
 

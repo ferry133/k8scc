@@ -94,6 +94,14 @@ TRANSPORT_ERROR_MARKERS = ("unavailable", "no route to host", "context deadline 
 # Patch point for the controls in test/ (token expiry without sleeping).
 _now = time.time
 
+# The own node's boot clock. /proc/uptime is not namespaced by anything a
+# kubelet sets up, so inside this container it reads the host's seconds since
+# boot. The cooldown on the own node comes from here, not from memory: an
+# own-node reboot restarts this process, so an in-memory record of it never
+# outlives the event it records (fleet-ops-77, throwaway 3-CP, 2026-10-15).
+# Patch point for the controls in test/.
+UPTIME_FILE = "/proc/uptime"
+
 
 def _missing_config() -> list[str]:
     missing = []
@@ -355,6 +363,34 @@ def _cooldown_left(node: str, now: float) -> int:
     return 0 if last is None else max(0, int(REBOOT_COOLDOWN - (now - last)))
 
 
+def _host_uptime() -> "tuple[float | None, str]":
+    """Seconds since this pod's own node booted, or (None, why not)."""
+    try:
+        with open(UPTIME_FILE, encoding="ascii") as fh:
+            return float(fh.read().split()[0]), ""
+    except (OSError, ValueError, IndexError) as exc:
+        return None, f"{UPTIME_FILE}: {exc}"
+
+
+def _own_node_cooldown_refusal(node: str) -> str:
+    """The own node's cooldown, counted from its last boot rather than from this
+    sidecar's memory, which that boot erased. Any boot counts, not only one this
+    tool ordered: rebooting a node again within one --wait window of it coming up
+    is the loop the cooldown exists to stop. An unreadable clock refuses (fail
+    closed), naming why -- the same rule as an unreadable credential expiry."""
+    uptime, err = _host_uptime()
+    if uptime is None:
+        return f"cannot read this node's boot clock, refusing (fail closed): {err}"
+    if uptime < REBOOT_COOLDOWN:
+        left = int(REBOOT_COOLDOWN - uptime)
+        return (f"{node} is this pod's own node and booted {int(uptime)} s ago; "
+                f"cooldown is {REBOOT_COOLDOWN} s from boot, {left} s left. Any boot counts, not only one "
+                "reboot_node ordered -- a node back from a power loss included: rebooting a node again "
+                "within one --wait window of it coming up is the loop this cooldown exists to stop, and "
+                "the sidecar cannot tell which kind of boot it was")
+    return ""
+
+
 def _audit(**fields: object) -> None:
     """One JSON line per reboot_node call to stdout — `kubectl logs -c talos-mcp`
     is the only record of the direct-LAN path, which Omni never sees."""
@@ -401,7 +437,8 @@ def reboot_node(node: str, reason: str, confirm: str = "") -> str:
     confirm=<token> → 真的執行，token 作廢。
     reason 必填，寫進每一行 audit。守衛（兩段都查）：node 必須是叢集當下某個節點的
     InternalIP；其他 control-plane 節點任一不 Ready 就拒（quorum）；同一節點在上一次
-    執行後 600 秒內再呼叫被拒（冷卻）。重啟本 pod 所在的節點時不等待（pod 會跟著重開）。"""
+    執行後 600 秒內再呼叫被拒（冷卻）；本 pod 所在的節點則從它上次開機起算 600 秒——
+    那次重啟會連同記憶一起抹掉。重啟本 pod 所在的節點時不等待（pod 會跟著重開）。"""
     stated = reason.strip()
     if not stated:
         return _refuse(node, "reason is required: state the diagnosis that calls for this reboot", stated_reason=stated)
@@ -417,8 +454,12 @@ def reboot_node(node: str, reason: str, confirm: str = "") -> str:
     left = _cooldown_left(node, now)
     if left:
         return _refuse(node, f"{node} was rebooted by this sidecar {REBOOT_COOLDOWN - left} s ago; cooldown is {REBOOT_COOLDOWN} s, {left} s left", stated_reason=stated)
-
     own_node = node == POD_IP
+    if own_node:
+        booted = _own_node_cooldown_refusal(node)
+        if booted:
+            return _refuse(node, booted, stated_reason=stated)
+
     if not confirm:
         token = secrets.token_urlsafe(24)
         _TOKENS[token] = (node, now + TOKEN_TTL)
@@ -496,8 +537,10 @@ def _startup_readings() -> list[str]:
         "reboot_node: " + ("registered" if OPERATOR.ok else "not registered"),
     ]
     if OPERATOR.ok:
+        uptime, err = _host_uptime()
         readings.append("reboot_node guards: stated reason required; other control-plane nodes must be Ready "
-                        f"(quorum); {REBOOT_COOLDOWN} s per-node cooldown")
+                        f"(quorum); {REBOOT_COOLDOWN} s per-node cooldown; own node ({POD_IP or 'POD_IP unset'}) "
+                        "counted from boot, uptime " + (f"{int(uptime)} s" if uptime is not None else f"unreadable ({err})"))
     if EXPIRY_WARNING:
         readings.append(EXPIRY_WARNING)
     # Informational: reboot_node's allowlist needs `get nodes` through this
