@@ -80,7 +80,7 @@ simulated frames (the helper is a self-contained IIFE using only those globals).
 
 ## Talos MCP Sidecar (isolated cluster diagnostics, plus one gated reboot)
 
-A second container, `talos-mcp` (same image, `command` override — see below), gives the agent Talos diagnostics for the client's own cluster without any credential crossing the remote-operator boundary. Two credentials can be mounted into it, and only into it. The design lives in `jg-base`: `openspec/changes/insideman` (the reader) and `openspec/changes/im-onsite-operator-tools` (the operator; this repo's sub-change of the same name holds the file-level decisions).
+A second container, `talos-mcp` (same image, `command` override — see below), gives the agent Talos diagnostics for the client's own cluster without any credential crossing the remote-operator boundary. Two credentials can be mounted into it, and only into it. The design lives in `jg-base`: `openspec/changes/insideman` (the reader) and `openspec/changes/im-onsite-operator-tools` (the operator; this repo's sub-change of the same name, archived 2026-10-16 Taipei (the folder carries the UTC date), left its contract in `openspec/specs/talos-operator-escalation`, `im-permission-profile` and `operator-inbox`, and its decisions in `openspec/changes/archive/2026-10-15-im-onsite-operator-tools/design.md`).
 
 ### Reader credential (always, fleet-wide)
 

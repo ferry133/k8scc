@@ -14,8 +14,10 @@
 ## 3. 文件與映像
 
 - [x] 3.1 `CLAUDE.md`：sidecar 段落改寫（兩把憑證、四層門檻、退路標記）；env 表加 `TALOS_OPERATOR_CONFIG`、`POD_IP`；新增「inbox 慣例」與「reboot 的批准來自 ttyd 前的人（10-15 裁定前）；auto mode 下若提示會倒數自動拒絕，切 manual」（後半句待 root 5.6 量到再定稿）。**2026-10-15 裁定後這句作廢，改寫見 4.2。**
-- [ ] 3.2 CI 重建映像；把 tag 回報到 root（`jg-base/openspec/changes/im-onsite-operator-tools/tasks.md` 3.2）。
-- [ ] 3.3 archive 本 sub-change 時回頭更新 root（四條規則第一條）；root 的 `talos-mcp-sidecar` delta 引用了本 repo 的 `talos-operator-escalation`，兩邊的工具名與路徑標記字串要逐字一致——archive 前 grep 一次。
+- [x] 3.2 CI 重建映像；把 tag 回報到 root（`jg-base/openspec/changes/im-onsite-operator-tools/tasks.md` 3.2）。
+  - 首版 `fb98a11@sha256:3ba87565…`（jg-base#156，root 3.2b）；最終 `d8d0fd3@sha256:53978cb549042068d4bc3c4123a2e05822b90591a58c05dc4ab32b0d63842aff`（含 #23／#24／#26；jg-base#169 合併 `9e80ba6`，2026-10-16 兩座部署，root 7.4 讀數 jg-base#170）。
+- [x] 3.3 archive 本 sub-change 時回頭更新 root（四條規則第一條）；root 的 `talos-mcp-sidecar` delta 引用了本 repo 的 `talos-operator-escalation`，兩邊的工具名與路徑標記字串要逐字一致——archive 前 grep 一次。
+  - 2026-10-16 對 jg-base `main` 的 root `specs/talos-mcp-sidecar/spec.md` 抽出全部反引號字面值逐一 grep：k8scc 側該有的全命中——`get_node_status`、`get_etcd_members`、`get_link_status`、`reboot_node`、`[via direct LAN]`、`Unavailable`、`talos-mcp`、`os:reader`／`os:operator`、`siderolink`、`talos-operator-escalation`；未命中的都是 jg-base 自己的字面值（`${TALOS_OPERATOR_CONFIG_B64:-}`、`claude_instances`、`omnictl talosconfig … --break-glass`、`operator-credential-lifecycle`），不歸本 repo。root 守衛語（quorum／per-node cooldown／caller-supplied reason）與本 spec 的三條 Requirement 對應。root 6.3（依四條規則更新 root）由 jg-base 收，archive commit 回報給 jg-base-0a。
 
 ## 4. 2026-10-15 裁定後（root tasks §7：im 是公司的工具，坐在 ttyd 前的只有公司員工，守衛在伺服端）
 

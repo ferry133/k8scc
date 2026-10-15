@@ -13,6 +13,8 @@ shims log every argv element on its own, so "the value reached talosctl as ONE
 argument" is a measurement, not a reading of subprocess's documentation.
 
 Run: python3 test/test_talos_mcp_server.py     (needs `pip install mcp==<Dockerfile pin>`)
+Not `python -m unittest test/test_talos_mcp_server.py`: the path form fails in the
+loader ("Ran 1 test, errors=1") and reads as a red suite.
 """
 import asyncio
 import contextlib
