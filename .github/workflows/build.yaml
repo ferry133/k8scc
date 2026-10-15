@@ -82,6 +82,12 @@ jobs:
       - name: Check the im policy controls
         run: test/im-policy-controls.sh
 
+      # entrypoint.sh's D-Bus / GNOME Keyring startup (k8scc#19): every outcome
+      # leaves its own `entrypoint:` line, and none stops the container. The
+      # function is extracted from entrypoint.sh, driven with fake daemons.
+      - name: Check the entrypoint secret-service controls
+        run: test/entrypoint-controls.sh
+
       - name: Set up QEMU (multi-arch)
         uses: docker/setup-qemu-action@v3
 
