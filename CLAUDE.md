@@ -130,7 +130,7 @@ Same GHCR repository (`ghcr.io/ferry133/claude-code`), not a sibling package: a 
 
 ### Toolchain
 
-Beyond `base`, the factory target adds `omnictl` `gh` `cloudflared` `age`/`age-keygen` `sops` `cue` `makejinja` `task` `helm` `helmfile` `talhelper` `flux` `kustomize` `kubeconform` `yq` `jq` `uv`, and re-pins `kubectl`/`talosctl` to the driven repo's versions rather than the hosting cluster's.
+Beyond `base`, the factory target adds `gh` `cloudflared` `age`/`age-keygen` `sops` `cue` `makejinja` `task` `helm` `helmfile` `talhelper` `flux` `kustomize` `kubeconform` `yq` `jq` `uv`, and re-pins `kubectl`/`talosctl` to the driven repo's versions rather than the hosting cluster's. `omnictl` lives in `base` since k8scc#18 (pinned to the fleet's self-hosted Omni server, v1.8.1, with per-arch sha256 ARGs) and is asserted again in the factory's final layer; its version ARG is declared once before the first `FROM`, so the two stages cannot disagree.
 
 Two rules govern the pins:
 

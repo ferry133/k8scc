@@ -9,6 +9,11 @@
 # factory change can never reach a running cluster that pinned a base tag.
 # Building with no --target would produce the factory image under the base's
 # tags, which is why the workflow names both explicitly.
+
+# omnictl is installed in `base` (k8scc#18) and asserted again in `factory`;
+# declared here, before the first FROM, so both stages read ONE copy of the pin.
+ARG OMNICTL_VERSION=v1.8.1
+
 FROM debian:12-slim AS base
 
 LABEL org.opencontainers.image.source="https://github.com/ferry133/k8scc"
@@ -115,6 +120,41 @@ RUN ARCH=$(dpkg --print-architecture) && \
     curl -fsSL -o /usr/local/bin/talosctl \
       "https://github.com/siderolabs/talos/releases/download/${TALOSCTL_VERSION}/talosctl-linux-${ARCH}" && \
     chmod +x /usr/local/bin/talosctl
+
+# omnictl -- reach the client's Omni from the web terminal, the same kind of
+# rescue tool as kubectl and talosctl above (k8scc#18; ferry133 2026-10-01:
+# "install omnictl into k8scc image."). The binary alone grants nothing: it
+# needs an Omni credential, and none is mounted into this container.
+#
+# Pinned to the fleet's self-hosted Omni SERVER (jg-base
+# kubernetes/apps/extras/omni/omni/app/helmrelease.yaml, tag v1.8.1, read
+# 2026-10-16), not to latest: latest was v1.12.3 when this was asked for, a
+# client four minors ahead of the server it talks to with nobody watching
+# (the jg-base#130 shape). Bump this with that server, not with releases.
+# Verified against sha256 values pinned HERE, per architecture, rather than a
+# checksum file fetched from the same release as the binary.
+#
+# Installed is not usable: logging in through a Cloudflare Tunnel breaks on
+# gRPC trailers (the same constraint as OMNI_ENDPOINT below). Not measured here.
+ARG OMNICTL_VERSION
+ARG OMNICTL_SHA256_AMD64=9e97b3a0534a02e8302ddab91856e81fedf80d1656f18cfdd750f4705d4823fb
+ARG OMNICTL_SHA256_ARM64=2f4664abdca15175df5873f561046bacbc722d87cc779736a7ec2c5facb9813b
+RUN set -eu; \
+    ARCH=$(dpkg --print-architecture); \
+    case "$ARCH" in \
+      amd64) want="$OMNICTL_SHA256_AMD64" ;; \
+      arm64) want="$OMNICTL_SHA256_ARM64" ;; \
+      *) echo "omnictl: no pinned sha256 for $ARCH" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL -o /usr/local/bin/omnictl \
+      "https://github.com/siderolabs/omni/releases/download/${OMNICTL_VERSION}/omnictl-linux-${ARCH}"; \
+    echo "${want}  /usr/local/bin/omnictl" | sha256sum -c -; \
+    chmod +x /usr/local/bin/omnictl; \
+    out=$(omnictl --version); \
+    if ! printf '%s\n' "$out" | tr . _ | grep -qwF "$(printf '%s' "$OMNICTL_VERSION" | tr . _)"; then \
+      echo "omnictl: --version printed '$out', expected ${OMNICTL_VERSION}" >&2; exit 1; \
+    fi; \
+    echo "omnictl: $out"
 
 # Install MCP server deps. mcp pinned <2.0: the 2.0 release (2026-07)
 # dropped mcp.server.fastmcp.FastMCP (both memory_mcp_server.py and
@@ -271,7 +311,7 @@ SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
 # CLAUDE_CODE_VERSION (8228f58): "latest" gets frozen into the GHA layer
 # cache, so two builds of one commit can ship different tools and a rebuild
 # keeps serving the stale one.
-ARG OMNICTL_VERSION=v1.8.1
+ARG OMNICTL_VERSION
 ARG GH_VERSION=2.87.3
 ARG CLOUDFLARED_VERSION=2026.2.0
 ARG AGE_VERSION=v1.3.1
@@ -299,8 +339,6 @@ ARG FACTORY_TALOSCTL_VERSION=v1.13.8
 
 # Single-file binaries.
 RUN ARCH=$(dpkg --print-architecture) && \
-    curl -fsSL -o /usr/local/bin/omnictl \
-      "https://github.com/siderolabs/omni/releases/download/${OMNICTL_VERSION}/omnictl-linux-${ARCH}" && \
     curl -fsSL -o /usr/local/bin/cloudflared \
       "https://github.com/cloudflare/cloudflared/releases/download/${CLOUDFLARED_VERSION}/cloudflared-linux-${ARCH}" && \
     curl -fsSL -o /usr/local/bin/sops \
@@ -313,7 +351,7 @@ RUN ARCH=$(dpkg --print-architecture) && \
       "https://dl.k8s.io/release/${FACTORY_KUBECTL_VERSION}/bin/linux/${ARCH}/kubectl" && \
     curl -fsSL -o /usr/local/bin/talosctl \
       "https://github.com/siderolabs/talos/releases/download/${FACTORY_TALOSCTL_VERSION}/talosctl-linux-${ARCH}" && \
-    chmod +x /usr/local/bin/omnictl /usr/local/bin/cloudflared /usr/local/bin/sops \
+    chmod +x /usr/local/bin/cloudflared /usr/local/bin/sops \
              /usr/local/bin/yq /usr/local/bin/jq /usr/local/bin/kubectl /usr/local/bin/talosctl
 
 # Tarballs. Layouts differ per project, so each gets its own strip depth.
