@@ -61,6 +61,12 @@ jobs:
       - name: Check the ops-image probe controls
         run: test/assert-ops-controls.sh
 
+      # The "why did the digest change" cells the bump job writes into the
+      # jg-base PR (k8scc#15): offline, on layer lists shaped like three real
+      # bumps, each cell able to be false on its own.
+      - name: Check the bump-explanation controls
+        run: python3 test/test_bump_explain.py
+
       # talos_mcp_server.py is imported for real against the same mcp pin the
       # Dockerfile installs (read from it, not copied here), with fake talosctl
       # and kubectl ahead on PATH. Every case carries a negative control; the
@@ -448,6 +454,33 @@ jobs:
           token: ${{ secrets.JG_BASE_PR_TOKEN || secrets.GHCR_TOKEN }}
           path: jg-base
 
+      # k8scc's own history, for the "why did the digest change" cells in the PR
+      # body (k8scc#15): the old..new diff needs both commits, so full depth.
+      - name: Checkout k8scc (history for the bump explanation)
+        if: steps.tok.outputs.have == 'true'
+        uses: actions/checkout@v4
+        with:
+          path: k8scc
+          fetch-depth: 0
+
+      # The pin jg-base main carries BEFORE the rewrite: the "old" side of the
+      # explanation. Read from the file, not from the last bump PR -- the PR
+      # may never have been merged.
+      - name: Read the pin being replaced
+        if: steps.tok.outputs.have == 'true'
+        id: old
+        working-directory: jg-base
+        run: |
+          set -euo pipefail
+          F=kubernetes/apps/base/claudecode/claude-code/im/enabled/helmrelease.yaml
+          OLD=$(grep -oE 'tag: [0-9a-f]{7}@' "$F" | sort -u | sed -E 's/tag: ([0-9a-f]{7})@/\1/')
+          if [ "$(printf '%s\n' "$OLD" | wc -l)" -ne 1 ] || [ -z "$OLD" ]; then
+            echo "::warning::could not read one current pin from $F; the explanation will say so"
+            OLD=""
+          fi
+          echo "short=${OLD}" >> "$GITHUB_OUTPUT"
+          echo "current pin: ${OLD:-<unreadable>}"
+
       # jg-base's own script, run from jg-base's checkout -- not a copy of its
       # logic here. The `@sha256` perl-interpolation trap and the "exactly 3
       # sites" guard live in one place, so a copy here cannot keep working
@@ -500,10 +533,16 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.JG_BASE_PR_TOKEN || secrets.GHCR_TOKEN }}
           FULL_SHA: ${{ github.sha }}
+          OLD_SHORT: ${{ steps.old.outputs.short }}
         run: |
           set -euo pipefail
           SHORT="${FULL_SHA:0:7}"
-          BRANCH="bump/claudecode-${SHORT}"
+          # ONE branch for every bump (k8scc#15): consecutive merges here used to
+          # open one jg-base PR each (bump/claudecode-<sha>), each superseding the
+          # last. A fixed branch is force-pushed, so the open PR follows the
+          # newest build -- and its head moves under review, which the body says
+          # and which is why mergers pin --match-head-commit.
+          BRANCH="bump/claudecode"
 
           if git diff --quiet; then
             echo "::notice::jg-base already pins this digest -- nothing to do."
@@ -517,6 +556,7 @@ jobs:
           git commit -m "chore(claudecode): bump im pin to ${SHORT} (k8scc)" \
                      -m "Opened by ferry133/k8scc CI. k8scc#8 - jg-base#66"
           git push -f origin "${BRANCH}"
+          HEAD_SHA=$(git rev-parse HEAD)
 
           # `gh api` on the REST pulls endpoint -- not `gh pr view`, and not
           # `gh pr list` either. All three answer the same question; only this
@@ -561,9 +601,14 @@ jobs:
             exit 1
           fi
 
-          if [ -n "${EXISTING}" ]; then
-            echo "::notice::jg-base#${EXISTING} for ${BRANCH} is already open -- force-pushed the new digest onto it."
-            exit 0
+          # Why the digest changed: three independent readings (k8scc#15). A
+          # failure here is printed into the body as "not measured", never
+          # allowed to fail the job or to read as "no change".
+          if [ -n "${OLD_SHORT}" ]; then
+            EXPLAIN=$(cd ../k8scc && python3 .github/scripts/bump_explain.py "${OLD_SHORT}" "${SHORT}" 2>&1) \
+              || EXPLAIN="**Why the digest changed:** not measured (bump_explain.py failed: $(printf '%s' "${EXPLAIN}" | tail -n1))"
+          else
+            EXPLAIN="**Why the digest changed:** not measured (the current pin could not be read from jg-base main)"
           fi
 
           # Body written to a file rather than inlined: a heredoc terminator
@@ -572,7 +617,16 @@ jobs:
           {
             echo "Opened automatically by \`ferry133/k8scc\` CI (k8scc#8)."
             echo
-            echo "Bumps the base \`im\` \`tag@digest\` pin to the image k8scc main just built."
+            echo "Bumps the base \`im\` \`tag@digest\` pin to the image k8scc main just built:"
+            echo "\`${OLD_SHORT:-?}\` → \`${SHORT}\`."
+            echo
+            printf '%s\n' "${EXPLAIN}"
+            echo
+            echo "⚠️ **This PR's head moves.** It lives on the fixed branch \`${BRANCH}\`, and every"
+            echo "later k8scc main build force-pushes its own pin onto it and rewrites this body"
+            echo "(k8scc#15). A review is of one head: merge with"
+            echo "\`gh pr merge <n> --match-head-commit <the head you reviewed>\`. Head at this"
+            echo "writing: \`${HEAD_SHA}\`."
             echo
             echo "**Checked, not assumed:** the digest was resolved by this repo's own"
             echo "\`scripts/bump-claudecode-image.sh\` from GHCR, then compared against the digest"
@@ -588,6 +642,15 @@ jobs:
             echo "**Not auto-merged on purpose.** This repo's main reaches every cluster through"
             echo "Flux, so merging is this repo's call after its own review."
           } > /tmp/pr-body.md
+
+          if [ -n "${EXISTING}" ]; then
+            # Same REST endpoint family and token as the lookup above.
+            gh api -X PATCH "repos/ferry133/jg-base/pulls/${EXISTING}" \
+              -f title="chore(claudecode): bump im pin to ${SHORT}" \
+              -F body=@/tmp/pr-body.md >/dev/null
+            echo "::notice::jg-base#${EXISTING} on ${BRANCH} now carries ${SHORT} (head ${HEAD_SHA}); title and body rewritten."
+            exit 0
+          fi
 
           gh pr create --repo ferry133/jg-base --base main --head "${BRANCH}" \
             --title "chore(claudecode): bump im pin to ${SHORT}" \
