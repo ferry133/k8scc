@@ -44,7 +44,9 @@ if [ "$path" = omni ]; then outcome="${SHIM_OMNI:-ok}"; else outcome="${SHIM_DIR
 case "$outcome" in
   ok)
     if [ "$sub" = reboot ]; then
-      echo "reboot sequence via $path: shim did not reboot anything"
+      # stderr, like the real tool: `talosctl reboot --wait` writes its sequence
+      # there and exits 0 with an empty stdout (jg-jiahd 2026-10-15, k8scc#22)
+      echo "reboot sequence via $path: shim did not reboot anything" >&2
       exit "${SHIM_REBOOT_RC:-0}"
     fi
     echo "answer via $path: $sub"; exit 0 ;;

@@ -315,6 +315,7 @@ class RebootNode(unittest.TestCase):
         self.assertEqual([a["phase"] for a in audit], ["token"])
         self.assertEqual(audit[0]["node"], NODE_A)
         self.assertEqual(audit[0]["user"], "tester@example")
+        self.assertIn("uncordon", body["note"])   # the node may come back cordoned (jg-jiahd 2026-10-15)
         with self.subTest(control="the same call plus the token DOES reach talosctl"):
             self.h.call(m.reboot_node, NODE_A, confirm=body["token"])
             self.assertEqual(len(self.reboots()), 1)
@@ -329,7 +330,12 @@ class RebootNode(unittest.TestCase):
         self.assertEqual(reboots[0][1:], body["will_run"].split()[1:])   # said == ran, element by element
         self.assertEqual(reboots[0][1:], [f"--talosconfig={self.h.operator}", "--endpoints", NODE_A, "--nodes", NODE_A,
                                           "reboot", "--wait=true", "--timeout=600s"])
+        # k8scc#22: the real `reboot --wait` reports on stderr and exits 0 with an
+        # empty stdout; the response must still carry the sequence and the exit code
         self.assertIn("reboot sequence via direct", out2)
+        self.assertIn("talosctl exit 0", out2)
+        self.assertNotIn("(empty response)", out2)
+        self.assertIn("uncordon", out2)
         self.assertEqual(audit[-1]["phase"], "execute")
         self.assertEqual(audit[-1]["rc"], 0)
         with self.subTest(control="replaying the token is refused and runs nothing"):
@@ -343,7 +349,8 @@ class RebootNode(unittest.TestCase):
             body = json.loads(self.h.call(m.reboot_node, NODE_A)[0])
             out4, audit4 = self.h.call(m.reboot_node, NODE_A, confirm=body["token"])
             self.assertEqual(audit4[-1]["rc"], 3)
-            self.assertIn("(exit 3)", out4)
+            self.assertIn("talosctl exit 3", out4)   # was "(exit 3)" from text(); the verb now states it uniformly
+            self.assertIn("reboot sequence via direct", out4)
 
     def test_token_is_bound_to_node(self):
         m = self.h.load()
