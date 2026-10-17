@@ -3,8 +3,10 @@
 # 1. Ensure per-user HOME directories exist
 # 2. Register MCP servers (memory if DATABASE_URL, talos if TALOS_MCP_URL) and,
 #    for talos, merge the permission profile into settings.json
-# 3. Announce ~/workspace/inbox/ if it holds anything unread
-# 4. exec tmux → claude
+# 3. Configure im's apps repo (if IM_APPS_REPO and its write key are both here):
+#    ssh alias + git identity, and git/sops into the permission profile
+# 4. Announce ~/workspace/inbox/ if it holds anything unread
+# 5. exec tmux → claude
 # CLAUDE_USER_ID is set by the pod environment (oauth2-proxy handles auth externally)
 
 # HOME is /home/claude in the image (Dockerfile pins it); the fallback only
@@ -24,9 +26,11 @@ fi
 # test/claude-session-controls.sh runs this whole script against fake `claude`
 # and `tmux` binaries, so these are exercised as shipped, not as copied.
 
-# Merge the Talos MCP permission profile into settings.json: all five tools
-# auto-allowed -- reboot_node included since the 2026-10-15 ruling (im is the
-# company's tool and only company staff reach this ttyd; the reboot's gates are
+# merge_permissions FILE ALLOW... [-- UNASK...]: append each ALLOW entry to
+# permissions.allow, and drop each UNASK entry from permissions.ask.
+#
+# The Talos profile: all five tools auto-allowed -- reboot_node included
+# since the 2026-10-15 ruling (im is the company's tool and only company staff reach this ttyd; the reboot's gates are
 # the sidecar's own, not a prompt). The entry this profile used to put under
 # `ask` is moved out: pods that ran the previous image carry it on the PVC, and
 # one name under both lists is a question the permission layer answers however
@@ -35,14 +39,17 @@ fi
 # is a no-op. python3 rather than jq: python3 is in the base image for the MCP
 # servers; jq only in factory. A file it cannot parse is left exactly as it was
 # and the failure is said.
-merge_talos_permissions() {
-    python3 - "$1" <<'PY'
+#
+# The apps-repo profile (`Bash(git *)`, `Bash(sops *)`) goes through the same
+# merge, independently of the Talos one: either may be present without the
+# other.
+merge_permissions() {
+    python3 - "$@" <<'PY'
 import json, pathlib, sys
 
-ALLOW = ["mcp__talos__get_node_status", "mcp__talos__get_etcd_members",
-         "mcp__talos__get_link_status", "mcp__talos__get_service_logs",
-         "mcp__talos__reboot_node"]
-LEAVE_ASK = ["mcp__talos__reboot_node"]   # where this profile put it before 2026-10-15
+args = sys.argv[2:]
+ALLOW = args[:args.index("--")] if "--" in args else args
+LEAVE_ASK = args[args.index("--") + 1:] if "--" in args else []
 
 path = pathlib.Path(sys.argv[1])
 raw = path.read_text() if path.exists() else ""
@@ -70,6 +77,89 @@ new = json.dumps(data, indent=2, ensure_ascii=False) + "\n"
 if new != raw:
     path.write_text(new)
 PY
+}
+
+TALOS_ALLOW=(mcp__talos__get_node_status mcp__talos__get_etcd_members
+             mcp__talos__get_link_status mcp__talos__get_service_logs
+             mcp__talos__reboot_node)
+TALOS_UNASK=(mcp__talos__reboot_node)   # where this profile put it before 2026-10-15
+APPS_ALLOW=('Bash(git *)' 'Bash(sops *)')
+
+# configure_apps_repo HOME: im's write path to its own apps repo (openspec
+# im-apps-repo). Both inputs must be here -- IM_APPS_REPO (owner/repo) and the
+# write key jg-base mounts at ~/.ssh/im-apps.key -- and the key must pass ssh's
+# OWN permission rule, or nothing is written and one line names what is missing.
+#
+# ssh's rule, not a fixed mode: group/other bits are refused only when the key
+# is owned by the caller. Today im runs as root and Secret volumes are always
+# root-owned, so 0400 and 0600 both pass; a non-root im would get the key via
+# fsGroup as root:<fsGroup> 0440, which ssh accepts and so must this.
+#
+# `core.sshCommand = ssh -F <home>/.ssh/config` is the load-bearing line.
+# OpenSSH finds its user config through the passwd entry's home, not $HOME,
+# and this pod runs as uid 0 with HOME pinned to /home/claude: without -F the
+# alias below is never read (it would be /root/.ssh/config), while git does
+# read ~/.gitconfig through $HOME -- an identity with no key. Measured on
+# OpenSSH 10.2: a HOME-redirected `ssh -G <alias>` ignored the file, `-F`
+# resolved it.
+#
+# Idempotent: each file is written only when its content would change. The
+# ssh config is this script's own file (marked on its first line); one
+# without the mark is not overwritten.
+configure_apps_repo() {
+    local home="$1" key="$1/.ssh/im-apps.key" cfg="$1/.ssh/config" reason=""
+    local mark="# written by claude-session (im-apps-repo); edit claude-session, not this file"
+    if [ -z "${IM_APPS_REPO}" ]; then
+        return 1
+    elif ! [[ "${IM_APPS_REPO}" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
+        reason="IM_APPS_REPO='${IM_APPS_REPO}' 不是 owner/repo"
+    elif [ ! -f "$key" ]; then
+        reason="寫入金鑰不在 ${key/#"$HOME"/\~}"
+    elif [ ! -r "$key" ]; then
+        reason="寫入金鑰 ${key/#"$HOME"/\~} 讀不到"
+    elif ! reason=$(python3 - "$key" <<'PY'
+import os, stat, sys
+st = os.stat(sys.argv[1])
+if st.st_uid == os.getuid() and st.st_mode & 0o077:
+    print(f"寫入金鑰 mode {stat.S_IMODE(st.st_mode):04o}：自己擁有的私鑰不得有 group/other 位元，ssh 會拒用")
+    sys.exit(1)
+PY
+    ); then
+        :
+    fi
+    if [ -n "$reason" ]; then
+        echo "⚠ apps repo 沒有設定：${reason}" >&2
+        return 1
+    fi
+
+    local want
+    want=$(printf '%s\n' "$mark" \
+        'Host github.com-im-apps' \
+        '  HostName github.com' \
+        '  User git' \
+        "  IdentityFile $key" \
+        '  IdentitiesOnly yes' \
+        '  UserKnownHostsFile /etc/ssh/github-known-hosts' \
+        '  HostKeyAlias github.com' \
+        '  StrictHostKeyChecking yes')
+    if [ -e "$cfg" ] && [ "$(head -n 1 "$cfg")" != "$mark" ]; then
+        echo "⚠ apps repo 沒有設定：${cfg/#"$HOME"/\~} 不是 claude-session 寫的，沒有覆蓋" >&2
+        return 1
+    fi
+    if [ "$(cat "$cfg" 2>/dev/null)" != "$want" ]; then
+        mkdir -p "$home/.ssh" && printf '%s\n' "$want" > "$cfg" || return 1
+    fi
+
+    local k v
+    while IFS='=' read -r k v; do
+        if [ "$(git config --global --get "$k")" != "$v" ]; then
+            git config --global "$k" "$v" || return 1
+        fi
+    done <<EOF
+user.name=im
+user.email=im@${IM_APPS_REPO#*/}
+core.sshCommand=ssh -F $cfg
+EOF
 }
 
 # Print one line when the inbox directory holds a file not yet marked read
@@ -130,8 +220,18 @@ if [ -n "${TALOS_MCP_URL}" ]; then
             echo "⚠ claude mcp add talos 失敗——見 ~/.claude/mcp-add.log" >&2
         fi
     fi
-    if ! merge_talos_permissions "${CLAUDE_HOME}/.claude/settings.json"; then
+    if ! merge_permissions "${CLAUDE_HOME}/.claude/settings.json" \
+            "${TALOS_ALLOW[@]}" -- "${TALOS_UNASK[@]}"; then
         echo "⚠ settings.json 的 talos permission 設定沒有寫入（見上一行）——mcp__talos__* 每次都會問" >&2
+    fi
+fi
+
+# im's apps repo: the remote is git@github.com-im-apps:${IM_APPS_REPO}.git.
+# No IM_APPS_REPO -> silent and nothing written, the common case. git/sops
+# join the permission profile only when the write path really exists.
+if configure_apps_repo "${CLAUDE_HOME}"; then
+    if ! merge_permissions "${CLAUDE_HOME}/.claude/settings.json" "${APPS_ALLOW[@]}"; then
+        echo "⚠ settings.json 的 git/sops permission 設定沒有寫入（見上一行）" >&2
     fi
 fi
 
