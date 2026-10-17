@@ -22,6 +22,6 @@
 ## 4. spec 與收尾
 
 - [ ] 4.1 `im-permission-profile` 的 MODIFIED 在歸檔時合進 `openspec/specs/`；`im-apps-repo` 成為新 spec。
-- [ ] 4.2 jg-base 側要配合的兩件事開成 jg-base issue（不在本 repo 做）：im HelmRelease 掛 Secret 到 `/home/claude/.ssh/im-apps.key`，`defaultMode` `0400` 或 `0600` 皆可（今天 im 以 root 跑；Secret volume 永遠 root 擁有，所以 mode 救不了非 root——若日後改非 root，走 `fsGroup` 得 `root:<fsGroup> 0440`，ssh 接受）；設 `IM_APPS_REPO` env。
+- [x] 4.2 jg-base 側要配合的兩件事開成 jg-base issue（不在本 repo 做；→ jg-base#183）：im HelmRelease 掛 Secret 到 `/home/claude/.ssh/im-apps.key`，`defaultMode` `0400` 或 `0600` 皆可（今天 im 以 root 跑；Secret volume 永遠 root 擁有，所以 mode 救不了非 root——若日後改非 root，走 `fsGroup` 得 `root:<fsGroup> 0440`，ssh 接受）；設 `IM_APPS_REPO` env。
 - [ ] 4.3 PR 內文署名；開單者驗收在 merge 之前；merge 後 PR 留一行署名。
 - [ ] 4.4 歸檔本 sub-change，回更新 root 的 Sub-changes 表與 tasks §4。
