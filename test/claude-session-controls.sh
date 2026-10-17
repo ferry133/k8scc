@@ -56,7 +56,7 @@ run_session() {
   mkdir -p "$home"
   : > "$home/fake.log"
   env -i PATH="$work/bin:$PATH" HOME="$home" FAKE_LOG="$home/fake.log" \
-      TTYD_USER="" CLAUDE_USER_ID="tester" DATABASE_URL="" TALOS_MCP_URL="" IM_APPS_REPO="" "$@" \
+      TTYD_USER="" CLAUDE_USER_ID="tester" DATABASE_URL="" TALOS_MCP_URL="" IM_APPS_REPO="" IM_APPS_KEY="" "$@" \
       bash ./claude-session </dev/null 2>&1
 }
 
@@ -208,13 +208,33 @@ check_not "0644: no gitconfig" test -e "$h/.gitconfig"
 check_not "0644: no permissions key" has_perms "$h"
 check "0644: the line names the mode"               grep -q 'mode 0644' <<<"$out"
 
-# key present but IM_APPS_REPO unset: silent, nothing written
+# key present but IM_APPS_REPO empty -- run_session passes IM_APPS_REPO="", the
+# form jg-base's ${IM_APPS_REPO:=} substitution delivers: silent, nothing written
 h="$work/apps-norepo"
 put_key "$h" 0600
 out=$(run_session "$h")
 check_not "no IM_APPS_REPO: no ssh config" test -e "$h/.ssh/config"
 check_not "no IM_APPS_REPO: no gitconfig" test -e "$h/.gitconfig"
 check_not "no IM_APPS_REPO: silent" grep -q 'apps repo' <<<"$out"
+
+# IM_APPS_KEY: the key mounted as a Secret directory outside ~/.ssh (jg-base#183)
+h="$work/apps-keydir"
+mkdir -p "$h/etc-im-apps"; printf 'not a real key\n' > "$h/etc-im-apps/key"; chmod 0400 "$h/etc-im-apps/key"
+run_session "$h" IM_APPS_REPO=$REPO IM_APPS_KEY="$h/etc-im-apps/key" >/dev/null
+check "IM_APPS_KEY: config names that key"          grep -qxF "  IdentityFile $h/etc-im-apps/key" "$h/.ssh/config"
+check "IM_APPS_KEY: -F alias resolves it"           grep -qxF "$h/etc-im-apps/key" <<<"$(idfiles -F "$h/.ssh/config" github.com-im-apps)"
+check_not "IM_APPS_KEY: the default path is not used" grep -qF '/.ssh/im-apps.key' "$h/.ssh/config"
+# IM_APPS_KEY empty (substituted, not unset): the default path
+h="$work/apps-keyempty"
+put_key "$h" 0600
+run_session "$h" IM_APPS_REPO=$REPO IM_APPS_KEY="" >/dev/null
+check "IM_APPS_KEY empty: default path used"        grep -qxF "  IdentityFile $h/.ssh/im-apps.key" "$h/.ssh/config"
+# IM_APPS_KEY names a missing file: nothing written, that path named
+h="$work/apps-keymissing"
+put_key "$h" 0600
+out=$(run_session "$h" IM_APPS_REPO=$REPO IM_APPS_KEY="$h/etc-im-apps/key")
+check_not "IM_APPS_KEY missing: no ssh config" test -e "$h/.ssh/config"
+check "IM_APPS_KEY missing: that path named"        grep -q "寫入金鑰不在 ~/etc-im-apps/key" <<<"$out"
 
 # not owner/repo: refused and said
 h="$work/apps-badrepo"

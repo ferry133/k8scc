@@ -87,8 +87,14 @@ APPS_ALLOW=('Bash(git *)' 'Bash(sops *)')
 
 # configure_apps_repo HOME: im's write path to its own apps repo (openspec
 # im-apps-repo). Both inputs must be here -- IM_APPS_REPO (owner/repo) and the
-# write key jg-base mounts at ~/.ssh/im-apps.key -- and the key must pass ssh's
-# OWN permission rule, or nothing is written and one line names what is missing.
+# write key -- and the key must pass ssh's OWN permission rule, or nothing is
+# written and one line names what is missing. IM_APPS_REPO empty is the same as
+# unset (jg-base substitutes it as ${IM_APPS_REPO:=}): silent, nothing written.
+#
+# The key is at IM_APPS_KEY, default ~/.ssh/im-apps.key (empty = default).
+# jg-base mounts the whole Secret as a directory elsewhere (jg-base#183): a
+# subPath mount never receives a rotated key, and ~/.ssh must stay writable
+# for the config below.
 #
 # ssh's rule, not a fixed mode: group/other bits are refused only when the key
 # is owned by the caller. Today im runs as root and Secret volumes are always
@@ -107,7 +113,7 @@ APPS_ALLOW=('Bash(git *)' 'Bash(sops *)')
 # ssh config is this script's own file (marked on its first line); one
 # without the mark is not overwritten.
 configure_apps_repo() {
-    local home="$1" key="$1/.ssh/im-apps.key" cfg="$1/.ssh/config" reason=""
+    local home="$1" key="${IM_APPS_KEY:-$1/.ssh/im-apps.key}" cfg="$1/.ssh/config" reason=""
     local mark="# written by claude-session (im-apps-repo); edit claude-session, not this file"
     if [ -z "${IM_APPS_REPO}" ]; then
         return 1
