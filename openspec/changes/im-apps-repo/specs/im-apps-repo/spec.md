@@ -14,7 +14,7 @@ The `base` image SHALL install `sops` with `SOPS_VERSION` declared once before t
 
 ### Requirement: GitHub's SSH host keys are pinned in the image
 
-The image SHALL carry a `known_hosts` file for `github.com` whose keys are taken from GitHub's published `ssh_keys` (the `/meta` API) and committed to this repository, and the build SHALL assert each key's fingerprint against values pinned in the Dockerfile. `claude-session` SHALL point the apps-repo host alias at that file with `StrictHostKeyChecking yes`.
+The image SHALL carry a `known_hosts` file for `github.com` whose keys are taken from GitHub's published `ssh_keys` (the `/meta` API) and committed to this repository, and the build SHALL assert each key's fingerprint against values pinned in the Dockerfile. The apps-repo ssh configuration SHALL point at that file with `StrictHostKeyChecking yes`.
 
 #### Scenario: Fingerprints asserted at build
 - **WHEN** the image is built
@@ -24,13 +24,13 @@ The image SHALL carry a `known_hosts` file for `github.com` whose keys are taken
 - **WHEN** a push is attempted and the server's key is not in the pinned file
 - **THEN** ssh refuses the connection; nothing is added to any known_hosts
 
-### Requirement: The session configures the apps repo only when both inputs exist
+### Requirement: The session configures the apps repo only when both inputs exist, and git is told which ssh config to use
 
-`claude-session` SHALL, when `IM_APPS_REPO` (an `owner/repo`) is set **and** the write key file is mounted at its documented path with mode `0400` or stricter, write `~/.ssh/config` with a dedicated host alias for github.com using that key (`IdentitiesOnly yes`, the pinned known_hosts, `StrictHostKeyChecking yes`) and `~/.gitconfig` with `user.name im` and `user.email im@<repo>` where `<repo>` is the repository part of `IM_APPS_REPO`, idempotently. When either input is absent, or the key's mode is too open, it SHALL write neither file and print one line saying which precondition failed.
+`claude-session` SHALL, when `IM_APPS_REPO` (an `owner/repo`) is set **and** the write key file is mounted at its documented path with no group or other permission bits (`0600` or stricter), write `/home/claude/.ssh/config` with a dedicated host alias for github.com using that key (`IdentitiesOnly yes`, the pinned known_hosts, `StrictHostKeyChecking yes`) and `~/.gitconfig` with `user.name im`, `user.email im@<repo>` (the repository part of `IM_APPS_REPO`) and `core.sshCommand = ssh -F /home/claude/.ssh/config`, idempotently. The explicit `-F` is required because OpenSSH resolves its user configuration from the account's passwd home directory, not from `$HOME`, and the pod runs as uid 0 with `HOME` pinned to `/home/claude`; without it `~/.ssh/config` is never read while `~/.gitconfig` is. When either input is absent, or the key's mode has group/other bits, it SHALL write neither file and print one line naming the failed precondition.
 
 #### Scenario: Both inputs present
-- **WHEN** `claude-session` runs with `IM_APPS_REPO=ferry133/jg-x-apps` and a `0400` key file present
-- **THEN** `~/.ssh/config` contains the alias and `IdentityFile`, `~/.gitconfig` contains `user.name im` and `user.email im@jg-x-apps`, and a second run changes neither file
+- **WHEN** `claude-session` runs with `IM_APPS_REPO=ferry133/jg-x-apps` and a `0600` key file present
+- **THEN** `/home/claude/.ssh/config` contains the alias and `IdentityFile`, `~/.gitconfig` contains `user.name im`, `user.email im@jg-x-apps` and `core.sshCommand` pointing at that config, and a second run changes neither file
 
 #### Scenario: Key absent, nothing written
 - **WHEN** `IM_APPS_REPO` is set but the key file is missing
@@ -40,9 +40,13 @@ The image SHALL carry a `known_hosts` file for `github.com` whose keys are taken
 - **WHEN** the key file is present with mode `0644`
 - **THEN** neither file is created and the notice names the mode
 
+#### Scenario: Config is reached through -F, not through HOME
+- **WHEN** `ssh -F /home/claude/.ssh/config -G <alias>` and `ssh -F /home/claude/.ssh/config -G github.com` are evaluated
+- **THEN** only the alias resolves `identityfile` to the mounted key; and when the process's passwd home differs from `$HOME`, a plain `ssh -G <alias>` does **not** resolve it — which is why `core.sshCommand` carries `-F`
+
 #### Scenario: Only the alias has a key
-- **WHEN** `ssh -G github.com` and `ssh -G <alias>` are evaluated in the configured session
-- **THEN** only the alias resolves an `identityfile` to the mounted key, so a push to a remote not using the alias offers no key and fails authentication
+- **WHEN** the agent pushes to a remote that does not use the alias
+- **THEN** no key is offered and authentication fails
 
 ### Requirement: The policy says what belongs in the apps repo
 

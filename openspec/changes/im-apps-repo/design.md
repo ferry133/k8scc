@@ -11,7 +11,8 @@ Root 的設計決策在 `fleet-ops/openspec/changes/standalone-app-repos/design.
 
 - **D-e 身分從 `IM_APPS_REPO` 推，不另加 env**：容器裡沒有任何東西帶叢集名（k8scc-0c review）；`user.email im@<repo>`，`<repo>` 是 `IM_APPS_REPO` 的 repo 半——它本來就是 `<cluster>-apps`，夠辨識、零新契約。
 - **D-f host key 釘在映像、拒絕不寫入**：`StrictHostKeyChecking yes` ＋ 映像內的 `github-known-hosts`（來源 GitHub `/meta`，建置時比指紋）。GitHub 換 key 時 push 失敗、bump 流程更新；永遠不會靜默接受一把新 key。
-- **D-g 金鑰 mode 是前提不是修補**：ssh 對 group／world 可讀的私鑰直接拒用；`claude-session` 在配置前檢查 mode（`0400` 或更嚴），不 `chmod`——那是 jg-base HelmRelease `defaultMode` 的事，這裡只量、不修。
+- **D-g 金鑰 mode 是前提不是修補**：ssh 對 group／other 可讀的私鑰直接拒用；`claude-session` 在配置前檢查 mode（無 group／other 位元，`0600` 可、`0400` 可），不 `chmod`——那是 jg-base HelmRelease `defaultMode` 的事，這裡只量、不修。附帶：若 im 日後不再以 root 跑，root 擁有的 `0400` 檔會變成讀不到——`defaultMode` 挑 `0600` 並讓 Secret 的 owner 跟 pod 的 uid 走，是 jg-base 那側要記的。
+- **D-i `$HOME` 不是 ssh 的家**：OpenSSH 用 `getpwuid()` 的 `pw_dir` 找 `~/.ssh/config`，pod 以 uid 0 跑時那是 `/root`，而 `HOME` 釘在 `/home/claude`——我寫的 `~/.ssh/config` 永遠不會被讀，git 卻會讀 `~/.gitconfig`（k8scc-0c 在 OpenSSH 10.2 量到：HOME 重導後 `ssh -G <alias>` 忽略該檔，`-F` 指同一檔則解得出）。所以 `core.sshCommand = ssh -F /home/claude/.ssh/config` 進 gitconfig，controls 一律用 `ssh -F <file> -G`（否則 CI 讀的是 runner 自己的 `~/.ssh`），並加一格「HOME ≠ pw_dir」的案例。
 - **D-h allow 條目比金鑰活得久，接受**：`settings.json` 在 PVC 上，金鑰拿掉後 `Bash(git *)`／`Bash(sops *)` 仍在；沒有金鑰時它們開不了任何門，而寫移除邏輯會讓 `merge_talos_permissions` 那套「只加不減」的語意多一個例外。
 
 ## Risks
