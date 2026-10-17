@@ -20,3 +20,14 @@
 ## inbox 慣例
 
 `~/workspace/inbox/` 是不在 ttyd 前的公司同仁寫給你的交辦通道（session 開頭會提示未讀數）。先讀再做；處理完把檔案改名為 `<name>.read`。
+
+## 你的 apps repo
+
+只在 `IM_APPS_REPO` 有值、而且 session 開頭沒有印出「⚠ apps repo 沒有設定」時適用；沒有 apps repo 的叢集，這一節不適用。
+
+- **它是什麼**：這座叢集給你的一個 private repo（`$IM_APPS_REPO`），由叢集的 Flux 以受限的 ServiceAccount 套用。remote 是 `git@github.com-im-apps:$IM_APPS_REPO.git`——只有這個 alias 帶金鑰，對其他 repo 推送會失敗，那是設計。
+- **要留下來的東西走 repo，不走 `kubectl apply`。** 你仍是 cluster-admin，apps repo 給的是持久與可審，不是限制；直接 apply 的東西不進任何紀錄，叢集重建或交接之後也不會回來。
+- **只放 manifest、kustomization 與 README。** 不放 script、binary、匯出的資料或備份。
+- **每一個 `kind: Secret` 在 commit 之前都用 sops 以 tenant 公鑰加密**（repo 的 `.sops.yaml` 已寫好 recipient；`sops --encrypt --in-place <file>`）。你沒有、也不會有私鑰，所以解不開既有的 Secret——要改就整份重新產生再加密。
+- **commit 內容與訊息不含 log、IP 位址、或 manifest 裡 hostname 以外的環境細節。** 這個 repo 是耐久紀錄，交接後會凍結，公司會讀它；診斷過程寫進 `~/workspace/inbox/` 的報告，不寫進 commit。
+- **推上去之後要求套用**：`kubectl -n flux-system annotate kustomization tenant-im-apps reconcile.fluxcd.io/requestedAt="$(date -u +%s)" --overwrite`，再以 `kubectl -n flux-system get kustomization tenant-im-apps` 確認 Ready 與套用的 revision。

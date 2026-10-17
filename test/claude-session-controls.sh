@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
-# Controls for claude-session: the Talos permission profile and the inbox
-# notice. The script is run AS SHIPPED, with HOME redirected to a scratch
+# Controls for claude-session: the Talos permission profile, the apps-repo
+# write path, and the inbox notice. The script is run AS SHIPPED, with HOME redirected to a scratch
 # directory and fake `claude` / `tmux` binaries ahead of the real ones on
 # PATH -- the final `exec tmux` lands on the fake, which prints its argv and
 # exits. Nothing here is a copy of claude-session; a copy would keep passing
@@ -56,7 +56,7 @@ run_session() {
   mkdir -p "$home"
   : > "$home/fake.log"
   env -i PATH="$work/bin:$PATH" HOME="$home" FAKE_LOG="$home/fake.log" \
-      TTYD_USER="" CLAUDE_USER_ID="tester" DATABASE_URL="" TALOS_MCP_URL="" "$@" \
+      TTYD_USER="" CLAUDE_USER_ID="tester" DATABASE_URL="" TALOS_MCP_URL="" IM_APPS_REPO="" IM_APPS_KEY="" "$@" \
       bash ./claude-session </dev/null 2>&1
 }
 
@@ -81,6 +81,9 @@ check "fresh pod: allow holds all five tools"      [ "$(allow_of "$h")" = "$PROF
 check "fresh pod: no ask key is written"            [ "$(ask_of "$h")" = "null" ]
 check "fresh pod: the initial env key survives"    grep -q '"DISABLE_AUTOUPDATER": "1"' "$h/.claude/settings.json"
 check "fresh pod: tmux was exec'd with claude"      grep -q '^tmux -u new-session -A -s claude -- claude$' "$h/fake.log"
+# a stray line in the script runs as a command and the session still starts --
+# only its stderr says so (a cut-off comment did exactly that, 2026-10-17)
+check_not "fresh pod: no stray command ran" grep -q 'command not found' <<<"$out"
 check "fresh pod: talos registered"                 grep -q '^claude mcp add --transport sse --scope local talos http://127.0.0.1:8765/sse$' "$h/fake.log"
 before=$(settings_of "$h"); mtime1=$(mtime_of "$h")
 sleep 1
@@ -133,6 +136,121 @@ out=$(run_session "$h" TALOS_MCP_URL=http://127.0.0.1:8765/sse)
 check "broken JSON: file byte-identical"            [ "$(cat "$h/.claude/settings.json")" = '{"env": {' ]
 check "broken JSON: terminal told"                  grep -q 'permission 設定沒有寫入' <<<"$out"
 check "broken JSON: session still starts"           grep -q '^tmux ' "$h/fake.log"
+
+echo "apps repo"
+APPS='["Bash(git *)", "Bash(sops *)"]'
+REPO=ferry133/jg-x-apps
+mtime() { python3 -c 'import os,sys; print(os.stat(sys.argv[1]).st_mtime_ns)' "$1"; }
+gitcfg() { HOME="$1" git config --global --get "$2"; }
+# ssh -G prints the resolved options; identityfile lines are what a push offers
+idfiles() { ssh "$@" -G 2>/dev/null | awk '$1 == "identityfile" {print $2}'; }
+put_key() { mkdir -p "$1/.ssh"; printf 'not a real key\n' > "$1/.ssh/im-apps.key"; chmod "$2" "$1/.ssh/im-apps.key"; }
+
+# both inputs present, key 0600, no sidecar
+h="$work/apps"
+put_key "$h" 0600
+out=$(run_session "$h" IM_APPS_REPO=$REPO)
+cfg="$h/.ssh/config"
+check "apps: ssh config written"                    test -f "$cfg"
+check "apps: alias present"                         grep -q '^Host github.com-im-apps$' "$cfg"
+check "apps: StrictHostKeyChecking yes"             grep -q '^  StrictHostKeyChecking yes$' "$cfg"
+check "apps: pinned known_hosts"                    grep -q '^  UserKnownHostsFile /etc/ssh/github-known-hosts$' "$cfg"
+check "apps: user.name im"                          [ "$(gitcfg "$h" user.name)" = "im" ]
+check "apps: user.email from the repo half"         [ "$(gitcfg "$h" user.email)" = "im@jg-x-apps" ]
+check "apps: core.sshCommand names the config"      [ "$(gitcfg "$h" core.sshCommand)" = "ssh -F $cfg" ]
+check "apps: allow gains only git and sops"         [ "$(allow_of "$h")" = "$APPS" ]
+check "apps: no ask key"                            [ "$(ask_of "$h")" = "null" ]
+check_not "apps: nothing said when all is well" grep -q 'apps repo' <<<"$out"
+# what a push would offer: only the alias resolves the mounted key ...
+check "-F alias: resolves the key"                  grep -qxF "$h/.ssh/im-apps.key" <<<"$(idfiles -F "$cfg" github.com-im-apps)"
+check_not "-F github.com: does not" grep -qxF "$h/.ssh/im-apps.key" <<<"$(idfiles -F "$cfg" github.com)"
+# ... and only through -F. HOME is redirected here, so it differs from this
+# user's passwd home: a bare ssh never reads $HOME/.ssh/config. The
+# core.sshCommand git will run is exercised as written, not re-typed.
+check_not "HOME != pw_dir: bare ssh misses the alias" grep -qxF "$h/.ssh/im-apps.key" <<<"$(HOME="$h" idfiles github.com-im-apps)"
+read -r -a sshcmd <<<"$(gitcfg "$h" core.sshCommand)"
+check "HOME != pw_dir: git's sshCommand finds it"   grep -qxF "$h/.ssh/im-apps.key" <<<"$("${sshcmd[@]}" -G github.com-im-apps 2>/dev/null | awk '$1 == "identityfile" {print $2}')"
+# second run: nothing moves
+b_cfg=$(cat "$cfg"); b_git=$(cat "$h/.gitconfig"); b_set=$(settings_of "$h")
+m_cfg=$(mtime "$cfg"); m_git=$(mtime "$h/.gitconfig"); m_set=$(mtime "$h/.claude/settings.json")
+sleep 1
+run_session "$h" IM_APPS_REPO=$REPO >/dev/null
+check "apps second run: ssh config identical"       [ "$(cat "$cfg")" = "$b_cfg" ]
+check "apps second run: gitconfig identical"        [ "$(cat "$h/.gitconfig")" = "$b_git" ]
+check "apps second run: settings identical"         [ "$(settings_of "$h")" = "$b_set" ]
+check "apps second run: no file rewritten (mtime)"  [ "$(mtime "$cfg") $(mtime "$h/.gitconfig") $(mtime "$h/.claude/settings.json")" = "$m_cfg $m_git $m_set" ]
+
+# sidecar and apps repo together: both profiles, talos first
+h="$work/apps-talos"
+put_key "$h" 0400
+run_session "$h" IM_APPS_REPO=$REPO TALOS_MCP_URL=http://127.0.0.1:8765/sse >/dev/null
+check "talos+apps: both profiles"                   [ "$(allow_of "$h")" = "${PROFILE%]}, ${APPS#[}" ]
+
+# sidecar without apps repo: no git/sops
+h="$work/talos-only"
+run_session "$h" TALOS_MCP_URL=http://127.0.0.1:8765/sse >/dev/null
+check_not "talos only: no git entry" grep -q 'Bash(git' "$h/.claude/settings.json"
+
+# key absent: nothing written, the key path named
+h="$work/apps-nokey"
+out=$(run_session "$h" IM_APPS_REPO=$REPO)
+check_not "no key: no ssh config" test -e "$h/.ssh/config"
+check_not "no key: no gitconfig" test -e "$h/.gitconfig"
+check_not "no key: no permissions key" has_perms "$h"
+check "no key: the line names the key path"         grep -q '寫入金鑰不在 ~/.ssh/im-apps.key' <<<"$out"
+
+# key mode too open (owned by this user): nothing written, the mode named
+h="$work/apps-0644"
+put_key "$h" 0644
+out=$(run_session "$h" IM_APPS_REPO=$REPO)
+check_not "0644: no ssh config" test -e "$h/.ssh/config"
+check_not "0644: no gitconfig" test -e "$h/.gitconfig"
+check_not "0644: no permissions key" has_perms "$h"
+check "0644: the line names the mode"               grep -q 'mode 0644' <<<"$out"
+
+# key present but IM_APPS_REPO empty -- run_session passes IM_APPS_REPO="", the
+# form jg-base's ${IM_APPS_REPO:=} substitution delivers: silent, nothing written
+h="$work/apps-norepo"
+put_key "$h" 0600
+out=$(run_session "$h")
+check_not "no IM_APPS_REPO: no ssh config" test -e "$h/.ssh/config"
+check_not "no IM_APPS_REPO: no gitconfig" test -e "$h/.gitconfig"
+check_not "no IM_APPS_REPO: silent" grep -q 'apps repo' <<<"$out"
+
+# IM_APPS_KEY: the key mounted as a Secret directory outside ~/.ssh (jg-base#183)
+h="$work/apps-keydir"
+mkdir -p "$h/etc-im-apps"; printf 'not a real key\n' > "$h/etc-im-apps/key"; chmod 0400 "$h/etc-im-apps/key"
+run_session "$h" IM_APPS_REPO=$REPO IM_APPS_KEY="$h/etc-im-apps/key" >/dev/null
+check "IM_APPS_KEY: config names that key"          grep -qxF "  IdentityFile $h/etc-im-apps/key" "$h/.ssh/config"
+check "IM_APPS_KEY: -F alias resolves it"           grep -qxF "$h/etc-im-apps/key" <<<"$(idfiles -F "$h/.ssh/config" github.com-im-apps)"
+check_not "IM_APPS_KEY: the default path is not used" grep -qF '/.ssh/im-apps.key' "$h/.ssh/config"
+# IM_APPS_KEY empty (substituted, not unset): the default path
+h="$work/apps-keyempty"
+put_key "$h" 0600
+run_session "$h" IM_APPS_REPO=$REPO IM_APPS_KEY="" >/dev/null
+check "IM_APPS_KEY empty: default path used"        grep -qxF "  IdentityFile $h/.ssh/im-apps.key" "$h/.ssh/config"
+# IM_APPS_KEY names a missing file: nothing written, that path named
+h="$work/apps-keymissing"
+put_key "$h" 0600
+out=$(run_session "$h" IM_APPS_REPO=$REPO IM_APPS_KEY="$h/etc-im-apps/key")
+check_not "IM_APPS_KEY missing: no ssh config" test -e "$h/.ssh/config"
+check "IM_APPS_KEY missing: that path named"        grep -q "寫入金鑰不在 ~/etc-im-apps/key" <<<"$out"
+
+# not owner/repo: refused and said
+h="$work/apps-badrepo"
+put_key "$h" 0600
+out=$(run_session "$h" IM_APPS_REPO='jg-x-apps')
+check_not "bad IM_APPS_REPO: no ssh config" test -e "$h/.ssh/config"
+check "bad IM_APPS_REPO: said"                      grep -q '不是 owner/repo' <<<"$out"
+
+# an ssh config this script did not write is left alone
+h="$work/apps-foreign"
+put_key "$h" 0600
+printf 'Host mine\n  HostName example.invalid\n' > "$h/.ssh/config"
+out=$(run_session "$h" IM_APPS_REPO=$REPO)
+check "foreign ssh config: untouched"               [ "$(cat "$h/.ssh/config")" = "$(printf 'Host mine\n  HostName example.invalid')" ]
+check "foreign ssh config: said"                    grep -q '不是 claude-session 寫的' <<<"$out"
+check_not "foreign ssh config: no gitconfig" test -e "$h/.gitconfig"
 
 echo "inbox notice"
 h="$work/inbox-unread"

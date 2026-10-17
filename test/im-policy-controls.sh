@@ -38,6 +38,33 @@ check "reports afterwards via the health mail"        grep -q 'health mail' "$po
 check "only company staff sit at the ttyd"            grep -q '只會是公司員工' "$policy"
 check_not "control: a sentence that is not there"     grep -q 'reboot is forbidden' "$policy"
 
+echo "apps repo section"
+# section <file>: the "## 你的 apps repo" section alone, so a phrase elsewhere
+# in the file cannot satisfy a check meant for this section
+section() { awk '/^## /{on = ($0 == "## 你的 apps repo")} on' "$1"; }
+apps=$(mktemp); noapps=$(mktemp)
+trap 'rm -f "$apps" "$noapps"' EXIT
+section "$policy" > "$apps"
+apps_checks() { # apps_checks <file> -> 0 when every statement is there
+  grep -q '只在 `IM_APPS_REPO` 有值' "$1" &&
+  grep -q '這一節不適用' "$1" &&
+  grep -q '只放 manifest、kustomization 與 README' "$1" &&
+  grep -q '以 tenant 公鑰加密' "$1" &&
+  grep -q 'sops --encrypt --in-place' "$1" &&
+  grep -q '不含 log、IP 位址' "$1" &&
+  grep -q 'reconcile.fluxcd.io/requestedAt=.*--overwrite' "$1" &&
+  grep -q '要留下來的東西走 repo，不走 `kubectl apply`' "$1" &&
+  grep -q 'git@github.com-im-apps:\$IM_APPS_REPO.git' "$1"
+}
+check "section carries every statement"               apps_checks "$apps"
+# control: the policy as it stood before this section (the section stripped)
+awk '/^## /{on = ($0 != "## 你的 apps repo")} NR==1 || on' "$policy" > "$noapps"
+check_not "control: policy without the section fails" apps_checks "$noapps"
+check "control: the stripped copy kept the rest"      grep -q '## inbox 慣例' "$noapps"
+check_not "no wording that permits a plaintext Secret" grep -qiE '明文.{0,8}(可以|即可|沒關係)|plaintext secrets? (is|are) (fine|ok)' "$policy"
+check_not "no wording that asks for logs in commits"   grep -qiE '(貼|附|放).{0,6}log.{0,8}(commit|repo)|commit.{0,10}(附上|貼上).{0,4}log' "$policy"
+check_not "control: a statement that is not there"     grep -q '把 age 私鑰放進 repo' "$apps"
+
 echo "old premise absent"
 check_not "no customer-approval premise"              grep -qiE 'approval from the customer|person at the terminal|客戶.{0,6}(按|批准)' "$policy"
 check_not "no permissions.ask wording"                grep -q 'permissions.ask' "$policy"

@@ -13,6 +13,8 @@
 # omnictl is installed in `base` (k8scc#18) and asserted again in `factory`;
 # declared here, before the first FROM, so both stages read ONE copy of the pin.
 ARG OMNICTL_VERSION=v1.8.1
+# sops likewise (im-apps-repo): installed in `base`, asserted again in `factory`.
+ARG SOPS_VERSION=v3.12.1
 
 FROM debian:12-slim AS base
 
@@ -155,6 +157,61 @@ RUN set -eu; \
       echo "omnictl: --version printed '$out', expected ${OMNICTL_VERSION}" >&2; exit 1; \
     fi; \
     echo "omnictl: $out"
+
+# sops -- im encrypts every Secret it commits to its apps repo with the
+# tenant's PUBLIC age key, which the repo's .sops.yaml names
+# (openspec/changes/im-apps-repo here; root: fleet-ops standalone-app-repos).
+# Encrypting needs sops alone -- age support is linked into it -- so the age
+# CLIs are deliberately not installed: im never holds a private key, and
+# nothing in this image should look like it could use one. Same pin shape as
+# omnictl above: the version ARG is declared before the first FROM so
+# `factory` reads the same copy, and the bytes are checked against sha256
+# values pinned HERE, per architecture (read 2026-10-17 from the release's own
+# checksums file and from a separate download of each binary; they agreed).
+ARG SOPS_VERSION
+ARG SOPS_SHA256_AMD64=cf3136d20a6004405c986a48e179c3c7a731f777fbf105a37bd5dac5c9047100
+ARG SOPS_SHA256_ARM64=c7904d07bf1fb3ffdc329b0103ce70ff6a884aa7af7931427402bea0c09cc522
+RUN set -eu; \
+    ARCH=$(dpkg --print-architecture); \
+    case "$ARCH" in \
+      amd64) want="$SOPS_SHA256_AMD64" ;; \
+      arm64) want="$SOPS_SHA256_ARM64" ;; \
+      *) echo "sops: no pinned sha256 for $ARCH" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL -o /usr/local/bin/sops \
+      "https://github.com/getsops/sops/releases/download/${SOPS_VERSION}/sops-${SOPS_VERSION}.linux.${ARCH}"; \
+    echo "${want}  /usr/local/bin/sops" | sha256sum -c -; \
+    chmod +x /usr/local/bin/sops; \
+    out=$(sops --version --disable-version-check 2>&1 || sops --version 2>&1); \
+    if ! printf '%s\n' "$out" | tr . _ | grep -qwF "$(printf '%s' "${SOPS_VERSION#v}" | tr . _)"; then \
+      echo "sops: --version printed '$out', expected ${SOPS_VERSION}" >&2; exit 1; \
+    fi; \
+    echo "sops: $out"
+
+# GitHub's SSH host keys, for im's apps-repo pushes (claude-session points the
+# host alias at this file with StrictHostKeyChecking yes, so a key that is not
+# here is refused, never learned). The file is committed in this repo, built
+# from https://api.github.com/meta `ssh_keys`; the fingerprints below are a
+# second, independent pin -- they agreed on 2026-10-17 with /meta's own
+# `ssh_key_fingerprints` and with a live `ssh-keyscan github.com`. When GitHub
+# rotates a key, pushes fail loudly and both are updated together.
+#
+# known_hosts_match is driven by test/assert-controls.sh (extracted, not
+# copied), including a file with one character altered, which must fail.
+ARG GITHUB_HOSTKEY_FINGERPRINTS="SHA256:+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr4UvCOqU SHA256:p2QAMXNIC1TJYWeIOttrVc98/R1BUFWu3/LiyKgUfQM SHA256:uNiVztksCsDhcc0u9e8BujQXVUpKZIDTMczCvj3tD2s"
+COPY github-known-hosts /etc/ssh/github-known-hosts
+RUN set -eu; \
+    known_hosts_match() { \
+      got=$(ssh-keygen -lf "$1" 2>/dev/null | awk '{print $2 "@" $3}' | sort | tr '\n' ' '); \
+      want=$(for f in $2; do echo "$f@github.com"; done | sort | tr '\n' ' '); \
+      if [ -z "$got" ] || [ "$got" != "$want" ]; then \
+        echo "github-known-hosts: read '$got', pinned '$want'" >&2; \
+        return 1; \
+      fi; \
+    }; \
+    known_hosts_match /etc/ssh/github-known-hosts "$GITHUB_HOSTKEY_FINGERPRINTS"; \
+    chmod 0644 /etc/ssh/github-known-hosts; \
+    ssh-keygen -lf /etc/ssh/github-known-hosts
 
 # Install MCP server deps. mcp pinned <2.0: the 2.0 release (2026-07)
 # dropped mcp.server.fastmcp.FastMCP (both memory_mcp_server.py and
@@ -315,7 +372,7 @@ ARG OMNICTL_VERSION
 ARG GH_VERSION=2.87.3
 ARG CLOUDFLARED_VERSION=2026.2.0
 ARG AGE_VERSION=v1.3.1
-ARG SOPS_VERSION=v3.12.1
+ARG SOPS_VERSION
 ARG CUE_VERSION=v0.15.4
 ARG TASK_VERSION=v3.48.0
 ARG HELM_VERSION=v4.1.1
@@ -341,8 +398,6 @@ ARG FACTORY_TALOSCTL_VERSION=v1.13.8
 RUN ARCH=$(dpkg --print-architecture) && \
     curl -fsSL -o /usr/local/bin/cloudflared \
       "https://github.com/cloudflare/cloudflared/releases/download/${CLOUDFLARED_VERSION}/cloudflared-linux-${ARCH}" && \
-    curl -fsSL -o /usr/local/bin/sops \
-      "https://github.com/getsops/sops/releases/download/${SOPS_VERSION}/sops-${SOPS_VERSION}.linux.${ARCH}" && \
     curl -fsSL -o /usr/local/bin/yq \
       "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_${ARCH}" && \
     curl -fsSL -o /usr/local/bin/jq \
@@ -351,7 +406,7 @@ RUN ARCH=$(dpkg --print-architecture) && \
       "https://dl.k8s.io/release/${FACTORY_KUBECTL_VERSION}/bin/linux/${ARCH}/kubectl" && \
     curl -fsSL -o /usr/local/bin/talosctl \
       "https://github.com/siderolabs/talos/releases/download/${FACTORY_TALOSCTL_VERSION}/talosctl-linux-${ARCH}" && \
-    chmod +x /usr/local/bin/cloudflared /usr/local/bin/sops \
+    chmod +x /usr/local/bin/cloudflared \
              /usr/local/bin/yq /usr/local/bin/jq /usr/local/bin/kubectl /usr/local/bin/talosctl
 
 # Tarballs. Layouts differ per project, so each gets its own strip depth.

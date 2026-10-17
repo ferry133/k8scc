@@ -119,6 +119,54 @@ else
   pass=$((pass + 1))
 fi
 
+# known_hosts_match (base stage, im-apps-repo): the committed
+# github-known-hosts must carry exactly the fingerprints pinned in the
+# Dockerfile. Function AND pin are extracted, not copied; the committed file is
+# the positive control, and each negative one is that file with one thing wrong.
+echo "known_hosts controls -- the committed file passes, any altered copy fails"
+kh_fn=$(mktemp); kh_dir=$(mktemp -d)
+trap 'rm -rf "$fn" "$records" "$kh_fn" "$kh_dir"' EXIT
+python3 - "$kh_fn" <<'PY'
+import pathlib, re, sys
+joined = re.sub(r"\\\n", "\n", pathlib.Path("Dockerfile").read_text())
+fn = re.search(r"(    known_hosts_match\(\) \{.*?\n    \}; )", joined, re.S)
+pin = re.search(r'^ARG GITHUB_HOSTKEY_FINGERPRINTS="([^"]+)"$', joined, re.M)
+if not fn or not pin:
+    sys.exit("could not find known_hosts_match() or its pin in the Dockerfile")
+pathlib.Path(sys.argv[1]).write_text(
+    fn.group(1).rstrip().removesuffix(";") + "\n" + f"KH_PIN='{pin.group(1)}'\n")
+PY
+# shellcheck disable=SC1090
+. "$kh_fn"
+
+kh_ok() {
+  if known_hosts_match "$2" "$KH_PIN" >/dev/null 2>&1; then pass=$((pass + 1));
+  else fail=$((fail + 1)); echo "  NOT ACCEPTED (should pass): $1"; fi
+}
+kh_no() {
+  if known_hosts_match "$2" "$KH_PIN" >/dev/null 2>&1; then
+    fail=$((fail + 1)); echo "  NOT REJECTED (should fail): $1"
+  else pass=$((pass + 1)); fi
+}
+
+kh_ok "committed github-known-hosts" github-known-hosts
+# One base64 character of the ed25519 key changed: still parses, other fingerprint.
+sed '1s/AAAAIOMqqnkVzrm0S/AAAAIOMqqnkVzrm0T/' github-known-hosts > "$kh_dir/altered"
+kh_no "one character altered" "$kh_dir/altered"
+head -n 2 github-known-hosts > "$kh_dir/short"
+kh_no "one key missing" "$kh_dir/short"
+sed 's/^github\.com /gitlab.com /' github-known-hosts > "$kh_dir/otherhost"
+kh_no "right keys, wrong host" "$kh_dir/otherhost"
+: > "$kh_dir/empty"
+kh_no "empty file" "$kh_dir/empty"
+kh_no "missing file" "$kh_dir/nonexistent"
+# The altered copy must really differ, or the control above proves nothing.
+if cmp -s github-known-hosts "$kh_dir/altered"; then
+  fail=$((fail + 1)); echo "  CONTROL BROKEN: altered copy is identical to the original"
+else
+  pass=$((pass + 1))
+fi
+
 echo
 echo "pass=$pass fail=$fail"
 [ "$fail" -eq 0 ]

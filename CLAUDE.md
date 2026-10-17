@@ -112,6 +112,16 @@ Why it exists: 2026-10-11 on jg-jiahd, `im` diagnosed the fault correctly and co
 
 Company colleagues who are not at the ttyd drop hand-over notes for im there (`kubectl cp` or `kubectl exec` into the `app` container), and im leaves its own reports there for them. The directory is on the workspace PVC (`im-claude-workspace` in jg-base), so it survives pod restarts. On every ttyd session start `claude-session` counts the files not ending in `.read` and prints `📥 inbox: N file(s) — read ~/workspace/inbox/ before anything else` — one line, contents never opened, nothing at all when the directory is empty, absent, or fully read. The agent renames a file to `<name>.read` once it has acted on it. The line is followed by an 8-second, Enter-skippable pause, because tmux clears the screen the moment it attaches and a line shown for one frame reads the same as no line.
 
+### Apps repo (`IM_APPS_REPO`, openspec `im-apps-repo`)
+
+im gets one private repo per cluster (`<cluster>-apps`), reconciled by the cluster's Flux under a restricted ServiceAccount; the root change is `fleet-ops/openspec/changes/standalone-app-repos`. This repo's share is the write path:
+
+- **Image (`base`)**: `sops`, pinned like `omnictl` (version ARG before the first `FROM`, per-arch sha256 in the Dockerfile), and `/etc/ssh/github-known-hosts` — committed as `github-known-hosts`, built from `api.github.com/meta`, with the three fingerprints pinned separately in the Dockerfile and compared at build (`known_hosts_match`, driven by `test/assert-controls.sh`, extracted not copied). No `age` CLI: im encrypts to the tenant's public key and never holds a private one.
+- **`claude-session` (`configure_apps_repo`)**: only when `IM_APPS_REPO` (`owner/repo`) is non-empty **and** the key at `IM_APPS_KEY` (default `~/.ssh/im-apps.key`) exists and passes ssh's own permission rule (group/other bits refused only when the caller owns the key — today im is root and Secret volumes are root-owned, so 0400/0600 both pass). Then it writes `~/.ssh/config` (alias `github.com-im-apps`, `IdentitiesOnly yes`, the pinned known_hosts, `StrictHostKeyChecking yes`; first line marks it as this script's, and a file without the mark is never overwritten), sets `user.name im`, `user.email im@<repo half>` and **`core.sshCommand = ssh -F ~/.ssh/config`** in `~/.gitconfig`, and merges `Bash(git *)`/`Bash(sops *)` into `permissions.allow`. Any precondition missing ⇒ nothing written and one `⚠ apps repo 沒有設定：…` line; `IM_APPS_REPO` unset ⇒ silent.
+- ⚠️ **The `-F` is load-bearing.** OpenSSH reads the user config from the passwd entry's home, not `$HOME`; the pod runs as uid 0 with `HOME=/home/claude`, so without `-F` the alias is never read while git happily reads `~/.gitconfig` — an identity with no key. The controls exercise exactly that: with `HOME` redirected, a bare `ssh -G <alias>` must miss the key and git's own `core.sshCommand` must find it.
+- **Policy**: `im-policy.md` "你的 apps repo" — manifests only, every Secret sops-encrypted before commit, no logs/IPs in commits, persistent changes through the repo rather than `kubectl apply`, reconcile with `kubectl annotate … --overwrite`.
+- **Not here**: mounting the key and setting `IM_APPS_REPO`/`IM_APPS_KEY` are jg-base's HelmRelease (jg-base#183). It mounts the whole Secret as a directory rather than by `subPath`, since a subPath mount never receives a rotated key and `~/.ssh` has to stay writable; that is why the key path is an env var.
+
 ### Tool surface and controls
 
 - **Tools**: `get_node_status`, `get_etcd_members`, `get_link_status`, `get_service_logs` (read-only; each shells out to the bundled `talosctl`), plus `reboot_node` while the operator credential is usable. No other mutating verb is reachable through any tool argument.
@@ -130,7 +140,7 @@ Same GHCR repository (`ghcr.io/ferry133/claude-code`), not a sibling package: a 
 
 ### Toolchain
 
-Beyond `base`, the factory target adds `gh` `cloudflared` `age`/`age-keygen` `sops` `cue` `makejinja` `task` `helm` `helmfile` `talhelper` `flux` `kustomize` `kubeconform` `yq` `jq` `uv`, and re-pins `kubectl`/`talosctl` to the driven repo's versions rather than the hosting cluster's. `omnictl` lives in `base` since k8scc#18 (pinned to the fleet's self-hosted Omni server, v1.8.1, with per-arch sha256 ARGs) and is asserted again in the factory's final layer; its version ARG is declared once before the first `FROM`, so the two stages cannot disagree.
+Beyond `base`, the factory target adds `gh` `cloudflared` `age`/`age-keygen` `cue` `makejinja` `task` `helm` `helmfile` `talhelper` `flux` `kustomize` `kubeconform` `yq` `jq` `uv`, and re-pins `kubectl`/`talosctl` to the driven repo's versions rather than the hosting cluster's. `omnictl` lives in `base` since k8scc#18 (pinned to the fleet's self-hosted Omni server, v1.8.1, with per-arch sha256 ARGs) and is asserted again in the factory's final layer; its version ARG is declared once before the first `FROM`, so the two stages cannot disagree. `sops` follows the same pattern since `im-apps-repo` (base installs it with per-arch sha256, factory only asserts it).
 
 Two rules govern the pins:
 
@@ -397,6 +407,8 @@ build: `build=false`, `build-ops=true`.
 | `TTYD_AUTH_HEADER` | Optional trusted header ttyd requires (e.g. `X-Forwarded-Email` from oauth2-proxy); its value surfaces to `claude-session` as `TTYD_USER` |
 | `CLAUDE_USER_ID` | Resolved in `claude-session` from `TTYD_USER` if present, else this var, else `claude_code`; used as `agent_id` in the memory DB |
 | `TALOS_MCP_URL` | Optional; set only when the `talos-mcp` sidecar exists. Registers it as a remote MCP server (see above) |
+| `IM_APPS_REPO` | Optional, `owner/repo`; empty is the same as unset. With the write key present at `IM_APPS_KEY`, `claude-session` configures the apps-repo ssh alias, git identity and `git`/`sops` permissions (see "Apps repo" above); without the key, one warning line and nothing written |
+| `IM_APPS_KEY` | Optional path of the apps-repo write key; unset or empty means `~/.ssh/im-apps.key` |
 | `TALOSCONFIG` (talos-mcp only) | Path to the mounted talosconfig (`/etc/talos-mcp/talosconfig`). Routing metadata only — see `OMNI_SERVICE_ACCOUNT_KEY` |
 | `OMNI_SERVICE_ACCOUNT_KEY` (talos-mcp only) | The Reader-role Omni SA's actual bearer credential; read straight from env by talosctl's auth library |
 | `OMNI_ENDPOINT` (talos-mcp only) | Direct gRPC endpoint for the client's Omni. Must bypass any Cloudflare Tunnel (gRPC trailers) |
