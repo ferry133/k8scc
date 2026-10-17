@@ -10,7 +10,7 @@
 
 ## 2. claude-session
 
-- [ ] 2.1 `configure_apps_repo`：`IM_APPS_REPO` ＋ 金鑰檔存在 ＋ mode 無 group／other 位元 → 寫 `/home/claude/.ssh/config`（alias、`IdentitiesOnly yes`、`UserKnownHostsFile` 指釘住的檔、`StrictHostKeyChecking yes`）與 `~/.gitconfig`（`user.name im`、`user.email im@${IM_APPS_REPO#*/}`、**`core.sshCommand = ssh -F /home/claude/.ssh/config`**）；任一前提不成立 → 不寫、印一行點名哪個前提。冪等。
+- [ ] 2.1 `configure_apps_repo`：`IM_APPS_REPO` ＋ 金鑰檔存在 ＋ mode 過 ssh 自己的規則（檔為呼叫者所有時不得有 group／other 位元；不是呼叫者所有則不查）→ 寫 `/home/claude/.ssh/config`（alias、`IdentitiesOnly yes`、`UserKnownHostsFile` 指釘住的檔、`StrictHostKeyChecking yes`）與 `~/.gitconfig`（`user.name im`、`user.email im@${IM_APPS_REPO#*/}`、**`core.sshCommand = ssh -F /home/claude/.ssh/config`**）；任一前提不成立 → 不寫、印一行點名哪個前提。冪等。
 - [ ] 2.2 `permissions.allow` 合入 `Bash(git *)`、`Bash(sops *)`（同 `merge_talos_permissions` 的合併語意）；寫入路缺時不加；與 talos 那組彼此獨立（有一無一的四種組合都對）。
 - [ ] 2.3 `test/claude-session-controls.sh`：有→寫、無金鑰→不寫、mode `0644`→不寫、第二次零 diff；**`ssh -F <file> -G github.com` 不解出 identityfile、`ssh -F <file> -G <alias>` 解出**（負對照；不用裸 `ssh -G`，它讀的是 runner 自己的 `~/.ssh`）；一格 HOME ≠ pw_dir：HOME 重導後裸 `ssh -G <alias>` 不解出、`-F` 解出——這就是 `core.sshCommand` 存在的理由；四種 env 組合下 `permissions.allow` 的內容。
 
@@ -22,6 +22,6 @@
 ## 4. spec 與收尾
 
 - [ ] 4.1 `im-permission-profile` 的 MODIFIED 在歸檔時合進 `openspec/specs/`；`im-apps-repo` 成為新 spec。
-- [ ] 4.2 jg-base 側要配合的兩件事開成 jg-base issue（不在本 repo 做）：im HelmRelease 掛 Secret 到 `/home/claude/.ssh/im-apps.key`、`defaultMode: 0600`（不是 0400——im 若日後不以 root 跑，root 擁有的 0400 會讀不到）；設 `IM_APPS_REPO` env。
+- [ ] 4.2 jg-base 側要配合的兩件事開成 jg-base issue（不在本 repo 做）：im HelmRelease 掛 Secret 到 `/home/claude/.ssh/im-apps.key`，`defaultMode` `0400` 或 `0600` 皆可（今天 im 以 root 跑；Secret volume 永遠 root 擁有，所以 mode 救不了非 root——若日後改非 root，走 `fsGroup` 得 `root:<fsGroup> 0440`，ssh 接受）；設 `IM_APPS_REPO` env。
 - [ ] 4.3 PR 內文署名；開單者驗收在 merge 之前；merge 後 PR 留一行署名。
 - [ ] 4.4 歸檔本 sub-change，回更新 root 的 Sub-changes 表與 tasks §4。

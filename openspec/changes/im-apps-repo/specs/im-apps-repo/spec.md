@@ -26,7 +26,7 @@ The image SHALL carry a `known_hosts` file for `github.com` whose keys are taken
 
 ### Requirement: The session configures the apps repo only when both inputs exist, and git is told which ssh config to use
 
-`claude-session` SHALL, when `IM_APPS_REPO` (an `owner/repo`) is set **and** the write key file is mounted at its documented path with no group or other permission bits (`0600` or stricter), write `/home/claude/.ssh/config` with a dedicated host alias for github.com using that key (`IdentitiesOnly yes`, the pinned known_hosts, `StrictHostKeyChecking yes`) and `~/.gitconfig` with `user.name im`, `user.email im@<repo>` (the repository part of `IM_APPS_REPO`) and `core.sshCommand = ssh -F /home/claude/.ssh/config`, idempotently. The explicit `-F` is required because OpenSSH resolves its user configuration from the account's passwd home directory, not from `$HOME`, and the pod runs as uid 0 with `HOME` pinned to `/home/claude`; without it `~/.ssh/config` is never read while `~/.gitconfig` is. When either input is absent, or the key's mode has group/other bits, it SHALL write neither file and print one line naming the failed precondition.
+`claude-session` SHALL, when `IM_APPS_REPO` (an `owner/repo`) is set **and** the write key file is mounted at its documented path with permissions ssh itself would accept (for a file owned by the calling user: no group or other bits, so `0600` or stricter; a file owned by another user is not checked for those bits), write `/home/claude/.ssh/config` with a dedicated host alias for github.com using that key (`IdentitiesOnly yes`, the pinned known_hosts, `StrictHostKeyChecking yes`) and `~/.gitconfig` with `user.name im`, `user.email im@<repo>` (the repository part of `IM_APPS_REPO`) and `core.sshCommand = ssh -F /home/claude/.ssh/config`, idempotently. The explicit `-F` is required because OpenSSH resolves its user configuration from the account's passwd home directory, not from `$HOME`, and the pod runs as uid 0 with `HOME` pinned to `/home/claude`; without it `~/.ssh/config` is never read while `~/.gitconfig` is. When either input is absent, or the key's mode would be rejected by ssh, it SHALL write neither file and print one line naming the failed precondition.
 
 #### Scenario: Both inputs present
 - **WHEN** `claude-session` runs with `IM_APPS_REPO=ferry133/jg-x-apps` and a `0600` key file present
@@ -37,7 +37,7 @@ The image SHALL carry a `known_hosts` file for `github.com` whose keys are taken
 - **THEN** neither file is created and a one-line notice names the key path
 
 #### Scenario: Key mode too open
-- **WHEN** the key file is present with mode `0644`
+- **WHEN** the key file is present, owned by the calling user, with mode `0644`
 - **THEN** neither file is created and the notice names the mode
 
 #### Scenario: Config is reached through -F, not through HOME
