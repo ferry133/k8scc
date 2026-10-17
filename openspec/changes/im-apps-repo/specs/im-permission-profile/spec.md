@@ -16,9 +16,13 @@
 - **WHEN** `settings.json` carries `mcp__talos__reboot_node` under `permissions.ask` next to other `ask` entries (a pod that ran the previous image)
 - **THEN** afterwards `mcp__talos__reboot_node` is under `allow` and not under `ask`, the other `ask` entries are untouched, and a second run changes nothing
 
-#### Scenario: Sidecar absent, nothing written
-- **WHEN** `TALOS_MCP_URL` is not set
+#### Scenario: Sidecar absent and no apps repo, nothing written
+- **WHEN** `TALOS_MCP_URL` is not set and the apps-repo write path is not configured
 - **THEN** `settings.json`'s `permissions` object is not touched
+
+#### Scenario: Sidecar absent, apps repo present
+- **WHEN** `TALOS_MCP_URL` is not set but `IM_APPS_REPO` is set and the write key is mounted
+- **THEN** `permissions.allow` gains only `Bash(git *)` and `Bash(sops *)`; no `mcp__talos__*` entry is added and `permissions.ask` is not touched
 
 #### Scenario: Apps repo configured adds the git and sops rules
 - **WHEN** `claude-session` runs with `IM_APPS_REPO` set and the write key mounted

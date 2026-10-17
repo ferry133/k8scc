@@ -4,14 +4,15 @@
 
 ## 1. 映像
 
-- [ ] 1.1 `Dockerfile`（base）：安裝釘版的 `sops`；`:475-493` 的版本斷言加一行；不加 `age`。
-- [ ] 1.2 bump 前後映像大小寫進 PR；`sops --version` 在容器內成功。
+- [ ] 1.1 `Dockerfile`：照 `omnictl`／#18 樣式——`ARG SOPS_VERSION` 提到第一個 `FROM` 之前（`:15` 旁）；base 層按 `ARCH` 下載、比對釘在 Dockerfile 的 per-arch sha256（無釘值的架構 `exit 1`）；factory 層移除 `:318` 的 `ARG SOPS_VERSION` 與其安裝步驤；base 的斷言區加 `sops --version`。
+- [ ] 1.2 `github-known-hosts`：從 `https://api.github.com/meta` 的 `ssh_keys` 產生、進 repo；Dockerfile 釘各 key 指紋，建置時 `ssh-keygen -lf` 比對；`test/assert-controls.sh` 加同一斷言與一個改一字元的負對照。
+- [ ] 1.3 bump 前後映像大小寫進 PR；容器內 `sops --version`、`ssh-keygen -lf /etc/ssh/github-known-hosts` 成功；factory 層 `sops` 只出現一次。
 
 ## 2. claude-session
 
-- [ ] 2.1 `configure_apps_repo`：`IM_APPS_REPO` ＋ 金鑰檔同時存在 → 寫 `~/.ssh/config`（host alias、`IdentitiesOnly yes`、釘住的 known_hosts）與 `~/.gitconfig`；任一缺 → 不寫、印一行。冪等。
-- [ ] 2.2 `permissions.allow` 合入 `Bash(git *)`、`Bash(sops *)`（同 `merge_talos_permissions` 的合併語意）；寫入路缺時不加。
-- [ ] 2.3 `test/claude-session-controls.sh`：有→寫、無→不寫、第二次零 diff、user-repo remote 無身分（負對照）。
+- [ ] 2.1 `configure_apps_repo`：`IM_APPS_REPO` ＋ 金鑰檔存在 ＋ mode `0400` 或更嚴 → 寫 `~/.ssh/config`（alias、`IdentitiesOnly yes`、`UserKnownHostsFile` 指釘住的檔、`StrictHostKeyChecking yes`）與 `~/.gitconfig`（`user.name im`、`user.email im@${IM_APPS_REPO#*/}`）；任一前提不成立 → 不寫、印一行點名哪個前提。冪等。
+- [ ] 2.2 `permissions.allow` 合入 `Bash(git *)`、`Bash(sops *)`（同 `merge_talos_permissions` 的合併語意）；寫入路缺時不加；與 talos 那組彼此獨立（有一無一的四種組合都對）。
+- [ ] 2.3 `test/claude-session-controls.sh`：有→寫、無金鑰→不寫、mode `0644`→不寫、第二次零 diff；`ssh -G github.com` 不解出 identityfile、`ssh -G <alias>` 解出（負對照）；四種 env 組合下 `permissions.allow` 的內容。
 
 ## 3. policy
 
@@ -21,5 +22,6 @@
 ## 4. spec 與收尾
 
 - [ ] 4.1 `im-permission-profile` 的 MODIFIED 在歸檔時合進 `openspec/specs/`；`im-apps-repo` 成為新 spec。
-- [ ] 4.2 PR 內文署名；開單者驗收在 merge 之前；merge 後 PR 留一行署名。
-- [ ] 4.3 歸檔本 sub-change，回更新 root 的 Sub-changes 表與 tasks §4。
+- [ ] 4.2 jg-base 側要配合的兩件事開成 jg-base issue（不在本 repo 做）：im HelmRelease 掛 Secret 到 `~/.ssh/im-apps.key`、`defaultMode: 0400`；設 `IM_APPS_REPO` env。
+- [ ] 4.3 PR 內文署名；開單者驗收在 merge 之前；merge 後 PR 留一行署名。
+- [ ] 4.4 歸檔本 sub-change，回更新 root 的 Sub-changes 表與 tasks §4。

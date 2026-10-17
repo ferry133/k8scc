@@ -9,6 +9,11 @@ Root 的設計決策在 `fleet-ops/openspec/changes/standalone-app-repos/design.
 - **D-c 權限跟著 tool surface**：`Bash(git *)`、`Bash(sops *)` 進 `permissions.allow`，理由同 `im-permission-profile` 既有的一條——im 不依賴人按（ferry133 2026-10-15）。範圍只到這兩支；不開 `Bash(*)`。
 - **D-d policy 寫「什麼進 repo」而不是「怎麼用 git」**：im 會 git；它不知道的是這個 repo 是 private 但仍是耐久紀錄、會隨交接凍結、而公司會讀它。禁語（log、IP、hostname 以外的環境細節）用 `check_not` 釘住舊版 policy 沒有這一節的狀態。
 
+- **D-e 身分從 `IM_APPS_REPO` 推，不另加 env**：容器裡沒有任何東西帶叢集名（k8scc-0c review）；`user.email im@<repo>`，`<repo>` 是 `IM_APPS_REPO` 的 repo 半——它本來就是 `<cluster>-apps`，夠辨識、零新契約。
+- **D-f host key 釘在映像、拒絕不寫入**：`StrictHostKeyChecking yes` ＋ 映像內的 `github-known-hosts`（來源 GitHub `/meta`，建置時比指紋）。GitHub 換 key 時 push 失敗、bump 流程更新；永遠不會靜默接受一把新 key。
+- **D-g 金鑰 mode 是前提不是修補**：ssh 對 group／world 可讀的私鑰直接拒用；`claude-session` 在配置前檢查 mode（`0400` 或更嚴），不 `chmod`——那是 jg-base HelmRelease `defaultMode` 的事，這裡只量、不修。
+- **D-h allow 條目比金鑰活得久，接受**：`settings.json` 在 PVC 上，金鑰拿掉後 `Bash(git *)`／`Bash(sops *)` 仍在；沒有金鑰時它們開不了任何門，而寫移除邏輯會讓 `merge_talos_permissions` 那套「只加不減」的語意多一個例外。
+
 ## Risks
 
 - [`sops` 進 base 映像加大體積] → 單一靜態二進位，量 bump 前後的映像大小寫進 PR。
