@@ -6,7 +6,7 @@
 
 - [x] 1.1 `Dockerfile`：照 `omnictl`／#18 樣式——`ARG SOPS_VERSION` 提到第一個 `FROM` 之前（`:15` 旁）；base 層按 `ARCH` 下載、比對釘在 Dockerfile 的 per-arch sha256（無釘值的架構 `exit 1`）；factory 層移除 `:318` 的 `ARG SOPS_VERSION` 與其安裝步驟；base 的斷言區加 `sops --version`。
 - [x] 1.2 `github-known-hosts`：從 `https://api.github.com/meta` 的 `ssh_keys` 產生、進 repo；Dockerfile 釘各 key 指紋，建置時 `ssh-keygen -lf` 比對；`test/assert-controls.sh` 加同一斷言與一個改一字元的負對照。
-- [ ] 1.3 bump 前後映像大小寫進 PR；容器內 `sops --version`、`ssh-keygen -lf /etc/ssh/github-known-hosts` 成功；factory 層 `sops` 只出現一次。
+- [x] 1.3（k8scc#34 留言，首次 build run 39049672772 `d9cea42`：base +15.9 MB amd64／+14.3 MB arm64 壓縮後；factory 817.3／770.8 MB 不變；兩架構 build 層印 `sops 3.12.1`、`/usr/local/bin/sops: OK` 與三把指紋）bump 前後映像大小寫進 PR；容器內 `sops --version`、`ssh-keygen -lf /etc/ssh/github-known-hosts` 成功；factory 層 `sops` 只出現一次。
 
 ## 2. claude-session
 
@@ -21,7 +21,7 @@
 
 ## 4. spec 與收尾
 
-- [ ] 4.1 `im-permission-profile` 的 MODIFIED 在歸檔時合進 `openspec/specs/`；`im-apps-repo` 成為新 spec。
-- [x] 4.2 jg-base 側要配合的兩件事開成 jg-base issue（不在本 repo 做；→ jg-base#183）：im HelmRelease 掛 Secret 到 `/home/claude/.ssh/im-apps.key`，`defaultMode` `0400` 或 `0600` 皆可（今天 im 以 root 跑；Secret volume 永遠 root 擁有，所以 mode 救不了非 root——若日後改非 root，走 `fsGroup` 得 `root:<fsGroup> 0440`，ssh 接受）；設 `IM_APPS_REPO` env。
-- [ ] 4.3 PR 內文署名；開單者驗收在 merge 之前；merge 後 PR 留一行署名。
-- [ ] 4.4 歸檔本 sub-change，回更新 root 的 Sub-changes 表與 tasks §4。
+- [x] 4.1 `im-permission-profile` 的 MODIFIED 在歸檔時合進 `openspec/specs/`；`im-apps-repo` 成為新 spec。
+- [x] 4.2 jg-base 側要配合的兩件事開成 jg-base issue（不在本 repo 做；→ jg-base#183。實作時改為整個 Secret 以目錄掛在 `/etc/im-apps`、`IM_APPS_KEY=/etc/im-apps/identity`，見 design D-j 與 jg-base#185；以下是開單時的原文）：im HelmRelease 掛 Secret 到 `/home/claude/.ssh/im-apps.key`，`defaultMode` `0400` 或 `0600` 皆可（今天 im 以 root 跑；Secret volume 永遠 root 擁有，所以 mode 救不了非 root——若日後改非 root，走 `fsGroup` 得 `root:<fsGroup> 0440`，ssh 接受）；設 `IM_APPS_REPO` env。
+- [x] 4.3（#34 內文署名；fleet-ops-77 [af719f] 在 `24a0386` 驗收；合併前留署名，k8scc-0c [4dc61c]）PR 內文署名；開單者驗收在 merge 之前；merge 後 PR 留一行署名。
+- [x] 4.4 歸檔本 sub-change，回更新 root 的 Sub-changes 表與 tasks §4。
