@@ -160,7 +160,7 @@ RUN set -eu; \
 
 # sops -- im encrypts every Secret it commits to its apps repo with the
 # tenant's PUBLIC age key, which the repo's .sops.yaml names
-# (openspec/changes/im-apps-repo here; root: fleet-ops standalone-app-repos).
+# (openspec/specs/im-apps-repo here; root: fleet-ops standalone-app-repos).
 # Encrypting needs sops alone -- age support is linked into it -- so the age
 # CLIs are deliberately not installed: im never holds a private key, and
 # nothing in this image should look like it could use one. Same pin shape as
