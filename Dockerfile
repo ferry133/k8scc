@@ -12,7 +12,7 @@
 
 # omnictl is installed in `base` (k8scc#18) and asserted again in `factory`;
 # declared here, before the first FROM, so both stages read ONE copy of the pin.
-ARG OMNICTL_VERSION=v1.8.1
+ARG OMNICTL_VERSION=v1.12.4
 # sops likewise (im-apps-repo): installed in `base`, asserted again in `factory`.
 ARG SOPS_VERSION=v3.12.1
 
@@ -129,18 +129,21 @@ RUN ARCH=$(dpkg --print-architecture) && \
 # needs an Omni credential, and none is mounted into this container.
 #
 # Pinned to the fleet's self-hosted Omni SERVER (jg-base
-# kubernetes/apps/extras/omni/omni/app/helmrelease.yaml, tag v1.8.1, read
-# 2026-10-16), not to latest: latest was v1.12.3 when this was asked for, a
-# client four minors ahead of the server it talks to with nobody watching
-# (the jg-base#130 shape). Bump this with that server, not with releases.
+# kubernetes/apps/extras/omni/omni/app/helmrelease.yaml), not to latest: a
+# client minors ahead of the server it talks to, with nobody watching, is the
+# jg-base#130 shape. Bump this with that server, not with releases.
+# v1.8.1 (read 2026-10-16) -> v1.12.4 with jg-base#202 (k8scc#36): from Omni
+# v1.11 the client API is v3, and an omnictl on the other side of that line
+# answers `client API version mismatch` -- so this image must not reach the
+# pods before the server moves, and must reach them soon after.
 # Verified against sha256 values pinned HERE, per architecture, rather than a
 # checksum file fetched from the same release as the binary.
 #
 # Installed is not usable: logging in through a Cloudflare Tunnel breaks on
 # gRPC trailers (the same constraint as OMNI_ENDPOINT below). Not measured here.
 ARG OMNICTL_VERSION
-ARG OMNICTL_SHA256_AMD64=9e97b3a0534a02e8302ddab91856e81fedf80d1656f18cfdd750f4705d4823fb
-ARG OMNICTL_SHA256_ARM64=2f4664abdca15175df5873f561046bacbc722d87cc779736a7ec2c5facb9813b
+ARG OMNICTL_SHA256_AMD64=12b7498895ec79ac584e2ffc05f7918b9d5e987a3442be5d49525b431c7f0958
+ARG OMNICTL_SHA256_ARM64=a2b966253f058319860f215550f8f4c28e6e9455baf155554f66dfb1baffe6fe
 RUN set -eu; \
     ARCH=$(dpkg --print-architecture); \
     case "$ARCH" in \
