@@ -53,7 +53,7 @@ The image SHALL carry a `known_hosts` file for `github.com` whose keys are taken
 
 ### Requirement: The policy says what belongs in the apps repo
 
-`im-policy.md` SHALL carry a section for the apps repo stating: only manifests, kustomizations and a README go in; every `kind: Secret` is encrypted with the tenant public key before commit; commits carry no logs, IP addresses, or environment notes beyond hostnames in manifests; reconciliation is requested with `kubectl annotate` on the tenant Kustomization; anything meant to persist goes through the repo rather than `kubectl apply`; and that the section does not apply when no apps repo is configured. The policy controls test SHALL check the section's presence and the absence of wording that permits plaintext secrets or logs.
+`im-policy.md` SHALL carry a section for the apps repo stating: only manifests, kustomizations and a README go in; every `kind: Secret` is encrypted with the tenant public key before commit; commits carry no logs, IP addresses, or environment notes beyond hostnames in manifests; reconciliation is requested with `kubectl annotate` on the tenant GitRepository and then on the tenant Kustomization, with the reason (the source fetches on its own only once per interval, so annotating the Kustomization alone re-applies the old artifact); anything meant to persist goes through the repo rather than `kubectl apply`; and that the section does not apply when no apps repo is configured. The policy controls test SHALL check the section's presence and the absence of wording that permits plaintext secrets or logs.
 
 #### Scenario: Section present
 - **WHEN** `test/im-policy-controls.sh` runs on the branch
