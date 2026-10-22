@@ -45,15 +45,18 @@ section() { awk '/^## /{on = ($0 == "## 你的 apps repo")} on' "$1"; }
 apps=$(mktemp); noapps=$(mktemp)
 trap 'rm -f "$apps" "$noapps"' EXIT
 section "$policy" > "$apps"
-# source_first <file>: the GitRepository annotate comes before the
-# Kustomization one, so the reconcile im asked for is the one that sees the new
-# commit (k8scc#39). Whether the swapped order converges later on its own (the
-# Kustomization watching its source) is not measured; this only pins the order
-# the policy asks for.
+# source_first <file>: annotate source -> wait source -> annotate
+# Kustomization -> wait Kustomization, the order measured on jg-jcc2
+# (k8scc#39), so the reconcile im asks for is one that already sees the new
+# commit. Whether another order converges later on its own (the Kustomization
+# watching its source) is not measured; this only pins the order the policy
+# asks for.
 source_first() {
-  awk '/annotate gitrepository tenant-im-apps/ && !g {g = NR}
-       /annotate kustomization tenant-im-apps/ && !k {k = NR}
-       END {exit !(g && k && g < k)}' "$1"
+  awk '/annotate gitrepository tenant-im-apps/ && !a {a = NR}
+       /wait gitrepository\/tenant-im-apps/      && !b {b = NR}
+       /annotate kustomization tenant-im-apps/ && !c {c = NR}
+       /wait kustomization\/tenant-im-apps/      && !d {d = NR}
+       END {exit !(a && b && c && d && a < b && b < c && c < d)}' "$1"
 }
 apps_checks() { # apps_checks <file> -> 0 when every statement is there
   grep -q '只在 `IM_APPS_REPO` 有值' "$1" &&
@@ -89,6 +92,13 @@ no_wait=$(mktemp)
 trap 'rm -f "$apps" "$noapps" "$kust_only" "$swapped" "$no_wait"' EXIT
 grep -v 'wait kustomization/tenant-im-apps' "$apps" > "$no_wait"
 check_not "control: annotate without waiting fails"    apps_checks "$no_wait"
+# the source wait moved after the Kustomization annotate (the order at 0cdb820)
+late_wait=$(mktemp)
+trap 'rm -f "$apps" "$noapps" "$kust_only" "$swapped" "$no_wait" "$late_wait"' EXIT
+awk '/wait gitrepository\/tenant-im-apps/ {held = $0; next}
+     {print} /annotate kustomization tenant-im-apps/ && held != "" {print held}' "$apps" > "$late_wait"
+check_not "control: source wait after the ks annotate fails" apps_checks "$late_wait"
+check "control: the late-wait copy kept the source wait" grep -q 'wait gitrepository/tenant-im-apps' "$late_wait"
 check "control: the swapped copy kept both lines"     [ "$(grep -cE 'annotate (gitrepository|kustomization) tenant-im-apps' "$swapped")" -eq 2 ]
 
 echo "old premise absent"
