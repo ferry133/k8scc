@@ -45,6 +45,19 @@ section() { awk '/^## /{on = ($0 == "## 你的 apps repo")} on' "$1"; }
 apps=$(mktemp); noapps=$(mktemp)
 trap 'rm -f "$apps" "$noapps"' EXIT
 section "$policy" > "$apps"
+# source_first <file>: annotate source -> wait source -> annotate
+# Kustomization -> wait Kustomization, the order measured on jg-jcc2
+# (k8scc#39), so the reconcile im asks for is one that already sees the new
+# commit. Whether another order converges later on its own (the Kustomization
+# watching its source) is not measured; this only pins the order the policy
+# asks for.
+source_first() {
+  awk '/annotate gitrepository tenant-im-apps/ && !a {a = NR}
+       /wait gitrepository\/tenant-im-apps/      && !b {b = NR}
+       /annotate kustomization tenant-im-apps/ && !c {c = NR}
+       /wait kustomization\/tenant-im-apps/      && !d {d = NR}
+       END {exit !(a && b && c && d && a < b && b < c && c < d)}' "$1"
+}
 apps_checks() { # apps_checks <file> -> 0 when every statement is there
   grep -q '只在 `IM_APPS_REPO` 有值' "$1" &&
   grep -q '這一節不適用' "$1" &&
@@ -52,7 +65,10 @@ apps_checks() { # apps_checks <file> -> 0 when every statement is there
   grep -q '以 tenant 公鑰加密' "$1" &&
   grep -q 'sops --encrypt --in-place' "$1" &&
   grep -q '不含 log、IP 位址' "$1" &&
-  grep -q 'reconcile.fluxcd.io/requestedAt=.*--overwrite' "$1" &&
+  grep -q 'annotate gitrepository tenant-im-apps reconcile.fluxcd.io/requestedAt=.*--overwrite' "$1" &&
+  grep -q 'annotate kustomization tenant-im-apps reconcile.fluxcd.io/requestedAt=.*--overwrite' "$1" &&
+  source_first "$1" &&
+  grep -q "wait kustomization/tenant-im-apps --for=jsonpath='{.status.lastAppliedRevision}'" "$1" &&
   grep -q '要留下來的東西走 repo，不走 `kubectl apply`' "$1" &&
   grep -q 'git@github.com-im-apps:\$IM_APPS_REPO.git' "$1"
 }
@@ -64,6 +80,26 @@ check "control: the stripped copy kept the rest"      grep -q '## inbox 慣例' 
 check_not "no wording that permits a plaintext Secret" grep -qiE '明文.{0,8}(可以|即可|沒關係)|plaintext secrets? (is|are) (fine|ok)' "$policy"
 check_not "no wording that asks for logs in commits"   grep -qiE '(貼|附|放).{0,6}log.{0,8}(commit|repo)|commit.{0,10}(附上|貼上).{0,4}log' "$policy"
 check_not "control: a statement that is not there"     grep -q '把 age 私鑰放進 repo' "$apps"
+# controls for k8scc#39: the Kustomization-only line, and the two steps swapped
+kust_only=$(mktemp); swapped=$(mktemp)
+trap 'rm -f "$apps" "$noapps" "$kust_only" "$swapped"' EXIT
+grep -v 'annotate gitrepository tenant-im-apps' "$apps" > "$kust_only"
+awk '/annotate gitrepository tenant-im-apps/ {held = $0; next}
+     {print} /annotate kustomization tenant-im-apps/ && held != "" {print held}' "$apps" > "$swapped"
+check_not "control: Kustomization-only reconcile fails" apps_checks "$kust_only"
+check_not "control: Kustomization before source fails"  apps_checks "$swapped"
+no_wait=$(mktemp)
+trap 'rm -f "$apps" "$noapps" "$kust_only" "$swapped" "$no_wait"' EXIT
+grep -v 'wait kustomization/tenant-im-apps' "$apps" > "$no_wait"
+check_not "control: annotate without waiting fails"    apps_checks "$no_wait"
+# the source wait moved after the Kustomization annotate (the order at 0cdb820)
+late_wait=$(mktemp)
+trap 'rm -f "$apps" "$noapps" "$kust_only" "$swapped" "$no_wait" "$late_wait"' EXIT
+awk '/wait gitrepository\/tenant-im-apps/ {held = $0; next}
+     {print} /annotate kustomization tenant-im-apps/ && held != "" {print held}' "$apps" > "$late_wait"
+check_not "control: source wait after the ks annotate fails" apps_checks "$late_wait"
+check "control: the late-wait copy kept the source wait" grep -q 'wait gitrepository/tenant-im-apps' "$late_wait"
+check "control: the swapped copy kept both lines"     [ "$(grep -cE 'annotate (gitrepository|kustomization) tenant-im-apps' "$swapped")" -eq 2 ]
 
 echo "old premise absent"
 check_not "no customer-approval premise"              grep -qiE 'approval from the customer|person at the terminal|客戶.{0,6}(按|批准)' "$policy"
