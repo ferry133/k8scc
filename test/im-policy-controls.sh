@@ -46,7 +46,10 @@ apps=$(mktemp); noapps=$(mktemp)
 trap 'rm -f "$apps" "$noapps"' EXIT
 section "$policy" > "$apps"
 # source_first <file>: the GitRepository annotate comes before the
-# Kustomization one -- the other order re-applies the old artifact (k8scc#39)
+# Kustomization one, so the reconcile im asked for is the one that sees the new
+# commit (k8scc#39). Whether the swapped order converges later on its own (the
+# Kustomization watching its source) is not measured; this only pins the order
+# the policy asks for.
 source_first() {
   awk '/annotate gitrepository tenant-im-apps/ && !g {g = NR}
        /annotate kustomization tenant-im-apps/ && !k {k = NR}
@@ -62,6 +65,7 @@ apps_checks() { # apps_checks <file> -> 0 when every statement is there
   grep -q 'annotate gitrepository tenant-im-apps reconcile.fluxcd.io/requestedAt=.*--overwrite' "$1" &&
   grep -q 'annotate kustomization tenant-im-apps reconcile.fluxcd.io/requestedAt=.*--overwrite' "$1" &&
   source_first "$1" &&
+  grep -q "wait kustomization/tenant-im-apps --for=jsonpath='{.status.lastAppliedRevision}'" "$1" &&
   grep -q '要留下來的東西走 repo，不走 `kubectl apply`' "$1" &&
   grep -q 'git@github.com-im-apps:\$IM_APPS_REPO.git' "$1"
 }
@@ -81,6 +85,10 @@ awk '/annotate gitrepository tenant-im-apps/ {held = $0; next}
      {print} /annotate kustomization tenant-im-apps/ && held != "" {print held}' "$apps" > "$swapped"
 check_not "control: Kustomization-only reconcile fails" apps_checks "$kust_only"
 check_not "control: Kustomization before source fails"  apps_checks "$swapped"
+no_wait=$(mktemp)
+trap 'rm -f "$apps" "$noapps" "$kust_only" "$swapped" "$no_wait"' EXIT
+grep -v 'wait kustomization/tenant-im-apps' "$apps" > "$no_wait"
+check_not "control: annotate without waiting fails"    apps_checks "$no_wait"
 check "control: the swapped copy kept both lines"     [ "$(grep -cE 'annotate (gitrepository|kustomization) tenant-im-apps' "$swapped")" -eq 2 ]
 
 echo "old premise absent"

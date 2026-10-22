@@ -36,7 +36,9 @@
   TS=$(date -u +%s)
   kubectl -n flux-system annotate gitrepository tenant-im-apps reconcile.fluxcd.io/requestedAt="$TS" --overwrite
   kubectl -n flux-system annotate kustomization tenant-im-apps reconcile.fluxcd.io/requestedAt="$TS" --overwrite
-  kubectl -n flux-system get kustomization tenant-im-apps
+  REV="main@sha1:$(git rev-parse HEAD)"
+  kubectl -n flux-system wait gitrepository/tenant-im-apps --for=jsonpath='{.status.artifact.revision}'="$REV" --timeout=120s
+  kubectl -n flux-system wait kustomization/tenant-im-apps --for=jsonpath='{.status.lastAppliedRevision}'="$REV" --timeout=240s
   ```
 
-  最後一行要看到 Ready，而且套用的 revision 是你剛推的 commit。只 annotate Kustomization 不夠：`GitRepository tenant-im-apps` 每小時才自己去拉一次，Kustomization 只會拿舊的 artifact 再套一遍，你剛推的東西要等到下一次拉取才出現。你沒有 flux CLI（設計如此），所以不是 `flux reconcile --with-source`，而是這兩個 annotate。
+  在 apps repo 的 clone 裡、推完之後跑（`git rev-parse HEAD` 是你剛推的 commit）。拉取與套用要幾秒到幾十秒，所以用 `wait` 等它到那個 revision，不要 annotate 完立刻 `get` 一次就下結論——那多半還是舊的 revision。兩個 `wait` 都回 `condition met` 才算套上；逾時就去讀 `kubectl -n flux-system get gitrepository,kustomization tenant-im-apps` 的 message，不要重推。只 annotate Kustomization 不夠：`GitRepository tenant-im-apps` 每小時才自己去拉一次，Kustomization 只會拿舊的 artifact 再套一遍，你剛推的東西要等到下一次拉取才出現。你沒有 flux CLI（設計如此），所以不是 `flux reconcile --with-source`，而是這兩個 annotate。
