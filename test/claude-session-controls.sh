@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # Controls for claude-session: the Talos permission profile, the apps-repo
-# write path, and the inbox notice. The script is run AS SHIPPED, with HOME redirected to a scratch
+# write path, the Home Assistant MCP registration, and the inbox notice. The script is run AS SHIPPED, with HOME redirected to a scratch
 # directory and fake `claude` / `tmux` binaries ahead of the real ones on
 # PATH -- the final `exec tmux` lands on the fake, which prints its argv and
 # exits. Nothing here is a copy of claude-session; a copy would keep passing
@@ -33,6 +33,7 @@ EOF
 cat > "$work/bin/tmux" <<'EOF'
 #!/usr/bin/env bash
 printf 'tmux %s\n' "$*" >> "${FAKE_LOG:?}"
+env > "${FAKE_LOG%.log}.env"   # the environment claude would inherit
 exit 0
 EOF
 chmod +x "$work/bin/claude" "$work/bin/tmux"
@@ -56,7 +57,7 @@ run_session() {
   mkdir -p "$home"
   : > "$home/fake.log"
   env -i PATH="$work/bin:$PATH" HOME="$home" FAKE_LOG="$home/fake.log" \
-      TTYD_USER="" CLAUDE_USER_ID="tester" DATABASE_URL="" TALOS_MCP_URL="" IM_APPS_REPO="" IM_APPS_KEY="" "$@" \
+      TTYD_USER="" CLAUDE_USER_ID="tester" DATABASE_URL="" TALOS_MCP_URL="" IM_APPS_REPO="" IM_APPS_KEY="" HA_MCP_URL="" HA_MCP_TOKEN_FILE="" "$@" \
       bash ./claude-session </dev/null 2>&1
 }
 
@@ -251,6 +252,147 @@ out=$(run_session "$h" IM_APPS_REPO=$REPO)
 check "foreign ssh config: untouched"               [ "$(cat "$h/.ssh/config")" = "$(printf 'Host mine\n  HostName example.invalid')" ]
 check "foreign ssh config: said"                    grep -q '不是 claude-session 寫的' <<<"$out"
 check_not "foreign ssh config: no gitconfig" test -e "$h/.gitconfig"
+
+echo "home assistant"
+HAURL=http://home-assistant.default.svc.cluster.local:8123/mcp_server/sse
+TOK=HAtok3n-DUMMY-not-real-0001
+# the entry claude-session wrote for this project (the script runs from the repo root)
+ha_entry() { python3 - "$1" "$(pwd -P)" <<'PY2'
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+except FileNotFoundError:
+    print("null"); sys.exit()
+print(json.dumps(d.get("projects", {}).get(sys.argv[2], {}).get("mcpServers", {}).get("ha"), sort_keys=True))
+PY2
+}
+want_entry() { python3 -c 'import json,sys; print(json.dumps({"type":"sse","url":sys.argv[1],"headers":{"Authorization":"Bearer "+sys.argv[2]}}, sort_keys=True))' "$1" "$2"; }
+put_token() { mkdir -p "$1/etc-ha"; printf "$2" > "$1/etc-ha/token"; }
+nwarn() { grep -c '^⚠ Home Assistant 沒有設定：' <<<"$1"; }
+fmode() { python3 -c 'import os,stat,sys; print(oct(stat.S_IMODE(os.stat(sys.argv[1]).st_mode)))' "$1"; }
+
+# URL empty (the form jg-base's substitution delivers) -- run_session passes "" -- and truly unset
+h="$work/ha-empty"
+put_token "$h" "$TOK"
+out=$(run_session "$h" HA_MCP_TOKEN_FILE="$h/etc-ha/token")
+check "empty URL: no ha entry"                      [ "$(ha_entry "$h/.claude.json")" = "null" ]
+check_not "empty URL: no permissions key" has_perms "$h"
+check_not "empty URL: silent" grep -q 'Home Assistant' <<<"$out"
+h="$work/ha-unset"
+mkdir -p "$h"; : > "$h/fake.log"
+out=$(env -i PATH="$work/bin:$PATH" HOME="$h" FAKE_LOG="$h/fake.log" CLAUDE_USER_ID=tester bash ./claude-session </dev/null 2>&1)
+check "unset URL: no ha entry"                      [ "$(ha_entry "$h/.claude.json")" = "null" ]
+check_not "unset URL: no permissions key" has_perms "$h"
+check_not "unset URL: silent" grep -q 'Home Assistant' <<<"$out"
+check "unset URL: session still starts"             grep -q '^tmux ' "$h/fake.log"
+
+# URL without the token: exactly one line, nothing written
+h="$work/ha-notoken"
+out=$(run_session "$h" HA_MCP_URL=$HAURL HA_MCP_TOKEN_FILE="$h/etc-ha/token")
+check "no token: exactly one warning line"          [ "$(nwarn "$out")" = 1 ]
+check_not "control: two warning lines are not one" [ "$(nwarn "$out"$'\n'"$out")" = 1 ]
+check "no token: the line names the path"           grep -q '^⚠ Home Assistant 沒有設定：token 檔不在 ~/etc-ha/token$' <<<"$out"
+check "no token: no ha entry"                       [ "$(ha_entry "$h/.claude.json")" = "null" ]
+check_not "no token: no .claude.json written" test -e "$h/.claude.json"
+check_not "no token: no permissions key" has_perms "$h"
+h="$work/ha-zerobytes"
+put_token "$h" ""
+out=$(run_session "$h" HA_MCP_URL=$HAURL HA_MCP_TOKEN_FILE="$h/etc-ha/token")
+check "0 bytes: exactly one warning line"           [ "$(nwarn "$out")" = 1 ]
+check "0 bytes: the line says empty"                grep -q '^⚠ Home Assistant 沒有設定：token 檔 ~/etc-ha/token 是空的$' <<<"$out"
+check_not "0 bytes: no .claude.json written" test -e "$h/.claude.json"
+check_not "0 bytes: no permissions key" has_perms "$h"
+# HA_MCP_TOKEN_FILE empty: the default path (absent on this machine)
+h="$work/ha-defaultpath"
+out=$(run_session "$h" HA_MCP_URL=$HAURL)
+check "token file empty: default path named"        grep -q 'token 檔不在 /etc/ha-mcp/token$' <<<"$out"
+
+# both present, token with a trailing newline
+h="$work/ha"
+put_token "$h" "$TOK\n"
+out=$(run_session "$h" HA_MCP_URL=$HAURL HA_MCP_TOKEN_FILE="$h/etc-ha/token")
+cj="$h/.claude.json"
+check "ha: entry is the measured shape, newline stripped" [ "$(ha_entry "$cj")" = "$(want_entry "$HAURL" "$TOK")" ]
+check_not "control: the entry check sees a wrong token" [ "$(ha_entry "$cj")" = "$(want_entry "$HAURL" "${TOK}x")" ]
+check "ha: .claude.json is 0600"                    [ "$(fmode "$cj")" = 0o600 ]
+check "ha: allow gains only mcp__ha"                [ "$(allow_of "$h")" = '["mcp__ha"]' ]
+check_not "ha: silent when all is well" grep -q 'Home Assistant' <<<"$out"
+check_not "ha: claude never called for ha (no argv)" grep -q 'mcp .*ha' "$h/fake.log"
+# no trace of the token: output, environment, argv -- and the same grep finds it where it belongs
+check_not "ha: token prefix not in output" grep -qF "${TOK:0:8}" <<<"$out"
+check_not "ha: token prefix not in claude's env" grep -qF "${TOK:0:8}" "$h/fake.env"
+check_not "ha: token prefix not in any argv" grep -qF "${TOK:0:8}" "$h/fake.log"
+check "control: HA_MCP_URL is in claude's env"      grep -qF "HA_MCP_URL=$HAURL" "$h/fake.env"
+check "control: the token is in .claude.json"       grep -qF "${TOK:0:8}" "$cj"
+# second run: nothing moves
+b_cj=$(cat "$cj"); b_set=$(settings_of "$h"); m_cj=$(mtime "$cj"); m_set=$(mtime "$h/.claude/settings.json")
+sleep 1
+run_session "$h" HA_MCP_URL=$HAURL HA_MCP_TOKEN_FILE="$h/etc-ha/token" >/dev/null
+check "ha second run: .claude.json identical"       [ "$(cat "$cj")" = "$b_cj" ]
+check "ha second run: settings identical"           [ "$(settings_of "$h")" = "$b_set" ]
+check "ha second run: no file rewritten (mtime)"    [ "$(mtime "$cj") $(mtime "$h/.claude/settings.json")" = "$m_cj $m_set" ]
+# rotation: rewritten once with the new bearer, then still
+put_token "$h" "${TOK}-rotated"
+sleep 1
+run_session "$h" HA_MCP_URL=$HAURL HA_MCP_TOKEN_FILE="$h/etc-ha/token" >/dev/null
+check "rotated: entry carries the new token"        [ "$(ha_entry "$cj")" = "$(want_entry "$HAURL" "${TOK}-rotated")" ]
+check_not "rotated: the file did move" [ "$(mtime "$cj")" = "$m_cj" ]
+m_rot=$(mtime "$cj"); sleep 1
+run_session "$h" HA_MCP_URL=$HAURL HA_MCP_TOKEN_FILE="$h/etc-ha/token" >/dev/null
+check "rotated, third run: not rewritten (mtime)"   [ "$(mtime "$cj")" = "$m_rot" ]
+# an entry removed by hand comes back on the next run
+python3 - "$cj" <<'PY2'
+import json, sys
+d = json.load(open(sys.argv[1]))
+for p in d["projects"].values(): p["mcpServers"].pop("ha", None)
+json.dump(d, open(sys.argv[1], "w"))
+PY2
+run_session "$h" HA_MCP_URL=$HAURL HA_MCP_TOKEN_FILE="$h/etc-ha/token" >/dev/null
+check "removed by hand: re-registered"              [ "$(ha_entry "$cj")" = "$(want_entry "$HAURL" "${TOK}-rotated")" ]
+
+# CLAUDE_CONFIG_DIR (jg-base sets it): the file lands there, not in HOME
+h="$work/ha-configdir"
+put_token "$h" "$TOK"
+run_session "$h" HA_MCP_URL=$HAURL HA_MCP_TOKEN_FILE="$h/etc-ha/token" CLAUDE_CONFIG_DIR="$h/.claude" >/dev/null
+check "CLAUDE_CONFIG_DIR: entry in that dir"        [ "$(ha_entry "$h/.claude/.claude.json")" = "$(want_entry "$HAURL" "$TOK")" ]
+check_not "CLAUDE_CONFIG_DIR: nothing in HOME" test -e "$h/.claude.json"
+
+# existing file: other keys, projects and servers survive
+h="$work/ha-existing"
+put_token "$h" "$TOK"
+printf '{"userID":"u1","projects":{"/elsewhere":{"mcpServers":{"x":{"type":"stdio"}}},"%s":{"allowedTools":[],"mcpServers":{"talos":{"type":"sse","url":"http://127.0.0.1:8765/sse"}}}}}\n' "$(pwd -P)" > "$h/.claude.json"
+run_session "$h" HA_MCP_URL=$HAURL HA_MCP_TOKEN_FILE="$h/etc-ha/token" >/dev/null
+check "existing: ha added"                          [ "$(ha_entry "$h/.claude.json")" = "$(want_entry "$HAURL" "$TOK")" ]
+check "existing: other keys kept"                   python3 - "$h/.claude.json" "$(pwd -P)" <<'PY2'
+import json, sys
+d = json.load(open(sys.argv[1])); p = d["projects"][sys.argv[2]]
+sys.exit(0 if d["userID"] == "u1" and "x" in d["projects"]["/elsewhere"]["mcpServers"]
+         and "talos" in p["mcpServers"] and p["allowedTools"] == [] else 1)
+PY2
+
+# unparseable .claude.json: left alone, one line, no permission
+h="$work/ha-broken"
+put_token "$h" "$TOK"
+printf '{"projects": {' > "$h/.claude.json"
+out=$(run_session "$h" HA_MCP_URL=$HAURL HA_MCP_TOKEN_FILE="$h/etc-ha/token")
+check "broken .claude.json: byte-identical"         [ "$(cat "$h/.claude.json")" = '{"projects": {' ]
+check "broken .claude.json: exactly one line"       [ "$(nwarn "$out")" = 1 ]
+check "broken .claude.json: says why"               grep -q '不是合法 JSON，沒有改它' <<<"$out"
+check_not "broken .claude.json: no permissions key" has_perms "$h"
+check "broken .claude.json: session still starts"   grep -q '^tmux ' "$h/fake.log"
+
+# independent of the other two profiles
+h="$work/ha-talos"
+put_token "$h" "$TOK"
+run_session "$h" HA_MCP_URL=$HAURL HA_MCP_TOKEN_FILE="$h/etc-ha/token" TALOS_MCP_URL=http://127.0.0.1:8765/sse >/dev/null
+check "talos+ha: talos profile then mcp__ha"        [ "$(allow_of "$h")" = "${PROFILE%]}, \"mcp__ha\"]" ]
+h="$work/ha-apps"
+put_token "$h" "$TOK"; put_key "$h" 0600
+run_session "$h" HA_MCP_URL=$HAURL HA_MCP_TOKEN_FILE="$h/etc-ha/token" IM_APPS_REPO=$REPO >/dev/null
+check "ha+apps: mcp__ha then git and sops"          [ "$(allow_of "$h")" = "[\"mcp__ha\", ${APPS#[}" ]
+h="$work/ha-off-talos"
+run_session "$h" TALOS_MCP_URL=http://127.0.0.1:8765/sse >/dev/null
+check_not "talos without HA: no mcp__ha" grep -q 'mcp__ha' "$h/.claude/settings.json"
 
 echo "inbox notice"
 h="$work/inbox-unread"

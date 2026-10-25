@@ -3,10 +3,12 @@
 # 1. Ensure per-user HOME directories exist
 # 2. Register MCP servers (memory if DATABASE_URL, talos if TALOS_MCP_URL) and,
 #    for talos, merge the permission profile into settings.json
-# 3. Configure im's apps repo (if IM_APPS_REPO and its write key are both here):
+# 3. Register Home Assistant's MCP server (if HA_MCP_URL and its token file are
+#    both here) and allow the whole `ha` server
+# 4. Configure im's apps repo (if IM_APPS_REPO and its write key are both here):
 #    ssh alias + git identity, and git/sops into the permission profile
-# 4. Announce ~/workspace/inbox/ if it holds anything unread
-# 5. exec tmux → claude
+# 5. Announce ~/workspace/inbox/ if it holds anything unread
+# 6. exec tmux → claude
 # CLAUDE_USER_ID is set by the pod environment (oauth2-proxy handles auth externally)
 
 # HOME is /home/claude in the image (Dockerfile pins it); the fallback only
@@ -84,6 +86,82 @@ TALOS_ALLOW=(mcp__talos__get_node_status mcp__talos__get_etcd_members
              mcp__talos__reboot_node)
 TALOS_UNASK=(mcp__talos__reboot_node)   # where this profile put it before 2026-10-15
 APPS_ALLOW=('Bash(git *)' 'Bash(sops *)')
+HA_ALLOW=(mcp__ha)   # server-level: HA's tool names follow its expose settings
+
+# configure_ha_mcp: register Home Assistant's MCP server as `ha` (openspec
+# im-ha-mcp). Both inputs must be here -- HA_MCP_URL non-empty and the token
+# file (HA_MCP_TOKEN_FILE, default /etc/ha-mcp/token; empty = default) present
+# and non-empty -- or nothing is written and one line names what is missing.
+# HA_MCP_URL empty is the same as unset (jg-base substitutes ${HA_MCP_URL}):
+# silent, nothing written.
+#
+# Not `claude mcp add --header`: that puts the token in argv, where `ps` shows
+# it. python writes the entry `claude mcp add --scope local` would write,
+# measured on 2.1.261 (spike 1.1, 2026-10-26):
+#   <config>/.claude.json  projects[<cwd>].mcpServers.ha =
+#     {"type": "sse", "url": <url>, "headers": {"Authorization": "Bearer <t>"}}
+# where <config> is CLAUDE_CONFIG_DIR (jg-base sets /home/claude/.claude, on
+# the PVC), else HOME; the file is 0600. `claude mcp get ha` read a
+# python-written entry back. Never show `claude mcp get ha`'s output: it
+# prints the header in full.
+#
+# The token is read by python from the file and leaves only into the entry --
+# no argv, no env, no output. Rotation needs no record of its own: the entry
+# is compared with the one that would be written and rewritten only when they
+# differ, so an unchanged token leaves the file untouched (a second run is a
+# no-op) and a rotated one is rewritten once. A file that is not valid JSON is
+# left alone and the line says so.
+configure_ha_mcp() {
+    [ -n "${HA_MCP_URL}" ] || return 1
+    local out
+    out=$(python3 - "${HA_MCP_URL}" "${HA_MCP_TOKEN_FILE:-/etc/ha-mcp/token}" \
+            "${CLAUDE_CONFIG_DIR:-$CLAUDE_HOME}/.claude.json" <<'PY'
+import json, os, pathlib, sys, tempfile
+
+url, token_path, cfg = sys.argv[1], pathlib.Path(sys.argv[2]), pathlib.Path(sys.argv[3])
+home = os.environ.get("HOME", "")
+show = lambda p: str(p).replace(home, "~", 1) if home and str(p).startswith(home) else str(p)
+
+def refuse(reason):
+    print(f"⚠ Home Assistant 沒有設定：{reason}")
+    sys.exit(1)
+
+if not token_path.is_file():
+    refuse(f"token 檔不在 {show(token_path)}")
+try:
+    token = token_path.read_text().strip()
+except OSError:
+    refuse(f"token 檔 {show(token_path)} 讀不到")
+if not token:
+    refuse(f"token 檔 {show(token_path)} 是空的")
+
+raw = cfg.read_text() if cfg.exists() else ""
+try:
+    data = json.loads(raw) if raw.strip() else {}
+except json.JSONDecodeError:
+    refuse(f"{show(cfg)} 不是合法 JSON，沒有改它")
+if not isinstance(data, dict):
+    refuse(f"{show(cfg)} 的最上層不是物件，沒有改它")
+projects = data.setdefault("projects", {})
+project = projects.setdefault(os.path.realpath(os.getcwd()), {}) if isinstance(projects, dict) else None
+servers = project.setdefault("mcpServers", {}) if isinstance(project, dict) else None
+if not isinstance(servers, dict):
+    refuse(f"{show(cfg)} 的 projects／mcpServers 形狀不對，沒有改它")
+
+want = {"type": "sse", "url": url, "headers": {"Authorization": f"Bearer {token}"}}
+if servers.get("ha") == want:
+    sys.exit(0)
+servers["ha"] = want
+cfg.parent.mkdir(parents=True, exist_ok=True)
+fd, tmp = tempfile.mkstemp(dir=cfg.parent, prefix=".claude.json.")
+with os.fdopen(fd, "w") as f:          # mkstemp: 0600, like claude's own file
+    f.write(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
+os.replace(tmp, cfg)
+PY
+    ) && return 0
+    echo "${out:-⚠ Home Assistant 沒有設定：寫 .claude.json 失敗（見上一行）}" >&2
+    return 1
+}
 
 # configure_apps_repo HOME: im's write path to its own apps repo (openspec
 # im-apps-repo). Both inputs must be here -- IM_APPS_REPO (owner/repo) and the
@@ -229,6 +307,15 @@ if [ -n "${TALOS_MCP_URL}" ]; then
     if ! merge_permissions "${CLAUDE_HOME}/.claude/settings.json" \
             "${TALOS_ALLOW[@]}" -- "${TALOS_UNASK[@]}"; then
         echo "⚠ settings.json 的 talos permission 設定沒有寫入（見上一行）——mcp__talos__* 每次都會問" >&2
+    fi
+fi
+
+# Home Assistant's MCP server (if HA_MCP_URL and its token are both here):
+# registered without the token ever reaching argv, and the whole `ha` server
+# joins the permission profile. No HA_MCP_URL -> silent, nothing written.
+if configure_ha_mcp; then
+    if ! merge_permissions "${CLAUDE_HOME}/.claude/settings.json" "${HA_ALLOW[@]}"; then
+        echo "⚠ settings.json 的 mcp__ha permission 設定沒有寫入（見上一行）——HA 的工具每次都會問" >&2
     fi
 fi
 

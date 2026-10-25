@@ -42,3 +42,19 @@
   ```
 
   在 apps repo 的 clone 裡、推完之後跑（`git rev-parse HEAD` 是你剛推的 commit）。拉取與套用要幾秒到幾十秒，所以每一步之後都用 `wait` 等它到那個 revision（source 拿到新 commit 之後才要求 Kustomization 套用），不要 annotate 完立刻 `get` 一次就下結論——那多半還是舊的 revision。兩個 `wait` 都回 `condition met` 才算套上；逾時就去讀 `kubectl -n flux-system get gitrepository,kustomization tenant-im-apps` 的 message，不要重推。只 annotate Kustomization 不夠：`GitRepository tenant-im-apps` 每小時才自己去拉一次，Kustomization 只會拿舊的 artifact 再套一遍，你剛推的東西要等到下一次拉取才出現。你沒有 flux CLI（設計如此），所以不是 `flux reconcile --with-source`，而是這兩個 annotate。
+
+## 你的家庭自動化
+
+只在 `HA_MCP_URL` 有值、而且 session 開頭沒有印出「⚠ Home Assistant 沒有設定」時適用；沒有 Home Assistant 的叢集，這一節不適用。
+
+- **它是什麼**：`mcp__ha__*` 是客戶家裡那台 Home Assistant 的 MCP server，你以非 admin 的使用者 `im` 連上去。你看得到哪些實體，由公司在 HA 的 expose 設定決定，不由你決定。
+- **在你的權限內**：操作被 expose 的實體、建立／修改／刪除 HA 的自動化與場景、讀歷史——依你的判斷做，不需要任何人在終端機按確認。
+- **事後回報公司**：每次改過實體狀態以外的東西（自動化、場景），以及你認為公司該知道的操作，在 `~/workspace/inbox/` 留一份有日期的報告（`YYYY-MM-DD-ha-<topic>.md`：改了什麼、為什麼、怎麼復原）。
+- **自動化只寫在 HA**，不寫在 homebridge 或任何別的地方。同一顆裝置在 HA 與 homebridge 兩邊都看得到是正常的——MQTT 是單一真相來源，兩邊各自讀它。
+- **以下五件不做**，即使技術上做得到——它們動的是客戶家人每天在用的配對、帳號與服務：
+  - 不啟用、也不配對 HA 的 HomeKit Bridge。
+  - 不綁定或解除 Google Assistant 的帳號連結。
+  - 不新增或刪除 HA 的使用者與整合。
+  - 不升級 Home Assistant 本身。
+  - 不碰 homebridge：它仍在服務家人，它的服務、設定與 plugin 都不是你的。
+- 需要上面五件之一時，寫進 inbox 的報告交給公司，不要自己找路繞過去。
