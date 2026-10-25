@@ -14,7 +14,7 @@
 
 #### Scenario: Both present registers once
 - **WHEN** `HA_MCP_URL` is non-empty and the token file is non-empty
-- **THEN** `claude mcp get ha` exits 0 and reports an SSE server at that URL, and a second run of `claude-session` leaves `.claude.json` byte-identical
+- **THEN** `.claude.json` carries, under the current directory's project, an `ha` entry of type `sse` at that URL with the bearer header (the shape `claude mcp add --scope local` writes on 2.1.261), and a second run of `claude-session` leaves `.claude.json` byte-identical and not rewritten
 
 ### Requirement: The token enters only through the file and leaves no trace in argv, env or output
 
@@ -26,11 +26,15 @@
 
 ### Requirement: A rotated token is re-registered; an unchanged one is not rewritten
 
-`claude-session` SHALL record the sha256 of the token it last registered and SHALL rewrite the `ha` entry only when the current token's sha256 differs.
+`claude-session` SHALL compare the registered `ha` entry with the one it would write and SHALL rewrite it only when they differ, so that a rotated token is registered once and an entry removed by hand is restored.
 
 #### Scenario: Rotation rewrites once
 - **WHEN** the token file's content changes between two runs
 - **THEN** the second run rewrites the `ha` entry with the new bearer value and a third run with the same content changes nothing
+
+#### Scenario: Entry removed by hand comes back
+- **WHEN** the `ha` entry is removed from `.claude.json` between two runs while the token is unchanged
+- **THEN** the next run writes it again
 
 ### Requirement: The permission profile allows the whole `ha` server
 

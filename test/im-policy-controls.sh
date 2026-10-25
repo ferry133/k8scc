@@ -101,6 +101,50 @@ check_not "control: source wait after the ks annotate fails" apps_checks "$late_
 check "control: the late-wait copy kept the source wait" grep -q 'wait gitrepository/tenant-im-apps' "$late_wait"
 check "control: the swapped copy kept both lines"     [ "$(grep -cE 'annotate (gitrepository|kustomization) tenant-im-apps' "$swapped")" -eq 2 ]
 
+echo "home automation section"
+ha_section() { awk '/^## /{on = ($0 == "## 你的家庭自動化")} on' "$1"; }
+# one pattern per statement; each is on its own line, so dropping that line
+# drops exactly that statement
+HA_STATEMENTS=(
+  '只在 `HA_MCP_URL` 有值'
+  '沒有 Home Assistant 的叢集，這一節不適用'
+  '操作被 expose 的實體、建立／修改／刪除 HA 的自動化與場景'
+  '依你的判斷做，不需要任何人在終端機按確認'
+  '在 `~/workspace/inbox/` 留一份有日期的報告'
+  '不要跑 `claude mcp get ha`，也不要讀或印出 `.claude.json` 裡的 `ha` 項'
+  '`claude mcp list` 會不會印沒量到，當作會印、一樣不跑'
+  '要確認 HA 連不連得上，呼叫一支 `mcp__ha__*` 工具'
+  '自動化只寫在 HA'
+  '不啟用、也不配對 HA 的 HomeKit Bridge'
+  '不綁定或解除 Google Assistant 的帳號連結'
+  '不新增或刪除 HA 的使用者與整合'
+  '不升級 Home Assistant 本身'
+  '不碰 homebridge'
+)
+ha_checks() { # ha_checks <file> -> 0 when every statement is there
+  local pat
+  for pat in "${HA_STATEMENTS[@]}"; do grep -qF -- "$pat" "$1" || return 1; done
+}
+ha=$(mktemp); noha=$(mktemp); drop=$(mktemp)
+trap 'rm -f "$apps" "$noapps" "$kust_only" "$swapped" "$no_wait" "$late_wait" "$ha" "$noha" "$drop"' EXIT
+ha_section "$policy" > "$ha"
+check "section carries every statement"               ha_checks "$ha"
+awk '/^## /{on = ($0 != "## 你的家庭自動化")} NR==1 || on' "$policy" > "$noha"
+check_not "control: policy without the section fails" ha_checks "$noha"
+check "control: the stripped copy kept the rest"      grep -q '## 你的 apps repo' "$noha"
+# each statement removed on its own must turn the check red
+for pat in "${HA_STATEMENTS[@]}"; do
+  grep -vF -- "$pat" "$ha" > "$drop"
+  check_not "control: without '$pat' fails" ha_checks "$drop"
+  check "control: dropping '$pat' removed one line"   [ "$(( $(wc -l < "$ha") - $(wc -l < "$drop") ))" -eq 1 ]
+done
+# the token sentence: no wording elsewhere that sends im to `mcp get`/`mcp list` to check HA
+check_not "no wording that checks HA with mcp get/list" grep -qE '(用|跑|執行) ?`?claude mcp (get|list)`?.{0,12}(確認|檢查|看)' "$policy"
+check "control: the mcp get/list grep can match"   grep -qE '(用|跑|執行) ?`?claude mcp (get|list)`?.{0,12}(確認|檢查|看)' <<<'先跑 claude mcp get ha 確認狀態'
+check_not "no wording that re-pairs for the family"   grep -qE '替家人重新配對' "$policy"
+check_not "no wording that turns homebridge off"      grep -qE '(關掉|停用|關閉|停止) ?homebridge' "$policy"
+check "control: the homebridge grep can match"        grep -qE '(關掉|停用|關閉|停止) ?homebridge' <<<'請停用 homebridge'
+
 echo "old premise absent"
 check_not "no customer-approval premise"              grep -qiE 'approval from the customer|person at the terminal|客戶.{0,6}(按|批准)' "$policy"
 check_not "no permissions.ask wording"                grep -q 'permissions.ask' "$policy"
