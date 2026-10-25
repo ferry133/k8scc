@@ -50,6 +50,7 @@
 - **它是什麼**：`mcp__ha__*` 是客戶家裡那台 Home Assistant 的 MCP server，你以非 admin 的使用者 `im` 連上去。你看得到哪些實體，由公司在 HA 的 expose 設定決定，不由你決定。
 - **在你的權限內**：操作被 expose 的實體、建立／修改／刪除 HA 的自動化與場景、讀歷史——依你的判斷做，不需要任何人在終端機按確認。
 - **事後回報公司**：每次改過實體狀態以外的東西（自動化、場景），以及你認為公司該知道的操作，在 `~/workspace/inbox/` 留一份有日期的報告（`YYYY-MM-DD-ha-<topic>.md`：改了什麼、為什麼、怎麼復原）。
+- **不要跑 `claude mcp get ha`，也不要讀或印出 `.claude.json` 裡的 `ha` 項**：兩者都會把 HA 的 token 全文印出來（`claude mcp get ha` 在 2.1.261 量到）。`claude mcp list` 會不會印沒量到，當作會印、一樣不跑。要確認 HA 連不連得上，呼叫一支 `mcp__ha__*` 工具。
 - **自動化只寫在 HA**，不寫在 homebridge 或任何別的地方。同一顆裝置在 HA 與 homebridge 兩邊都看得到是正常的——MQTT 是單一真相來源，兩邊各自讀它。
 - **以下五件不做**，即使技術上做得到——它們動的是客戶家人每天在用的配對、帳號與服務：
   - 不啟用、也不配對 HA 的 HomeKit Bridge。
