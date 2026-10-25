@@ -58,7 +58,7 @@ Each write tool SHALL take typed arguments and a non-blank `reason`, SHALL compo
 
 ### Requirement: Snapshot, apply, verify, revert from inside — with outside probes and FAC as witness
 
-Before the token phase the server SHALL probe the three outside endpoints and open a ticket on the im→FAC channel carrying the cluster, the target's collection and id, the stripped diff and a deadline — never a snapshot or a secret; a failed probe or a failed ticket SHALL refuse the write. It SHALL wait up to `NETDEV_WITNESS_WAIT` for a `pre-ack:` comment; absence SHALL be recorded as `fac_witness: unmeasured` and SHALL NOT block. Before applying it SHALL GET the whole target object into `NETDEV_SNAPSHOT_DIR` (a failed GET aborts). After applying, within `NETDEV_HEALTH_TIMEOUT`, it SHALL verify the controller API, the Kubernetes API server (`kubectl get --raw /readyz`), the object reading back equal to `after`, the three probes (two or more lost ⇒ failure; one lost ⇒ `outbound: degraded`), and — when a pre-ack arrived — a `post-ack:` comment (absent with probes answering ⇒ failure, `fac_witness: lost`). Any failure SHALL PUT the snapshot back through the controller and re-check. The ticket SHALL be closed with a release comment carrying `outbound`, `fac_witness` and `result`; a failed revert SHALL be `result: revert-failed` and the tool response SHALL instruct im to write a dated inbox report immediately.
+Before the token phase the server SHALL probe the three outside endpoints and open a ticket on the im→FAC channel carrying the cluster, the target's collection and id, the stripped diff and a deadline — never a snapshot or a secret; a failed probe or a failed ticket SHALL refuse the write. It SHALL wait up to `NETDEV_WITNESS_WAIT` for a `pre-ack:` comment; absence SHALL be recorded as `fac_witness: unmeasured` and SHALL NOT block. Before applying it SHALL GET the whole target object and the list of `_id`s in its collection into `NETDEV_SNAPSHOT_DIR` (a failed GET aborts). After applying, within `NETDEV_HEALTH_TIMEOUT`, it SHALL verify the controller API, the Kubernetes API server (`kubectl get --raw /readyz`), the object reading back equal to `after`, the three probes (two or more lost ⇒ failure; one lost ⇒ `outbound: degraded`), and — when a pre-ack arrived — a `post-ack:` comment (absent with probes answering ⇒ failure, `fac_witness: lost`). Any failure SHALL PUT the snapshot back through the controller — or, for a write that created an object, DELETE the `_id` absent from the snapshot's list — and re-check. The ticket SHALL be closed with a release comment carrying `outbound`, `fac_witness` and `result`; a failed revert SHALL be `result: revert-failed` and the tool response SHALL instruct im to write a dated inbox report immediately. No comment the server writes itself (release, `revert-failed`, or any other) SHALL begin with `pre-ack:` or `post-ack:`.
 
 #### Scenario: Unhealthy baseline refuses
 - **WHEN** one of the three probe listeners is down before the write
@@ -75,6 +75,14 @@ Before the token phase the server SHALL probe the three outside endpoints and op
 #### Scenario: Witness armed and lost reverts
 - **WHEN** the fake FAC pre-acks but never post-acks while the probes stay up
 - **THEN** the write is reverted and the release reads `fac_witness: lost`, `result: reverted`
+
+#### Scenario: Server's own comments never count as witness
+- **WHEN** the fake FAC never comments and the server writes its own comments on the ticket (release, `revert-failed`)
+- **THEN** none of those comments begins with `pre-ack:` or `post-ack:` and `fac_witness` stays `unmeasured` (positive control: a fixture comment beginning with `pre-ack:` from the same GitHub identity arms it)
+
+#### Scenario: Created object reverted by delete
+- **WHEN** a confirmed `set_port_forward` creates a new object and the health check then fails
+- **THEN** the server DELETEs the one `_id` absent from the snapshot's `_id` list, the collection reads back equal to that list, and the release reads `result: reverted` (negative control: health passing ⇒ no DELETE)
 
 #### Scenario: Snapshot GET failure aborts
 - **WHEN** the fake controller returns an error for the snapshot GET
@@ -110,8 +118,8 @@ At each write the server SHALL compute from the session's reader data the networ
 
 ### Requirement: Every write phase leaves one audit line on stdout
 
-For every write call the server SHALL write one JSON line to stdout with `ts`, `tool`, `target`, `phase` (`token`, `execute`, `refused`, `reverted`, `revert-failed`, `aborted`), `stated_reason`, `reason` or `rc`, `user`, `snapshot_digest`, `diff_digest`, `outbound` and `fac_witness`, and SHALL write nothing else to stdout.
+For every write call the server SHALL write one JSON line to stdout with `ts`, `tool`, `target`, `phase` (`token`, `execute`, `refused`, `reverted`, `revert-failed`, `aborted`), `stated_reason`, `reason` or `rc`, `user`, `snapshot_digest`, `diff_digest`, `health` (the list of health checks that passed; empty before any check ran), `outbound` and `fac_witness`, and SHALL write nothing else to stdout.
 
 #### Scenario: Lines match phases
-- **WHEN** a write goes token → execute → reverted on the fake controller
-- **THEN** stdout holds exactly three JSON lines for that target with those phases, identical `stated_reason`, and `snapshot_digest` equal to the sha256 of the snapshot file
+- **WHEN** a write goes token → execute → reverted on the fake controller because two probes were lost
+- **THEN** stdout holds exactly three JSON lines for that target with those phases, identical `stated_reason`, `snapshot_digest` equal to the sha256 of the snapshot file, `health` empty on the `token` line and listing `controller`, `apiserver`, `readback` but not `probes` on the `execute` and `reverted` lines

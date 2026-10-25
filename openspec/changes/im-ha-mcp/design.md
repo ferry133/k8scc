@@ -22,7 +22,7 @@ jg-base 的 `${HA_MCP_URL}` 在未設 HA 的叢集代換成空字串（jg-base-e
 
 ### D-e ─ policy 寫「技術上做不到的也寫」
 
-非 admin 的 HA 使用者本來就改不了整合、進不了開發者工具，但 policy 是 im 讀的、HA 的權限表不是——所以「不碰整合與使用者」還是寫進去，和「不碰 HomeKit／Google 配對」（技術上做得到、影響客戶家人）並列。四項不碰各一條 `check`。
+非 admin 的 HA 使用者本來就改不了整合、進不了開發者工具，但 policy 是 im 讀的、HA 的權限表不是——所以「不碰整合與使用者」還是寫進去，和「不碰 HomeKit／Google 配對」（技術上做得到、影響客戶家人）並列，再加 homebridge（它仍在服務家人）。五項不碰各一條 `check`。
 
 ### D-f ─ 不做反向清理
 

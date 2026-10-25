@@ -26,7 +26,7 @@ UniFi console 預設自簽。`verify=False` 是一行就能寫出來、而且永
 
 ### D-f ─ 探針與見證是兩個獨立讀數，合成三值
 
-探針：`NETDEV_OUTSIDE_PROBES` 三條，各是 `https://host/path`（GET，2xx／3xx 算通）或 `host:port`（TCP connect）。基線（W1）要三條全通；健檢每 10 s 重探，`lost` ≥2 ⇒ 回滾，＝1 ⇒ `degraded`。見證：票的留言流裡找固定前綴 `pre-ack:`／`post-ack:`（任何 GitHub 身分留的都算——FAC 共用 ferry133 的身分，署名在留言內文）；pre-ack 在 `NETDEV_WITNESS_WAIT` 內沒來 ⇒ `unmeasured`、不擋；armed 而健檢窗內 post-ack 沒來且探針全通 ⇒ 回滾、`lost`。兩個讀數都寫進 release 與稽核行。**通道未設定（`IM_FAC_TICKET_REPO` 空或 token 缺）⇒ operator 工具不註冊**——root W1 要求票先出 LAN，而且 stdout 之外這是直接 LAN 寫入唯一的公司側紀錄。
+探針：`NETDEV_OUTSIDE_PROBES` 三條，各是 `https://host/path`（GET，2xx／3xx 算通）或 `host:port`（TCP connect）。基線（W1）要三條全通；健檢每 10 s 重探，`lost` ≥2 ⇒ 回滾，＝1 ⇒ `degraded`。見證：票的留言流裡找固定前綴 `pre-ack:`／`post-ack:`（任何 GitHub 身分留的都算——FAC 共用 ferry133 的身分，署名在留言內文）；pre-ack 在 `NETDEV_WITNESS_WAIT` 內沒來 ⇒ `unmeasured`、不擋；armed 而健檢窗內 post-ack 沒來且探針全通 ⇒ 回滾、`lost`。兩個讀數都寫進 release 與稽核行。**server 自己留的留言（release、`revert-failed`）永遠不以 `pre-ack:`／`post-ack:` 開頭**——所有 agent 共用 ferry133 的 GitHub 身分，前綴是唯一能鑑別見證的東西；controls 有一格負對照：server 自己的留言不能讓 `fac_witness` 變 armed。**通道未設定（`IM_FAC_TICKET_REPO` 空或 token 缺）⇒ operator 工具不註冊**——root W1 要求票先出 LAN，而且 stdout 之外這是直接 LAN 寫入唯一的公司側紀錄。
 
 ### D-g ─ 票是 GitHub issue，用最小 scope 的 fine-grained token，只在 sidecar
 
