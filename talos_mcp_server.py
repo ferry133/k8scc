@@ -391,12 +391,15 @@ def _own_node_cooldown_refusal(node: str) -> str:
     return ""
 
 
+_AUDIT_OUT = None   # the real stdout; __main__ points sys.stdout at stderr
+
+
 def _audit(**fields: object) -> None:
     """One JSON line per reboot_node call to stdout — `kubectl logs -c talos-mcp`
     is the only record of the direct-LAN path, which Omni never sees."""
     line = {"ts": _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds"), "tool": "reboot_node", "user": USER_ID}
     line.update(fields)
-    print(json.dumps(line, ensure_ascii=False), flush=True)
+    print(json.dumps(line, ensure_ascii=False), file=_AUDIT_OUT or sys.stdout, flush=True)
 
 
 def _refuse(node: str, reason: str, **extra: object) -> str:
@@ -552,6 +555,11 @@ def _startup_readings() -> list[str]:
 
 
 if __name__ == "__main__":
+    # stdout is the audit stream and nothing else: keep it for _audit, and give
+    # everyone else — uvicorn's access log is a StreamHandler on
+    # ext://sys.stdout — stderr instead (k8scc#46, the same swap as netdev-mcp).
+    _AUDIT_OUT = sys.stdout
+    sys.stdout = sys.stderr
     for reading in _startup_readings():
         print(f"talos-mcp: {reading}", file=sys.stderr, flush=True)
     app.run(transport="sse")
