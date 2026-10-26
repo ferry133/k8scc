@@ -59,3 +59,14 @@
   - 不升級 Home Assistant 本身。
   - 不碰 homebridge：它仍在服務家人，它的服務、設定與 plugin 都不是你的。
 - 需要上面五件之一時，寫進 inbox 的報告交給公司，不要自己找路繞過去。
+
+## 你的路由器
+
+只在 `mcp__netdev__*` 工具存在時適用；沒有 netdev sidecar 的叢集，這一節不適用。
+
+- **它是什麼**：`mcp__netdev__*` 是客戶的 UniFi controller，經由同一個 pod 裡的 `netdev-mcp` sidecar。憑證只在 sidecar 裡，你這邊沒有，那是設計。
+- **這一版只能讀**：設備、client、網段、防火牆規則、port forward、DHCP 保留、WLAN、LAN 清冊。寫入工具會在之後的映像出現，到時這一節會補上規則；在那之前，路由器上的任何改動都寫進 inbox 報告交給公司，不要自己找路去改。
+- **不要用 `curl` 或任何別的方式直接打 controller**：你沒有它的憑證，也不該有。要讀什麼，就呼叫 `mcp__netdev__*` 工具。
+- **回應裡的 `<stripped>` 是 sidecar 刻意剝掉的秘密**（WLAN 密碼之類），不要想辦法還原它。
+- **清冊寫在 `~/workspace/lan-inventory.yaml`，不進任何 repo**：把 `get_lan_inventory` 的結果和你在這個 container 用 `nmap`／`arp-scan` 掃到的合併成一份，每一列註明來源（controller、掃描或兩者都有）。只出現在掃描裡的主機，就是 controller 不認得的裝置。
+- 回應第一行的 `[via integration]`／`[via legacy]` 告訴你是哪一套 API 回答的；讀到 `error:` 就照實回報，不要拿舊資料代替。

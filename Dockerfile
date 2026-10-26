@@ -292,6 +292,9 @@ RUN curl -fsSL https://claude.ai/install.sh | bash -s -- "${CLAUDE_CODE_VERSION}
 USER root
 COPY memory_mcp_server.py /usr/local/bin/memory_mcp_server.py
 COPY talos_mcp_server.py /usr/local/bin/talos_mcp_server.py
+# The netdev-mcp sidecar's server (UniFi; openspec im-netdev-mcp). Its HTTP
+# client is httpx, which mcp==1.29.0 already requires -- no new package.
+COPY netdev_mcp_server.py /usr/local/bin/netdev_mcp_server.py
 COPY auth0_login.py /usr/local/bin/auth0_login.py
 COPY claude-session /usr/local/bin/claude-session
 # im's managed policy (root 7.3b, 2026-10-15): Claude Code loads
@@ -301,6 +304,7 @@ COPY claude-session /usr/local/bin/claude-session
 COPY im-policy.md /etc/claude-code/CLAUDE.md
 RUN chmod +x /usr/local/bin/memory_mcp_server.py \
              /usr/local/bin/talos_mcp_server.py \
+             /usr/local/bin/netdev_mcp_server.py \
              /usr/local/bin/auth0_login.py \
              /usr/local/bin/claude-session
 

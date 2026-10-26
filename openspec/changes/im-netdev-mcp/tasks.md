@@ -5,32 +5,32 @@
 
 ## 1. Spikes（結果會改 design）
 
-- [ ] 1.1 `httpx` 在 `mcp` 釘版的依賴樹裡嗎（映像內 `python3 -c 'import httpx; print(httpx.__version__)'`）；不在 ⇒ 照 `mcp` 的釘法加進 base 層，design D-a 改。
+- [x] 1.1 `httpx` 在 `mcp` 釘版的依賴樹裡嗎（映像內 `python3 -c 'import httpx; print(httpx.__version__)'`）；不在 ⇒ 照 `mcp` 的釘法加進 base 層，design D-a 改。**讀數（2026-10-26）**：`pip show mcp`（1.29.0）的 `Requires` 有 `httpx`，裝出來是 0.28.1——依賴宣告與平台無關；在 darwin 的 venv 量，不是映像內，映像內那一句留給 image build 後。D-a 不改。
 - [ ] 1.2 消費 root spike 1.1 的讀數（FAC1 UniFi 的 API 面：哪些 collection 走 Integration、哪些只有 legacy；PUT 整物件或 PATCH；登入流程的 header／cookie 名；`set_dns_forward` 有沒有 API）→ 填 `ROUTES` 表與 fixture；錄一份去值的 legacy 登入 request／response 當 fixture 依據。**root 1.1 沒量之前，這裡只能寫 Integration 半邊與假 controller。**
 - [ ] 1.3 消費 root spike 1.5（fine-grained token 的最小 scope）→ design D-g 寫明 scope；本地用假 FAC 先做。
 
 ## 2. server
 
-- [ ] 2.1 `netdev_mcp_server.py` 骨架：設定讀取、三種啟動狀態、`_startup_readings`、TLS 規則（D-b）、`Controller` 與兩個 backend、`ROUTES`。
-- [ ] 2.2 reader 10 支＋`_strip`（D-c）＋ session 快取（D-d）＋路徑標記。
-- [ ] 2.3 class A 的四個純函式（D-e）＋ fixture（group／位址／子網三種寫法、正負對照）。
+- [x] 2.1 `netdev_mcp_server.py` 骨架：設定讀取、三種啟動狀態、`_startup_readings`、TLS 規則（D-b）、`Controller` 與兩個 backend、`ROUTES`。（reader-only 版：operator／通道不讀，啟動狀態兩種；`ROUTES` 值是暫定，等 1.2。）
+- [x] 2.2 reader 10 支＋`_strip`（D-c）＋ session 快取（D-d）＋路徑標記。
+- [x] 2.3 class A 的四個純函式（D-e）＋ fixture（group／位址／子網三種寫法、正負對照）。
 - [ ] 2.4 operator 工具（proposal 的清單；`set_dns_forward` 依 1.2 決定出不出）：型別化參數、伺服器組 body、reason／快取／token／冷卻／計數五道。
 - [ ] 2.5 向內 dead-man：探針（D-f）、票與 ack（D-g）、快照、健檢、回滾、release 三值、`revert-failed` 的 inbox 指令。
 - [ ] 2.6 稽核行（spec 的欄位）＋ stdout 除此之外不印任何東西（FastMCP 的 log 導到 stderr——talos 已這樣做，照抄）。
 
 ## 3. 測試
 
-- [ ] 3.1 假 controller、假 FAC、三個探針 listener、`kubectl` shim（D-i）；fixture 目錄含帶 `x_passphrase` 的 WLAN、帶 group 的 firewall rule、gateway／AP／交換器各一。
+- [ ] 3.1 假 controller、假 FAC、三個探針 listener、`kubectl` shim（D-i）；fixture 目錄含帶 `x_passphrase` 的 WLAN、帶 group 的 firewall rule、gateway／AP／交換器各一。（reader-only 版做了：假 controller、fixture；假 FAC、探針、kubectl shim 屬寫入那張。）
 - [ ] 3.2 spec 每一個 scenario 一格，各帶正／負對照；`will_change.after` 與假 controller 收到的 body 逐欄位比。
 - [ ] 3.3 四個刻意變異（不拍快照、token 不消耗、class A 網路放行、探針全掉不回滾）各讓對應測試紅一次，寫進 PR。
-- [ ] 3.4 `test/claude-session-controls.sh`：`NETDEV_MCP_URL` 未設／空 ⇒ 靜默；設 ⇒ `netdev` 註冊、`allow` 有 `mcp__netdev`；第二次零 diff。`test/im-policy-controls.sh`：新節各句 `check`、「直接 curl controller」「略過 will_change」`check_not`。
+- [ ] 3.4 `test/claude-session-controls.sh`：`NETDEV_MCP_URL` 未設／空 ⇒ 靜默；設 ⇒ `netdev` 註冊、`allow` 有 `mcp__netdev`；第二次零 diff。`test/im-policy-controls.sh`：新節各句 `check`、「直接 curl controller」「略過 will_change」`check_not`。（reader-only 版做了：claude-session 的格，與 policy 新節各句＋「直接 curl controller」；「略過 will_change」等寫入規則進 policy 時加。）
 
 ## 4. claude-session、policy、文件
 
-- [ ] 4.1 `claude-session`：`NETDEV_MCP_URL` 門（照 talos 那段，空＝未設）。
-- [ ] 4.2 `im-policy.md`「你的路由器」一節（內容見 proposal）。
-- [ ] 4.3 `CLAUDE.md`：新節「Netdev MCP Sidecar」（三種啟動狀態、七道閘門、向內 dead-man、class A、票、稽核、D-b 的 TLS 規則、D-h 的記憶體冷卻）、Runtime Configuration 表全部 env。
-- [ ] 4.4 `Dockerfile`：COPY 新 server（＋1.1 決定的 `httpx` 釘版，若需要）。
+- [x] 4.1 `claude-session`：`NETDEV_MCP_URL` 門（照 talos 那段，空＝未設）。
+- [ ] 4.2 `im-policy.md`「你的路由器」一節（內容見 proposal）。（reader-only 版寫了讀與清冊的部分；寫入規則等寫入工具。）
+- [ ] 4.3 `CLAUDE.md`：新節「Netdev MCP Sidecar」（三種啟動狀態、七道閘門、向內 dead-man、class A、票、稽核、D-b 的 TLS 規則、D-h 的記憶體冷卻）、Runtime Configuration 表全部 env。（reader-only 版寫了讀的那半與它的 env；閘門、dead-man、票、稽核等寫入那張。）
+- [x] 4.4 `Dockerfile`：COPY 新 server（＋1.1 決定的 `httpx` 釘版，若需要）。
 
 ## 5. 契約與收尾
 

@@ -1,0 +1,40 @@
+{
+  "_comment": "Hand-written, not recorded from a real console: root spike 1.1 has not read FAC1 yet. Field names follow UniFi Network's Integration API (camelCase, paged) and legacy API (snake_case, meta.rc) as documented, not as measured.",
+  "info": {"applicationVersion": "9.4.19"},
+  "sites": [{"id": "site-uuid-1", "internalReference": "default", "name": "Default"}],
+  "devices": [
+    {"id": "dev-gw", "name": "gateway", "model": "UDM-Pro", "macAddress": "aa:aa:aa:00:00:01", "ipAddress": "10.9.9.1", "state": "ONLINE"},
+    {"id": "dev-sw", "name": "core switch", "model": "USW-24", "macAddress": "aa:aa:aa:00:00:02", "ipAddress": "10.9.9.2", "state": "ONLINE"},
+    {"id": "dev-ap", "name": "office ap", "model": "U6-Lite", "macAddress": "aa:aa:aa:00:00:03", "ipAddress": "10.9.9.3", "state": "ONLINE"}
+  ],
+  "clients": [
+    {"id": "cl-node", "name": "jcc2-node", "type": "WIRED", "macAddress": "bb:bb:bb:00:00:62", "ipAddress": "10.9.9.62", "uplinkDeviceId": "dev-sw"},
+    {"id": "cl-phone", "name": "phone", "type": "WIRELESS", "macAddress": "bb:bb:bb:00:01:20", "ipAddress": "10.9.9.120", "uplinkDeviceId": "dev-ap"},
+    {"id": "cl-tv", "name": "tv", "type": "WIRED", "macAddress": "bb:bb:bb:00:01:30", "ipAddress": "10.9.9.130", "uplinkDeviceId": "dev-sw"}
+  ],
+  "networks": [
+    {"_id": "net-lan", "name": "LAN", "purpose": "corporate", "ip_subnet": "10.9.9.1/24"},
+    {"_id": "net-iot", "name": "IoT", "purpose": "corporate", "ip_subnet": "10.9.8.1/24"}
+  ],
+  "firewallgroups": [
+    {"_id": "grp-ctrl", "name": "controller", "group_type": "address-group", "group_members": ["10.9.9.1", "10.9.9.200-10.9.9.210"]},
+    {"_id": "grp-iot", "name": "iot", "group_type": "address-group", "group_members": ["10.9.8.0/24"]},
+    {"_id": "grp-ports", "name": "web", "group_type": "port-group", "group_members": ["443"]}
+  ],
+  "firewallrules": [
+    {"_id": "rule-ctrl", "name": "drop to controller", "action": "drop", "src_address": "", "src_firewallgroup_ids": [], "dst_address": "", "dst_firewallgroup_ids": ["grp-ctrl", "grp-ports"]},
+    {"_id": "rule-iot", "name": "iot to iot", "action": "accept", "src_address": "", "src_firewallgroup_ids": ["grp-iot"], "dst_address": "", "dst_firewallgroup_ids": ["grp-iot"]},
+    {"_id": "rule-net", "name": "lan to tv", "action": "accept", "src_networkconf_id": "net-lan", "dst_address": "10.9.9.150", "dst_firewallgroup_ids": []}
+  ],
+  "portforwards": [
+    {"_id": "pf-1", "name": "ha", "proto": "tcp", "dst_port": "8443", "fwd": "10.9.9.130", "fwd_port": "8123", "enabled": true}
+  ],
+  "users": [
+    {"_id": "u-phone", "mac": "bb:bb:bb:00:01:20", "name": "phone", "use_fixedip": true, "fixed_ip": "10.9.9.120"},
+    {"_id": "u-tv", "mac": "bb:bb:bb:00:01:30", "name": "tv", "use_fixedip": false}
+  ],
+  "wlans": [
+    {"_id": "wlan-1", "name": "home", "security": "wpapsk", "x_passphrase": "correct-horse-PASS-1234",
+     "private_preshared_keys": [{"networkconf_id": "net-iot", "password": "ppsk-pw-9876"}], "radius_secret": "radius-s3cret-55"}
+  ]
+}
