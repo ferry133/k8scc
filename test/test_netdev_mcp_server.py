@@ -310,8 +310,24 @@ class Probe:
                 return
 
     def stop(self):
+        """Stop listening, and prove it. On Linux, close() on a socket that
+        another thread is blocked in accept() on does not stop it listening:
+        the kernel keeps the socket alive for the blocked call, so connects
+        still succeed (k8scc CI on 9da2a42: 11 cases that stop a probe failed
+        on ubuntu-latest and passed on macOS, where close() wakes accept()).
+        shutdown() first wakes the accept and stops the listen on both."""
         self.up = False
+        try:
+            self.sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass   # macOS: ENOTCONN on a listening socket; close() below suffices there
         self.sock.close()
+        host, port = self.addr.rsplit(":", 1)
+        try:
+            socket.create_connection((host, int(port)), timeout=0.5).close()
+        except OSError:
+            return
+        raise AssertionError(f"harness, not guard: probe {self.addr} still accepts connections after stop()")
 
 
 class Harness:
@@ -339,7 +355,8 @@ class Harness:
 
     def close(self):
         for p in self.probes:
-            p.stop()
+            if p.up:
+                p.stop()
         self.fake.close()
         self.fac.close()
         self.tmp.cleanup()
