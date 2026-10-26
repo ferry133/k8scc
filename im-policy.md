@@ -65,7 +65,14 @@
 只在 `mcp__netdev__*` 工具存在時適用；沒有 netdev sidecar 的叢集，這一節不適用。
 
 - **它是什麼**：`mcp__netdev__*` 是客戶的 UniFi controller，經由同一個 pod 裡的 `netdev-mcp` sidecar。憑證只在 sidecar 裡，你這邊沒有，那是設計。
-- **這一版只能讀**：設備、client、網段、防火牆規則、port forward、DHCP 保留、WLAN、LAN 清冊。寫入工具會在之後的映像出現，到時這一節會補上規則；在那之前，路由器上的任何改動都寫進 inbox 報告交給公司，不要自己找路去改。
+- **能讀的**：設備、client、網段、防火牆規則、port forward、DHCP 保留、WLAN、LAN 清冊。
+- **能寫的只有八支工具**（寫入工具只在 sidecar 的寫入設定齊全時存在）：DHCP 保留的設定／取消、client 的封鎖／解封、port forward 的新增或修改／刪除、重開一台 AP 或交換器、PoE port 斷電再送電。其他改動（VLAN、gateway、WLAN 密碼、WAN、防火牆、site 設定、帳號、DNS 轉發）沒有工具，寫進 inbox 報告交給公司，不要自己找路去改。
+- **寫入由你自己判斷，事後報告**：不需要等人點頭。每一次寫入結束後，不論結果是套用、還原還是中止，都在 `~/workspace/inbox/` 留一份有日期的報告，寫明物件、理由、結果和票號。
+- **先讀再寫**：sidecar 只接受本 session 讀過的物件。被拒時看到 `read it first`，就先呼叫訊息點名的讀取工具。
+- **`will_change` 是你自己的第二眼**：第一段回來後，逐欄對照 `will_change` 和你的 reason，對不上就不要帶 confirm 呼叫第二段。不要跳過 `will_change` 直接帶 confirm。
+- **被拒就照訊息處理，不要繞**：自身路徑（class A）、冷卻、每小時上限、基線不健康，這些拒絕都是 sidecar 的決定。不要換一個物件、工具或 MAC 去達成同一件事。
+- **收到 `result: revert-failed`，第一件事是照回應裡的 `inbox` 指令寫報告**，寫完才做別的事。`reverted` 也要寫進報告。
+- **重開設備和 PoE 斷電沒有還原**：健檢失敗時結果就是 `revert-failed`，所以只在確定需要時用。
 - **不要用 `curl` 或任何別的方式直接打 controller**：你沒有它的憑證，也不該有。要讀什麼，就呼叫 `mcp__netdev__*` 工具。
 - **回應裡的 `<stripped>` 是 sidecar 刻意剝掉的秘密**（WLAN 密碼之類），不要想辦法還原它。
 - **清冊寫在 `~/workspace/lan-inventory.yaml`，不進任何 repo**：把 `get_lan_inventory` 的結果和你在這個 container 用 `nmap`／`arp-scan` 掃到的合併成一份，每一列註明來源（controller、掃描或兩者都有）。只出現在掃描裡的主機，就是 controller 不認得的裝置。

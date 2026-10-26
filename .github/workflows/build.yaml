@@ -85,7 +85,9 @@ jobs:
 
       # netdev_mcp_server.py against a fake UniFi controller (an in-process
       # HTTP server answering from test/netdev-mcp-fixtures/ and recording each
-      # request), on the same mcp pin -- httpx comes with it. Reader-only release.
+      # request), a fake FAC (GitHub issues), three local probe listeners and a
+      # kubectl shim (test/netdev-mcp-shims, ahead on PATH), on the same mcp
+      # pin -- httpx comes with it.
       - name: Check the netdev-mcp server controls
         run: python3 test/test_netdev_mcp_server.py
 

@@ -1,0 +1,14 @@
+#!/bin/sh
+# Fake kubectl for test_netdev_mcp_server.py: the two reads the netdev
+# server makes. Behaviour comes from env the test sets per case.
+case "$*" in
+  "get --raw /readyz")
+    if [ "${NETDEV_SHIM_READYZ:-ok}" = ok ]; then echo ok; exit 0; fi
+    echo "readyz failed: ${NETDEV_SHIM_READYZ}" >&2; exit 1 ;;
+  "get endpoints kubernetes -n default -o json")
+    if [ -n "${NETDEV_SHIM_ENDPOINTS_FAIL:-}" ]; then echo "error: the server could not find the requested resource" >&2; exit 1; fi
+    printf '{"kind":"Endpoints","subsets":[{"addresses":[{"ip":"%s"}],"ports":[{"port":6443}]}]}\n' "${NETDEV_SHIM_APISERVER:-10.9.9.20}"
+    exit 0 ;;
+esac
+echo "netdev kubectl shim: unexpected argv: $*" >&2
+exit 2

@@ -151,8 +151,16 @@ ND_STATEMENTS=(
   '只在 `mcp__netdev__*` 工具存在時適用'
   '沒有 netdev sidecar 的叢集，這一節不適用'
   '憑證只在 sidecar 裡，你這邊沒有'
-  '這一版只能讀'
+  '能寫的只有八支工具'
   '不要自己找路去改'
+  '寫入由你自己判斷，事後報告'
+  '不論結果是套用、還原還是中止'
+  '先讀再寫'
+  '`will_change` 是你自己的第二眼'
+  '不要跳過 `will_change` 直接帶 confirm'
+  '被拒就照訊息處理，不要繞'
+  '收到 `result: revert-failed`，第一件事是照回應裡的 `inbox` 指令寫報告'
+  '重開設備和 PoE 斷電沒有還原'
   '不要用 `curl` 或任何別的方式直接打 controller'
   '不要想辦法還原它'
   '清冊寫在 `~/workspace/lan-inventory.yaml`，不進任何 repo'
@@ -179,6 +187,10 @@ done
 direct_curl() { grep -vF '不要' | grep -qE 'curl.{0,20}(controller|/proxy/network).{0,20}(確認|讀|看)'; }
 check_not "no wording that sends im to the controller directly" direct_curl < "$policy"
 check "control: the direct-controller grep can match" direct_curl <<<'用 curl 打 controller 確認'
+# the prohibition names will_change and confirm itself, so lines saying 不要 are left out
+skip_look() { grep -vF '不要' | grep -qE '(跳過|略過|不必看|不用看).{0,12}will_change'; }
+check_not "no wording that skips will_change"         skip_look < "$policy"
+check "control: the skip-will_change grep can match"  skip_look <<<'可以略過 will_change 直接 confirm'
 check_not "no wording that commits the inventory"     grep -qE 'lan-inventory.{0,30}(commit|推上|進 repo)' "$policy"
 
 echo "old premise absent"

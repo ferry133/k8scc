@@ -1,5 +1,6 @@
 {
   "_comment": "Hand-written, not recorded from a real console: root spike 1.1 has not read FAC1 yet. Field names follow UniFi Network's Integration API (camelCase, paged) and legacy API (snake_case, meta.rc) as documented, not as measured.",
+  "_comment_x_note": "u-tv.x_note is invented: no write tool addresses a WLAN, so the secret that the write exits must strip and the snapshot must keep sits on a user row, under UniFi's x_ convention.",
   "info": {"applicationVersion": "9.4.19"},
   "sites": [{"id": "site-uuid-1", "internalReference": "default", "name": "Default"}],
   "devices": [
@@ -31,7 +32,7 @@
   ],
   "users": [
     {"_id": "u-phone", "mac": "bb:bb:bb:00:01:20", "name": "phone", "use_fixedip": true, "fixed_ip": "10.9.9.120"},
-    {"_id": "u-tv", "mac": "bb:bb:bb:00:01:30", "name": "tv", "use_fixedip": false}
+    {"_id": "u-tv", "mac": "bb:bb:bb:00:01:30", "name": "tv", "use_fixedip": false, "last_seen": 1761480000, "x_note": "tv-user-s3cret-31"}
   ],
   "wlans": [
     {"_id": "wlan-1", "name": "home", "security": "wpapsk", "x_passphrase": "correct-horse-PASS-1234",
