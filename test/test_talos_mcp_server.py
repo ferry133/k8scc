@@ -609,6 +609,20 @@ class RebootNode(unittest.TestCase):
             _, audit = self.h.call(m.get_node_status, NODE_A)
             self.assertEqual(audit, [])
 
+    def test_audit_reaches_the_real_stdout_after_main_swaps_it(self):
+        # __main__ keeps the real stdout in _AUDIT_OUT and points sys.stdout at
+        # stderr (k8scc#46); the audit line must follow _AUDIT_OUT, not sys.stdout.
+        m = self.h.load()
+        real, swapped = io.StringIO(), io.StringIO()
+        m._AUDIT_OUT = real
+        try:
+            with contextlib.redirect_stdout(swapped):
+                m.reboot_node(STRANGER, REASON)
+        finally:
+            m._AUDIT_OUT = None
+        self.assertEqual(json.loads(real.getvalue())["phase"], "refused")
+        self.assertEqual(swapped.getvalue(), "", "an audit line went to sys.stdout, i.e. stderr in production")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

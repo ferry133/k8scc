@@ -91,6 +91,12 @@ jobs:
       - name: Check the netdev-mcp server controls
         run: python3 test/test_netdev_mcp_server.py
 
+      # Both sidecars run as real processes and take one request: stdout must
+      # stay empty with the access line on stderr, and a positive control (the
+      # module's app run without __main__) must put that line on stdout.
+      - name: Check the sidecars' stdout carries audit lines only
+        run: python3 test/test_mcp_stdout.py
+
       # claude-session runs as shipped with HOME redirected and fake claude /
       # tmux binaries: the permission profile merge and the inbox notice.
       - name: Check the claude-session controls
