@@ -5,10 +5,12 @@
 #    for talos, merge the permission profile into settings.json
 # 3. Register Home Assistant's MCP server (if HA_MCP_URL and its token file are
 #    both here) and allow the whole `ha` server
-# 4. Configure im's apps repo (if IM_APPS_REPO and its write key are both here):
+# 4. Register the netdev-mcp sidecar (if NETDEV_MCP_URL) and allow the whole
+#    `netdev` server
+# 5. Configure im's apps repo (if IM_APPS_REPO and its write key are both here):
 #    ssh alias + git identity, and git/sops into the permission profile
-# 5. Announce ~/workspace/inbox/ if it holds anything unread
-# 6. exec tmux → claude
+# 6. Announce ~/workspace/inbox/ if it holds anything unread
+# 7. exec tmux → claude
 # CLAUDE_USER_ID is set by the pod environment (oauth2-proxy handles auth externally)
 
 # HOME is /home/claude in the image (Dockerfile pins it); the fallback only
@@ -87,6 +89,7 @@ TALOS_ALLOW=(mcp__talos__get_node_status mcp__talos__get_etcd_members
 TALOS_UNASK=(mcp__talos__reboot_node)   # where this profile put it before 2026-10-15
 APPS_ALLOW=('Bash(git *)' 'Bash(sops *)')
 HA_ALLOW=(mcp__ha)   # server-level: HA's tool names follow its expose settings
+NETDEV_ALLOW=(mcp__netdev)   # server-level: the write tools arrive in a later image, under the same rule
 
 # configure_ha_mcp: register Home Assistant's MCP server as `ha` (openspec
 # im-ha-mcp). Both inputs must be here -- HA_MCP_URL non-empty and the token
@@ -316,6 +319,23 @@ fi
 if configure_ha_mcp; then
     if ! merge_permissions "${CLAUDE_HOME}/.claude/settings.json" "${HA_ALLOW[@]}"; then
         echo "⚠ settings.json 的 mcp__ha permission 設定沒有寫入（見上一行）——HA 的工具每次都會問" >&2
+    fi
+fi
+
+# The netdev-mcp sidecar (UniFi; openspec im-netdev-mcp), the same shape as
+# talos: a remote SSE server in its own container, so its UniFi credentials
+# never touch this shell. No header -- same pod, loopback. NETDEV_MCP_URL is
+# set by the HelmRelease only when the sidecar exists (jg-base#222); empty is
+# the same as unset, and then nothing is registered or written.
+if [ -n "${NETDEV_MCP_URL:-}" ]; then
+    if ! claude mcp get netdev >/dev/null 2>&1; then
+        if ! claude mcp add --transport sse --scope local netdev "${NETDEV_MCP_URL}" \
+            >>"${CLAUDE_HOME}/.claude/mcp-add.log" 2>&1; then
+            echo "⚠ claude mcp add netdev 失敗——見 ~/.claude/mcp-add.log" >&2
+        fi
+    fi
+    if ! merge_permissions "${CLAUDE_HOME}/.claude/settings.json" "${NETDEV_ALLOW[@]}"; then
+        echo "⚠ settings.json 的 mcp__netdev permission 設定沒有寫入（見上一行）——UniFi 的工具每次都會問" >&2
     fi
 fi
 

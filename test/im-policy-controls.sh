@@ -145,6 +145,42 @@ check_not "no wording that re-pairs for the family"   grep -qE '替家人重新�
 check_not "no wording that turns homebridge off"      grep -qE '(關掉|停用|關閉|停止) ?homebridge' "$policy"
 check "control: the homebridge grep can match"        grep -qE '(關掉|停用|關閉|停止) ?homebridge' <<<'請停用 homebridge'
 
+echo "router section"
+nd_section() { awk '/^## /{on = ($0 == "## 你的路由器")} on' "$1"; }
+ND_STATEMENTS=(
+  '只在 `mcp__netdev__*` 工具存在時適用'
+  '沒有 netdev sidecar 的叢集，這一節不適用'
+  '憑證只在 sidecar 裡，你這邊沒有'
+  '這一版只能讀'
+  '不要自己找路去改'
+  '不要用 `curl` 或任何別的方式直接打 controller'
+  '不要想辦法還原它'
+  '清冊寫在 `~/workspace/lan-inventory.yaml`，不進任何 repo'
+  '每一列註明來源'
+  '讀到 `error:` 就照實回報，不要拿舊資料代替'
+)
+nd_checks() { # nd_checks <file> -> 0 when every statement is there
+  local pat
+  for pat in "${ND_STATEMENTS[@]}"; do grep -qF -- "$pat" "$1" || return 1; done
+}
+nd=$(mktemp); nond=$(mktemp); nddrop=$(mktemp)
+trap 'rm -f "$apps" "$noapps" "$kust_only" "$swapped" "$no_wait" "$late_wait" "$ha" "$noha" "$drop" "$nd" "$nond" "$nddrop"' EXIT
+nd_section "$policy" > "$nd"
+check "section carries every statement"               nd_checks "$nd"
+awk '/^## /{on = ($0 != "## 你的路由器")} NR==1 || on' "$policy" > "$nond"
+check_not "control: policy without the section fails" nd_checks "$nond"
+check "control: the stripped copy kept the rest"      grep -q '## 你的家庭自動化' "$nond"
+for pat in "${ND_STATEMENTS[@]}"; do
+  grep -vF -- "$pat" "$nd" > "$nddrop"
+  check_not "control: without '$pat' fails" nd_checks "$nddrop"
+  check "control: dropping '$pat' removed one line"   [ "$(( $(wc -l < "$nd") - $(wc -l < "$nddrop") ))" -eq 1 ]
+done
+# the prohibition itself names curl and the controller, so lines saying 不要 are left out
+direct_curl() { grep -vF '不要' | grep -qE 'curl.{0,20}(controller|/proxy/network).{0,20}(確認|讀|看)'; }
+check_not "no wording that sends im to the controller directly" direct_curl < "$policy"
+check "control: the direct-controller grep can match" direct_curl <<<'用 curl 打 controller 確認'
+check_not "no wording that commits the inventory"     grep -qE 'lan-inventory.{0,30}(commit|推上|進 repo)' "$policy"
+
 echo "old premise absent"
 check_not "no customer-approval premise"              grep -qiE 'approval from the customer|person at the terminal|客戶.{0,6}(按|批准)' "$policy"
 check_not "no permissions.ask wording"                grep -q 'permissions.ask' "$policy"

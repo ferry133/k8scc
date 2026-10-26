@@ -83,6 +83,12 @@ jobs:
           python3 -m pip install --quiet "$pin"
           python3 test/test_talos_mcp_server.py
 
+      # netdev_mcp_server.py against a fake UniFi controller (an in-process
+      # HTTP server answering from test/netdev-mcp-fixtures/ and recording each
+      # request), on the same mcp pin -- httpx comes with it. Reader-only release.
+      - name: Check the netdev-mcp server controls
+        run: python3 test/test_netdev_mcp_server.py
+
       # claude-session runs as shipped with HOME redirected and fake claude /
       # tmux binaries: the permission profile merge and the inbox notice.
       - name: Check the claude-session controls
