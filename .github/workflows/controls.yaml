@@ -1,0 +1,45 @@
+---
+# The controls alone, on every pull request: no build, no push, no registry
+# login. build.yaml runs the same controls, but only on push to main, so until
+# this file existed the only Linux run of a PR's tests came AFTER its merge.
+# That is how k8scc#45 merged green on macOS and went red on ubuntu-latest:
+# Probe.stop() relied on close() waking a blocked accept(), which Linux does
+# not do.
+#
+# Keep the steps in step with build.yaml's "Check the …" steps. A control
+# added there and not here is checked only after merge again.
+name: Controls
+
+on:
+  pull_request:
+
+jobs:
+  controls:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check the version-assertion controls
+        run: test/assert-controls.sh
+      - name: Check the ops-image probe controls
+        run: test/assert-ops-controls.sh
+      - name: Check the bump-explanation controls
+        run: python3 test/test_bump_explain.py
+      - name: Check the bump-order controls
+        run: python3 test/test_bump_order.py
+      - name: Install the Dockerfile's mcp pin
+        run: |
+          pin=$(grep -o '"mcp==[0-9.]*"' Dockerfile | tr -d '"')
+          test -n "$pin" || { echo "no mcp pin found in Dockerfile"; exit 1; }
+          python3 -m pip install --quiet "$pin"
+      - name: Check the talos-mcp server controls
+        run: python3 test/test_talos_mcp_server.py
+      - name: Check the netdev-mcp server controls
+        run: python3 test/test_netdev_mcp_server.py
+      - name: Check the claude-session controls
+        run: test/claude-session-controls.sh
+      - name: Check the im policy controls
+        run: test/im-policy-controls.sh
+      - name: Check the entrypoint secret-service controls
+        run: test/entrypoint-controls.sh
