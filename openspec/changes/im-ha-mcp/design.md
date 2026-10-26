@@ -10,7 +10,7 @@ Root 的設計在 `fleet-ops/openspec/changes/im-home-automation/design.md`（D1
 
 **spike 1.1 讀數**（2026-10-26 07:30，Claude Code `2.1.261` 的 darwin-x64 建置——與映像同版號、不同平台；映像內的 linux 建置沒有量）：
 - 寫到 `$CLAUDE_CONFIG_DIR/.claude.json`（有設時；jg-base 設 `/home/claude/.claude`），否則 `$HOME/.claude.json`；檔案 mode `0600`。
-- 結構：`projects[<cwd 的 realpath>].mcpServers.ha = {"type": "sse", "url": <url>, "headers": {"Authorization": "Bearer <token>"}}`；從 symlink 進去的 cwd 一樣找得到（鍵是 realpath）。
+- 結構：`projects[<cwd 的 realpath>].mcpServers.ha = {"type": "sse", "url": <url>, "headers": {"Authorization": "Bearer <token>"}}`（`--transport http` 寫出同形、`type` 是 `"http"`：2.1.310 量，釘版未量）；從 symlink 進去的 cwd 一樣找得到（鍵是 realpath）。
 - python 只寫 `{"projects": {<cwd>: {"mcpServers": {"ha": …}}}}` 的新檔，`claude mcp get ha` 讀得到、印出 type／url／headers；claude 自己隨後補上其他頂層鍵。
 - ⚠️ **`claude mcp get ha` 把 header 全文印到 stdout**——`claude-session` 從不顯示它的輸出（本實作根本不為 ha 呼叫 `claude`）。它對連不上的已註冊 server 回 0、對未註冊回 1，所以不是健康讀數。
 - `mcp__ha` 規則：`claude doctor` 對故意寫壞的 `Bash(unclosed` 報「Invalid permission rule … was skipped」，對 `mcp__ha` 不報——有正對照的「語法被接受」。「真的免問」要 HA 在，量不到，留 §4.2。
@@ -41,3 +41,7 @@ HA 拿掉（URL 變空）之後，`.claude.json` 的 `ha` 項與 `allow` 的 `mc
 - [`mcp__ha` 語法不被 `2.1.261` 接受] → spike 1.1 第二格：寫進 `allow` 後以 `claude --print` 呼叫一個 HA 工具不被問（要 root spike 1.1 的 HA 在才量得到；量不到就退回逐支列舉＋每次 session 從 server 讀工具清單重寫——多一個機制，所以先量）。
 - [token 檔可讀但內容多一個換行] → `read -r`／python `.strip()`；controls 一格「尾隨換行的 token 檔」。
 - [`.claude.json` 被 `claude` 自己同時改] → 只在 session 起來、`claude` 還沒跑時寫，與 `claude mcp add` 的時點相同。
+
+### D-g ─ 傳輸是 streamable HTTP（2026-10-26 改）
+
+第一版寫 `type: sse`，那時 HA 的端點還沒量。fleet-ops-65 在 jg-jcc2 的 HA 2026.10.4 上量（先設好 `mcp_server` 整合；設之前四個探測全是 404）：`POST /api/mcp` initialize ⇒ 200 `application/json`、`GET /api/mcp` ⇒ 405、不帶 token ⇒ 401；舊的 `GET /mcp_server/sse` ⇒ 200 `text/event-stream`。im 拿到的 URL 是 tenant 公開 HTTPRoute 上的 `/api/mcp`（jgct#245 root 裁定 (A)），所以 `type` 是 `http`。已用 `sse` 寫過的 pod：那一項與要寫的不同，下一次 session 覆寫一次（與換 token 同一條路），不需要遷移步驟。

@@ -151,7 +151,10 @@ servers = project.setdefault("mcpServers", {}) if isinstance(project, dict) else
 if not isinstance(servers, dict):
     refuse(f"{show(cfg)} 的 projects／mcpServers 形狀不對，沒有改它")
 
-want = {"type": "sse", "url": url, "headers": {"Authorization": f"Bearer {token}"}}
+# "http" (streamable HTTP): HA's /api/mcp, measured by fleet-ops-65 on
+# jg-jcc2's HA 2026.10.4 (2026-10-26). "sse" is only for the legacy
+# /mcp_server/sse. A pod that ran the sse image is rewritten once, as a rotation.
+want = {"type": "http", "url": url, "headers": {"Authorization": f"Bearer {token}"}}
 if servers.get("ha") == want:
     sys.exit(0)
 servers["ha"] = want

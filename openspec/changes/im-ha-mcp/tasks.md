@@ -5,7 +5,7 @@
 ## 1. Spikes
 
 - [x] 1.1 （2026-10-26 量，讀數在 design D-a；darwin-x64 建置，linux 映像內未量）在乾淨 `HOME` 用映像裡的 Claude Code `2.1.261` 跑 `claude mcp add --transport sse ha http://127.0.0.1:1 --header 'Authorization: Bearer dummy'`，記下 `.claude.json` 寫出的結構（鍵名、`type`、`headers` 形狀）；再把 `mcp__ha` 寫進 `permissions.allow`，確認語法被接受（`claude` 啟動不報 invalid rule）。結構抄進 design D-a。（量不到「server 層級規則真的免問」——那要 root spike 1.1 的 HA 在——就標量不到，留到 §4.2。）
-- [ ] 1.2 （2026-10-26 07:35：root spike 1.1 未量，fleet-ops `1390aa7`。本實作不依賴它；量到「沒有 MCP server」或「只有 streamable HTTP」時回來改 proposal／`type` 常數）root spike 1.1 的結果（HA 的 MCP server 存在與否、端點路徑、非 admin 的限制）——消費，不重量；沒有 MCP server ⇒ 本 sub-change 改成包一個薄的 `ha_mcp_server.py`（形狀照 `talos_mcp_server.py`），proposal 要改。
+- [x] 1.2 （2026-10-26 18:12 fleet-ops-65 在 jg-jcc2 量到：HA 2026.10.4 的 MCP server 存在（`mcp_server` 整合要先設），端點 `/api/mcp`、streamable HTTP ⇒ `type` 改 `http`，見 design D-g。）（2026-10-26 07:35：root spike 1.1 未量，fleet-ops `1390aa7`。本實作不依賴它；量到「沒有 MCP server」或「只有 streamable HTTP」時回來改 proposal／`type` 常數）root spike 1.1 的結果（HA 的 MCP server 存在與否、端點路徑、非 admin 的限制）——消費，不重量；沒有 MCP server ⇒ 本 sub-change 改成包一個薄的 `ha_mcp_server.py`（形狀照 `talos_mcp_server.py`），proposal 要改。
 
 ## 2. claude-session
 

@@ -14,7 +14,7 @@
 
 #### Scenario: Both present registers once
 - **WHEN** `HA_MCP_URL` is non-empty and the token file is non-empty
-- **THEN** `.claude.json` carries, under the current directory's project, an `ha` entry of type `sse` at that URL with the bearer header (the shape `claude mcp add --scope local` writes on 2.1.261), and a second run of `claude-session` leaves `.claude.json` byte-identical and not rewritten
+- **THEN** `.claude.json` carries, under the current directory's project, an `ha` entry of type `http` at that URL with the bearer header (the shape `claude mcp add --scope local` writes; `--transport sse` measured on 2.1.261, `--transport http` on 2.1.310), and a second run of `claude-session` leaves `.claude.json` byte-identical and not rewritten
 
 ### Requirement: The token enters only through the file and leaves no trace in argv, env or output
 
