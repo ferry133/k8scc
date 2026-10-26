@@ -33,6 +33,7 @@ import socketserver
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
@@ -87,6 +88,7 @@ class FakeController:
         self.on_write = None    # called after each accepted write: the test's "and then…"
         self.dead = False       # every request answers 503 from now on
         self.next_id = 0
+        self.swallow = set()    # methods answered "ok" but not stored (an accepted write that did not take)
         fake = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -188,6 +190,8 @@ class FakeController:
         if not name:
             return 404, {"error": f"no such path {path}"}
         items = self.data[name]
+        if method in self.swallow:
+            return ok([{**(body or {}), "_id": "ghost"}] if method == "POST" else [body])
         if method == "POST" and len(rest) == 1:
             self.next_id += 1
             obj = {**body, "_id": f"new-{self.next_id}"}
@@ -1074,6 +1078,81 @@ class DeadMan(WriteCase):
         self.assertTrue(self.last_comment().startswith("netdev-mcp revert-failed"))
         self.assertIn(res["snapshot_digest"], res["inbox"])
         self.assertIn("~/workspace/inbox/", res["inbox"])
+
+    def test_unused_token_ticket_closes_at_its_own_expiry(self):
+        self.m.TOKEN_TTL, self.m.EXPIRY_GRACE = 0.2, 0.05
+        self.read("get_clients")
+        self.token("block_client")
+        self.assertEqual(self.h.fac.issues[1]["state"], "open")
+        deadline = time.monotonic() + 3
+        while self.h.fac.issues[1]["state"] == "open" and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertEqual(self.h.fac.issues[1]["state"], "closed", "no further call was made, and it still closed")
+        self.assertIn("result: not-executed", self.last_comment())
+        self.assertEqual(self.h.fake.mutations(), [])
+        with self.subTest(control="a used token's timer closes nothing a second time"):
+            self.m.TOKEN_TTL = 0.2
+            self.read("get_dhcp_reservations")
+            self.write("set_dhcp_reservation")
+            time.sleep(0.4)
+            self.assertEqual(sum("not-executed" in c for c in self.h.fac.posted(2)), 0)
+
+    def test_delete_revert_reads_back(self):
+        def hook(m, path, body):
+            if m == "DELETE":
+                self.h.probes[0].stop()
+                self.h.probes[1].stop()
+                self.h.fake.swallow.add("POST")     # the re-create answers ok and stores nothing
+        self.h.fake.on_write = hook
+        self.read("get_port_forwards")
+        res = self.write("delete_port_forward")
+        self.assertEqual(res["result"], "revert-failed", res)
+        self.assertIn("does not hold it", res["revert"])
+        self.assertIn("inbox", res)
+        self.assertEqual(self.h.fake.data["portforwards"], [])
+
+    def test_delete_revert_that_takes_reads_reverted(self):
+        self.lose_two_probes_on("DELETE")
+        self.read("get_port_forwards")
+        res = self.write("delete_port_forward")
+        self.assertEqual(res["result"], "reverted", res)
+        self.assertEqual([pf["name"] for pf in self.h.fake.data["portforwards"]], ["ha"])
+
+    def test_revert_put_that_does_not_take_is_revert_failed(self):
+        def hook(m, path, body):
+            if m == "PUT":
+                self.h.probes[0].stop()
+                self.h.probes[1].stop()
+                self.h.fake.swallow.add("PUT")      # the revert PUT is accepted and changes nothing
+        self.h.fake.on_write = hook
+        self.read()
+        res = self.write("set_dhcp_reservation")
+        self.assertEqual(res["result"], "revert-failed", res)
+        self.assertIn("still differ from the snapshot", res["revert"])
+
+    def test_object_changed_since_the_token_aborts(self):
+        self.read()
+        tok = self.token("set_dhcp_reservation")["token"]
+        tv = next(u for u in self.h.fake.data["users"] if u["_id"] == "u-tv")
+        tv["use_fixedip"], tv["fixed_ip"] = True, "10.9.9.177"     # someone else, between the phases
+        res = self.confirm("set_dhcp_reservation", tok)
+        self.assertEqual(res["result"], "aborted", res)
+        self.assertIn("changed on the controller since the token", res["reason"])
+        self.assertEqual(self.h.fake.puts(), [])
+        with self.subTest(control="a create whose name appeared meanwhile aborts too"):
+            self.read("get_port_forwards")
+            tok = self.token("set_port_forward")["token"]
+            self.h.fake.data["portforwards"].append({"_id": "pf-x", "name": "nas"})
+            res = self.confirm("set_port_forward", tok)
+            self.assertEqual(res["result"], "aborted", res)
+            self.assertIn("appeared since the token", res["reason"])
+        with self.subTest(control="unchanged: the same write applies"):
+            self.h.fake.data["portforwards"].pop()
+            tv["use_fixedip"], tv["fixed_ip"] = False, None
+            del tv["fixed_ip"]
+            self.m._LAST_WRITE.clear()
+            self.read()
+            self.assertEqual(self.write("set_dhcp_reservation")["result"], "applied")
 
     def test_lines_match_phases_and_digests(self):
         self.lose_two_probes_on("PUT")

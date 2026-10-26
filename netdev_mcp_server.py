@@ -76,6 +76,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import dataclass, field
 from urllib.parse import urlsplit
@@ -111,6 +112,7 @@ KUBECTL = shutil.which("kubectl") or "/usr/local/bin/kubectl"
 
 CACHE_TTL = 600   # seconds a reader result can address a write (spec: session cache)
 TOKEN_TTL = 120
+EXPIRY_GRACE = 1   # seconds past TOKEN_TTL before an unused token's ticket is closed
 WRITE_COOLDOWN = 600
 
 # httpx logs every request at INFO; the startup readings and the tool
@@ -1137,7 +1139,9 @@ def _ticket_body(plan: Plan, change: dict, stated: str, deadline: float) -> str:
         "",
         f"FAC: comment `{PRE_ACK} <peer name [ref]>` once you can reach this cluster from outside, and "
         f"`{POST_ACK} <peer name [ref]>` after the change if you still can. Without a pre-ack within "
-        f"{int(WITNESS_WAIT)} s the write goes ahead unwitnessed.",
+        f"{int(WITNESS_WAIT)} s the write goes ahead unwitnessed. A token unused for {TOKEN_TTL} s closes this "
+        "ticket as `result: not-executed`; an open ticket past its deadline with no release comment means this "
+        "sidecar could not post one.",
     ])
 
 
@@ -1336,7 +1340,18 @@ def _revert(plan: Plan, snap: Snapshot, created_id: str) -> "tuple[bool, str]":
         if plan.kind == "delete":
             body = {k: v for k, v in snap.obj.items() if k != "_id"}
             data = OPERATOR.request("POST", _rest(plan), body)
-            return True, f"re-created {plan.obj_id} from the snapshot as {_obj_id(data[0]) if data else '(no _id returned)'}"
+            new_id = _obj_id(data[0]) if data else ""
+            # Read back like the other two paths: an accepted POST is not an
+            # object (fleet-ops-65 measured a re-create that answered ok and
+            # stored nothing reading as `reverted`, k8scc#45).
+            _, items = _controller().read(plan.collection)
+            now = next((o for o in items if new_id and _obj_id(o) == new_id), None)
+            if now is None:
+                return False, (f"re-create POST answered {new_id or '(no _id)'} but {plan.collection} does not "
+                               f"hold it; {plan.obj_id} is still gone")
+            moved = [k for k, v in body.items() if now.get(k) != v]
+            return (False, f"re-created {plan.obj_id} as {new_id}, but {', '.join(moved)} differ from the snapshot") \
+                if moved else (True, f"re-created {plan.obj_id} from the snapshot as {new_id}")
         if plan.inverse is None:
             return False, f"{plan.command['cmd']} cannot be undone; nothing was reverted"
         OPERATOR.request("POST", WRITES[plan.endpoint], plan.inverse)
@@ -1348,15 +1363,34 @@ def _revert(plan: Plan, snap: Snapshot, created_id: str) -> "tuple[bool, str]":
 # --- write side: the two phases -------------------------------------------------------------------
 
 _TOKENS: dict[str, dict] = {}         # token -> {tool, target, diff, expires, ticket, witness}
+_TOKENS_LOCK = threading.Lock()       # the expiry timers below run on their own threads
 _LAST_WRITE: dict[str, float] = {}    # target -> _now() at its last execute (in memory, like reboot_node's)
 _WRITE_TIMES: list[float] = []        # _now() of every execute, for the hourly ceiling
 
 
 def _prune_tokens(now: float, keep: "str | None" = None) -> None:
-    for token, entry in list(_TOKENS.items()):
-        if token != keep and now > entry["expires"]:
+    with _TOKENS_LOCK:
+        expired = [(t, e) for t, e in _TOKENS.items() if t != keep and now > e["expires"]]
+        for token, _ in expired:
             del _TOKENS[token]
-            _release(entry["ticket"], "not-executed", "ok", entry["witness"], ["the token expired unused"])
+    for _, entry in expired:
+        _release(entry["ticket"], "not-executed", "ok", entry["witness"], ["the token expired unused"])
+
+
+def _expire_later(token: str) -> None:
+    """Close an unused token's ticket at its own expiry, not at the next call:
+    FAC reads a deadline passing without a release as "escalate", and for a
+    write that never ran that would be a false page (fleet-ops-65, k8scc#45)."""
+    def fire():
+        with _TOKENS_LOCK:
+            entry = _TOKENS.get(token)
+            if entry is None or _now() <= entry["expires"]:
+                return
+            del _TOKENS[token]
+        _release(entry["ticket"], "not-executed", "ok", entry["witness"], ["the token expired unused"])
+    timer = threading.Timer(TOKEN_TTL + EXPIRY_GRACE, fire)
+    timer.daemon = True
+    timer.start()
 
 
 def _respond(body: dict) -> str:
@@ -1425,6 +1459,7 @@ def _write(tool: str, hint: str, reason: str, confirm: str, build) -> str:
         _TOKENS[token] = {"tool": tool, "target": target, "diff": diff_digest, "expires": now + TOKEN_TTL,
                           "ticket": number, "witness": witness}
         _audit(tool, target, "token", stated, diff_digest=diff_digest, outbound="ok", fac_witness=witness, ticket=number)
+        _expire_later(token)
         _prune_tokens(now, keep=token)
         return _respond({
             "token": token, "target": target, "expires_in": TOKEN_TTL, "cooldown_after": WRITE_COOLDOWN,
@@ -1439,23 +1474,23 @@ def _write(tool: str, hint: str, reason: str, confirm: str, build) -> str:
         })
 
     # ④ the token: known, this target, in time, this will_change — consumed before acting
-    entry = _TOKENS.get(confirm)
-    if entry is None:
-        _prune_tokens(now)
-        return refuse(f"unknown or already-used token — call {tool} again without confirm for a fresh one", target)
-    if entry["tool"] != tool or entry["target"] != target:
-        _prune_tokens(now, keep=confirm)
-        return refuse(f"token was issued for {entry['tool']} {entry['target']}, not {tool} {target}", target)
-    if now > entry["expires"]:
-        del _TOKENS[confirm]
-        _release(entry["ticket"], "not-executed", "ok", entry["witness"], ["the token expired unused"])
-        _prune_tokens(now)
-        return refuse(f"token expired ({TOKEN_TTL} s) — call {tool} again without confirm for a fresh one", target)
-    if entry["diff"] != diff_digest:
-        _prune_tokens(now, keep=confirm)
-        return refuse("will_change is no longer the one this token was issued for (the arguments or the cached "
-                      f"object changed) — call {tool} again without confirm", target, diff_digest=diff_digest)
-    del _TOKENS[confirm]
+    with _TOKENS_LOCK:
+        entry = _TOKENS.get(confirm)
+        why = ""
+        if entry is None:
+            why = f"unknown or already-used token — call {tool} again without confirm for a fresh one"
+        elif entry["tool"] != tool or entry["target"] != target:
+            why = f"token was issued for {entry['tool']} {entry['target']}, not {tool} {target}"
+        elif now > entry["expires"]:
+            why = f"token expired ({TOKEN_TTL} s) — call {tool} again without confirm for a fresh one"
+        elif entry["diff"] != diff_digest:
+            why = ("will_change is no longer the one this token was issued for (the arguments or the cached "
+                   f"object changed) — call {tool} again without confirm")
+        else:
+            del _TOKENS[confirm]   # consumed before anything is sent
+    if why:
+        _prune_tokens(now, keep=None if entry is None or now > entry["expires"] else confirm)
+        return refuse(why, target, **({"diff_digest": diff_digest} if "will_change" in why else {}))
     _prune_tokens(now)
     _LAST_WRITE[target] = now
     _WRITE_TIMES.append(now)
