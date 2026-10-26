@@ -10,7 +10,7 @@ Root 的設計在 `fleet-ops/openspec/changes/im-home-automation/design.md`（D1
 
 **spike 1.1 讀數**（2026-10-26 07:30，Claude Code `2.1.261` 的 darwin-x64 建置——與映像同版號、不同平台；映像內的 linux 建置沒有量）：
 - 寫到 `$CLAUDE_CONFIG_DIR/.claude.json`（有設時；jg-base 設 `/home/claude/.claude`），否則 `$HOME/.claude.json`；檔案 mode `0600`。
-- 結構：`projects[<cwd 的 realpath>].mcpServers.ha = {"type": "sse", "url": <url>, "headers": {"Authorization": "Bearer <token>"}}`（`--transport http` 寫出同形、`type` 是 `"http"`：2.1.310 量，釘版未量）；從 symlink 進去的 cwd 一樣找得到（鍵是 realpath）。
+- 結構：`projects[<cwd 的 realpath>].mcpServers.ha = {"type": "sse", "url": <url>, "headers": {"Authorization": "Bearer <token>"}}`（`--transport http` 寫出同形、`type` 是 `"http"`，`claude mcp get ha` 回 rc 0、`Type: http`：2.1.310 先量，2026-10-26 在釘版 2.1.261 的 darwin build 上又量了一次；映像裡的 linux build 沒量）；從 symlink 進去的 cwd 一樣找得到（鍵是 realpath）。
 - python 只寫 `{"projects": {<cwd>: {"mcpServers": {"ha": …}}}}` 的新檔，`claude mcp get ha` 讀得到、印出 type／url／headers；claude 自己隨後補上其他頂層鍵。
 - ⚠️ **`claude mcp get ha` 把 header 全文印到 stdout**——`claude-session` 從不顯示它的輸出（本實作根本不為 ha 呼叫 `claude`）。它對連不上的已註冊 server 回 0、對未註冊回 1，所以不是健康讀數。
 - `mcp__ha` 規則：`claude doctor` 對故意寫壞的 `Bash(unclosed` 報「Invalid permission rule … was skipped」，對 `mcp__ha` 不報——有正對照的「語法被接受」。「真的免問」要 HA 在，量不到，留 §4.2。

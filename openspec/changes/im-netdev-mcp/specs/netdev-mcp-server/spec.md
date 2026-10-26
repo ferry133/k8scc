@@ -2,7 +2,7 @@
 
 ### Requirement: Configuration comes from the environment and mounted files, and TLS is always verified
 
-The netdev MCP server SHALL read its configuration from `UNIFI_CONTROLLER_URL`, `UNIFI_SITE` (default `default`), `UNIFI_CA_FILE`, `UNIFI_READER_KEY_FILE`, `UNIFI_OPERATOR_FILE`, `POD_IP`, `NETDEV_SNAPSHOT_DIR`, `NETDEV_SNAPSHOT_KEEP` (default 50), `NETDEV_HEALTH_TIMEOUT` (default 120), `NETDEV_WRITES_PER_HOUR` (default 12), `NETDEV_OUTSIDE_PROBES` (three comma-separated probes), `NETDEV_WITNESS_WAIT` (default 120), `IM_FAC_TICKET_REPO`, `IM_FAC_TICKET_TOKEN_FILE`, `NETDEV_READ_TIMEOUT` (default 15) and `CLAUDE_USER_ID`. It SHALL listen on `127.0.0.1:8766` over SSE. It SHALL verify the controller's TLS certificate against `UNIFI_CA_FILE` and SHALL offer no option to disable verification; an `http://` controller URL SHALL be refused unless `NETDEV_ALLOW_INSECURE_HTTP=1`, in which case the startup readings SHALL say so. No credential value SHALL appear in any startup reading, tool response, audit line or process argument.
+The netdev MCP server SHALL read its configuration from `UNIFI_CONTROLLER_URL`, `UNIFI_SITE` (default `default`), `UNIFI_CA_FILE`, `UNIFI_READER_KEY_FILE`, `UNIFI_OPERATOR_FILE`, `POD_IP`, `NETDEV_SNAPSHOT_DIR`, `NETDEV_SNAPSHOT_KEEP` (default 50), `NETDEV_HEALTH_TIMEOUT` (default 120), `NETDEV_WRITES_PER_HOUR` (default 12), `NETDEV_OUTSIDE_PROBES` (three comma-separated probes), `NETDEV_WITNESS_WAIT` (default 120), `IM_FAC_TICKET_REPO`, `IM_FAC_TICKET_TOKEN_FILE`, `NETDEV_READ_TIMEOUT` (default 15), `CLAUDE_USER_ID`, `CLUSTER_NAME` (ticket title), and the tuning values `NETDEV_HEALTH_INTERVAL` (default 10), `NETDEV_WITNESS_POLL` (default 5), `NETDEV_PROBE_TIMEOUT` (default 5) and `IM_FAC_TICKET_API` (default `https://api.github.com`, held to the same https rule as the controller). It SHALL listen on `127.0.0.1:8766` over SSE. It SHALL verify the controller's TLS certificate against `UNIFI_CA_FILE` and SHALL offer no option to disable verification; an `http://` controller URL SHALL be refused unless `NETDEV_ALLOW_INSECURE_HTTP=1`, in which case the startup readings SHALL say so. No credential value SHALL appear in any startup reading, tool response, audit line or process argument.
 
 #### Scenario: Plain http refused without the test flag
 - **WHEN** `UNIFI_CONTROLLER_URL` is `http://…` and `NETDEV_ALLOW_INSECURE_HTTP` is unset
@@ -14,11 +14,11 @@ The netdev MCP server SHALL read its configuration from `UNIFI_CONTROLLER_URL`, 
 
 ### Requirement: Three startup states decide which tools exist
 
-With no usable reader credential every tool SHALL respond `not configured` naming the missing input. With a usable reader credential but an absent, empty or non-authenticating operator credential, or no ticket channel (`IM_FAC_TICKET_REPO` empty or its token file missing), the server SHALL register only the reader tools and SHALL name the reason in the startup readings. With all three usable the server SHALL also register the write tools. There SHALL be no state in which a write tool is registered but refuses every call for lack of configuration.
+With no usable reader credential every tool SHALL respond `not configured` naming the missing input. With a usable reader credential but an absent, empty or non-authenticating operator credential, no ticket channel (`IM_FAC_TICKET_REPO` empty or its token file missing), `NETDEV_OUTSIDE_PROBES` not exactly three, `POD_IP` unset, or `NETDEV_SNAPSHOT_DIR` unset or not writable, the server SHALL register only the reader tools and SHALL name the reason in the startup readings. With all of them usable the server SHALL also register the write tools. There SHALL be no state in which a write tool is registered but refuses every call for lack of configuration.
 
 #### Scenario: Reader-only for each missing input
 - **WHEN** the server starts three times — operator file absent, operator file present but the fake controller refuses its login, ticket repo unset
-- **THEN** each time the tool list contains the ten reader tools and no write tool, and the startup readings name which input was missing (positive control: all present ⇒ write tools listed)
+- **THEN** each time the tool list contains the ten reader tools and no write tool, and the startup readings name which input was missing (positive control: all present ⇒ write tools listed); the same holds for two probes, `POD_IP` unset and the snapshot directory unset
 
 ### Requirement: Reader tools strip secrets and name their path
 
@@ -26,7 +26,11 @@ With no usable reader credential every tool SHALL respond `not configured` namin
 
 #### Scenario: Passphrase stripped at every exit
 - **WHEN** `get_wlans` runs against a fixture containing `x_passphrase`
-- **THEN** the response contains `<stripped>` and zero occurrences of the passphrase value; the same holds for the `will_change` of a later write to that WLAN and for the ticket body, while the snapshot file contains the value once (positive control)
+- **THEN** the response contains `<stripped>` and zero occurrences of the passphrase value
+
+#### Scenario: Secret stripped at every write exit, kept by the snapshot
+- **WHEN** a confirmed write addresses an object carrying an `x_` field (no write tool addresses a WLAN, so the controls use a user row)
+- **THEN** the token response, the result, every audit line and the ticket contain zero occurrences of the value and the snapshot file contains it once (positive control), and the PUT body carries the original value, not `<stripped>`
 
 #### Scenario: Path marker present
 - **WHEN** any reader tool returns data from the fake controller
@@ -34,7 +38,7 @@ With no usable reader credential every tool SHALL respond `not configured` namin
 
 ### Requirement: Every write is typed, reasoned, addressed from the cache, tokened, cooled and rate-limited
 
-Each write tool SHALL take typed arguments and a non-blank `reason`, SHALL compose the request body server-side from the cached object changing only the fields the tool defines, SHALL refuse a target not returned by a reader in this session within the TTL, SHALL run in two phases (no `confirm` ⇒ a single-use token bound to the target, `expires_in: 120`, `will_change` as a stripped before/after diff, `cooldown_after: 600`, and the ticket number; valid token ⇒ consumed before acting), SHALL refuse the same target for 600 s after a write, and SHALL refuse once `NETDEV_WRITES_PER_HOUR` confirmed writes have run in the trailing hour. `confirm` SHALL be a string token, never a boolean.
+Each write tool SHALL take typed arguments and a non-blank `reason`, SHALL compose the request body server-side from the object as the snapshot read it, unstripped, changing only the fields the tool defines (so a secret goes back as it was), SHALL refuse a target not returned by a reader in this session within the TTL, SHALL run in two phases (no `confirm` ⇒ a single-use token bound to the target, `expires_in: 120`, `will_change` as a stripped before/after diff, `cooldown_after: 600`, and the ticket number; valid token ⇒ consumed before acting), SHALL refuse the same target for 600 s after a write, and SHALL refuse once `NETDEV_WRITES_PER_HOUR` confirmed writes have run in the trailing hour. `confirm` SHALL be a string token, never a boolean.
 
 #### Scenario: Blank reason refused before any request
 - **WHEN** a write tool is called with a blank `reason`
@@ -46,7 +50,7 @@ Each write tool SHALL take typed arguments and a non-blank `reason`, SHALL compo
 
 #### Scenario: Body changes only the defined fields
 - **WHEN** a confirmed `set_dhcp_reservation` runs
-- **THEN** the PUT body the fake controller recorded equals the cached object with only `use_fixedip` and `fixed_ip` changed, and equals the `after` side of `will_change` field by field
+- **THEN** the PUT body the fake controller recorded equals the cached object with only `use_fixedip` and `fixed_ip` changed, and equals the `after` side of `will_change` field by field except that a field `after` shows as `<stripped>` carries its original value
 
 #### Scenario: Token single-use, bound and timed
 - **WHEN** a token is reused, used for another target, or used after 120 s
@@ -58,7 +62,7 @@ Each write tool SHALL take typed arguments and a non-blank `reason`, SHALL compo
 
 ### Requirement: Snapshot, apply, verify, revert from inside — with outside probes and FAC as witness
 
-Before the token phase the server SHALL probe the three outside endpoints and open a ticket on the im→FAC channel carrying the cluster, the target's collection and id, the stripped diff and a deadline — never a snapshot or a secret; a failed probe or a failed ticket SHALL refuse the write. It SHALL wait up to `NETDEV_WITNESS_WAIT` for a `pre-ack:` comment; absence SHALL be recorded as `fac_witness: unmeasured` and SHALL NOT block. Before applying it SHALL GET the whole target object and the list of `_id`s in its collection into `NETDEV_SNAPSHOT_DIR` (a failed GET aborts). After applying, within `NETDEV_HEALTH_TIMEOUT`, it SHALL verify the controller API, the Kubernetes API server (`kubectl get --raw /readyz`), the object reading back equal to `after`, the three probes (two or more lost ⇒ failure; one lost ⇒ `outbound: degraded`), and — when a pre-ack arrived — a `post-ack:` comment (absent with probes answering ⇒ failure, `fac_witness: lost`). Any failure SHALL PUT the snapshot back through the controller and re-check. For a write that created an object, the revert SHALL DELETE only the `_id` the create response returned, and only when it is the sole `_id` in the collection absent from the snapshot's list; when any other new `_id` is present the server SHALL delete nothing and the result SHALL be `revert-failed`. The ticket SHALL be closed with a release comment carrying `outbound`, `fac_witness` and `result`; a failed revert SHALL be `result: revert-failed` and the tool response SHALL instruct im to write a dated inbox report immediately. No comment the server writes itself (release, `revert-failed`, or any other) SHALL begin with `pre-ack:` or `post-ack:`.
+Before the token phase the server SHALL probe the three outside endpoints and open a ticket on the im→FAC channel carrying the cluster, the target's collection and id, the stripped diff and a deadline — never a snapshot or a secret; a failed probe or a failed ticket SHALL refuse the write. It SHALL wait up to `NETDEV_WITNESS_WAIT` for a `pre-ack:` comment; absence SHALL be recorded as `fac_witness: unmeasured` and SHALL NOT block. Before applying it SHALL GET the whole target object and the list of `_id`s in its collection into `NETDEV_SNAPSHOT_DIR` (a failed GET aborts). After applying, within `NETDEV_HEALTH_TIMEOUT`, it SHALL verify the controller API, the Kubernetes API server (`kubectl get --raw /readyz`), the fields the tool sets reading back equal to `after` (not the whole object: fields such as `last_seen` change on their own; a command has no read-back), the three probes (two or more lost ⇒ failure; one lost ⇒ `outbound: degraded`), and — when a pre-ack arrived — a `post-ack:` comment (absent with probes answering ⇒ failure, `fac_witness: lost`). Any failure SHALL PUT the snapshot back through the controller and re-check. A write the controller itself refuses (an HTTP status or `rc` not ok) SHALL end as `aborted` with nothing to revert; a transport error SHALL be treated as possibly applied. A command with no inverse (`restart_device`, `power_cycle_port`) SHALL end as `revert-failed` when health fails, saying it cannot be undone. For a write that created an object, the revert SHALL DELETE only the `_id` the create response returned, and only when it is the sole `_id` in the collection absent from the snapshot's list; when any other new `_id` is present the server SHALL delete nothing and the result SHALL be `revert-failed`. The ticket SHALL be closed with a release comment carrying `outbound`, `fac_witness` and `result`; a failed revert SHALL be `result: revert-failed` and the tool response SHALL instruct im to write a dated inbox report immediately. No comment the server writes itself (release, `revert-failed`, or any other) SHALL begin with `pre-ack:` or `post-ack:`.
 
 #### Scenario: Unhealthy baseline refuses
 - **WHEN** one of the three probe listeners is down before the write
@@ -98,7 +102,7 @@ Before the token phase the server SHALL probe the three outside endpoints and op
 
 ### Requirement: A target on im's own LAN path is refused, named, and fails closed on missing data
 
-At each write the server SHALL compute from the session's reader data the networks containing `POD_IP`, the controller address and the API server endpoints; the switch port or AP the node is attached to; and every firewall rule whose expanded source/destination (groups expanded, CIDR containment) covers pod↔controller or pod↔API server. A target in that set SHALL be refused naming the intersecting element before any ticket or token. If any of those inputs cannot be read, every write SHALL be refused with the reader error. `restart_device` SHALL refuse the gateway device. No tool SHALL exist for VLAN create/delete, gateway restart/firmware, WLAN passphrases or deletion, WAN settings, default firewall policies, site settings, or user/API-key management.
+At each write the server SHALL compute from the session's reader data the networks containing `POD_IP`, the controller address and the API server endpoints; the switch port or AP the node is attached to; and every firewall rule whose expanded source/destination (groups expanded, CIDR containment) covers pod↔controller or pod↔API server. A target in that set SHALL be refused naming the intersecting element before any ticket or token. If any of those inputs cannot be read, every write SHALL be refused with the reader error. `restart_device` SHALL refuse the gateway device (a device at a network's gateway address or the controller's). A switch the node is attached to SHALL be refused for every port while the controller does not say which port the node is on. A reservation SHALL be refused when its address is the node's, the controller's or an API server's. No tool SHALL exist for VLAN create/delete, gateway restart/firmware, WLAN passphrases or deletion, WAN settings, default firewall policies, site settings, or user/API-key management.
 
 #### Scenario: Own network refused
 - **WHEN** a write targets the network object containing `POD_IP`
@@ -122,8 +126,12 @@ At each write the server SHALL compute from the session's reader data the networ
 
 ### Requirement: Every write phase leaves one audit line on stdout
 
-For every write call the server SHALL write one JSON line to stdout with `ts`, `tool`, `target`, `phase` (`token`, `execute`, `refused`, `reverted`, `revert-failed`, `aborted`), `stated_reason`, `reason` or `rc`, `user`, `snapshot_digest`, `diff_digest`, `health` (the list of health checks that passed; empty before any check ran), `outbound` and `fac_witness`, and SHALL write nothing else to stdout.
+For every write call the server SHALL write one JSON line to stdout with `ts`, `tool`, `target`, `phase` (`token`, `execute`, `refused`, `reverted`, `revert-failed`, `aborted`), `stated_reason`, `reason` or `rc`, `user`, `snapshot_digest`, `diff_digest`, `health` (the list of health checks that passed; empty before any check ran), `outbound`, `fac_witness` and `ticket`, and SHALL write nothing else to stdout — the HTTP server's access log included.
 
 #### Scenario: Lines match phases
 - **WHEN** a write goes token → execute → reverted on the fake controller because two probes were lost
 - **THEN** stdout holds exactly three JSON lines for that target with those phases, identical `stated_reason`, `snapshot_digest` equal to the sha256 of the snapshot file, `health` empty on the `token` line and listing `controller`, `apiserver`, `readback` but not `probes` on the `execute` and `reverted` lines
+
+#### Scenario: The access log does not reach stdout
+- **WHEN** the server runs as its container does and receives HTTP requests
+- **THEN** stdout holds no line (the access lines are on stderr), while the same server run as a plain FastMCP app puts each request's access line on stdout (positive control; measured by hand 2026-10-26, not in the automated controls)
