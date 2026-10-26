@@ -254,7 +254,7 @@ check "foreign ssh config: said"                    grep -q '不是 claude-sessi
 check_not "foreign ssh config: no gitconfig" test -e "$h/.gitconfig"
 
 echo "home assistant"
-HAURL=http://home-assistant.default.svc.cluster.local:8123/mcp_server/sse
+HAURL=https://ha.homeauto.example.cc/api/mcp
 TOK=HAtok3n-DUMMY-not-real-0001
 # the entry claude-session wrote for this project (the script runs from the repo root)
 ha_entry() { python3 - "$1" "$(pwd -P)" <<'PY2'
@@ -266,7 +266,7 @@ except FileNotFoundError:
 print(json.dumps(d.get("projects", {}).get(sys.argv[2], {}).get("mcpServers", {}).get("ha"), sort_keys=True))
 PY2
 }
-want_entry() { python3 -c 'import json,sys; print(json.dumps({"type":"sse","url":sys.argv[1],"headers":{"Authorization":"Bearer "+sys.argv[2]}}, sort_keys=True))' "$1" "$2"; }
+want_entry() { python3 -c 'import json,sys; print(json.dumps({"type":"http","url":sys.argv[1],"headers":{"Authorization":"Bearer "+sys.argv[2]}}, sort_keys=True))' "$1" "$2"; }
 put_token() { mkdir -p "$1/etc-ha"; printf "$2" > "$1/etc-ha/token"; }
 nwarn() { grep -c '^⚠ Home Assistant 沒有設定：' <<<"$1"; }
 fmode() { python3 -c 'import os,stat,sys; print(oct(stat.S_IMODE(os.stat(sys.argv[1]).st_mode)))' "$1"; }
@@ -393,6 +393,20 @@ check "ha+apps: mcp__ha then git and sops"          [ "$(allow_of "$h")" = "[\"m
 h="$work/ha-off-talos"
 run_session "$h" TALOS_MCP_URL=http://127.0.0.1:8765/sse >/dev/null
 check_not "talos without HA: no mcp__ha" grep -q 'mcp__ha' "$h/.claude/settings.json"
+
+# transport: streamable HTTP (HA's /api/mcp). A pod that ran the sse image is rewritten once.
+h="$work/ha-transport"
+put_token "$h" "$TOK"
+run_session "$h" HA_MCP_URL=$HAURL HA_MCP_TOKEN_FILE="$h/etc-ha/token" >/dev/null
+check "transport: entry type is literally http"     python3 -c 'import json,sys; sys.exit(0 if json.loads(sys.argv[1])["type"] == "http" else 1)' "$(ha_entry "$h/.claude.json")"
+python3 - "$h/.claude.json" "$(pwd -P)" <<'PY3'
+import json, sys
+d = json.load(open(sys.argv[1])); d["projects"][sys.argv[2]]["mcpServers"]["ha"]["type"] = "sse"
+open(sys.argv[1], "w").write(json.dumps(d))
+PY3
+check_not "control: the sse entry reads as sse" [ "$(ha_entry "$h/.claude.json")" = "$(want_entry "$HAURL" "$TOK")" ]
+run_session "$h" HA_MCP_URL=$HAURL HA_MCP_TOKEN_FILE="$h/etc-ha/token" >/dev/null
+check "transport: an sse entry from the old image is rewritten to http" [ "$(ha_entry "$h/.claude.json")" = "$(want_entry "$HAURL" "$TOK")" ]
 
 echo "inbox notice"
 h="$work/inbox-unread"
