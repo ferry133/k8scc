@@ -63,6 +63,30 @@
   - 不碰 homebridge：它仍在服務家人，它的服務、設定與 plugin 都不是你的。
 - 需要上面六件之一時，寫進 inbox 的報告交給公司，不要自己找路繞過去。
 
+## 你的攝影機
+
+只在 Secret `claudecode/im-ipcam` 存在時適用（`kubectl -n claudecode get secret im-ipcam`，不帶 `-o`）；沒有這個 Secret 的叢集，這一節不適用。
+
+- **它是什麼**：客戶的 IP 攝影機，經由 ONVIF。Secret 的鍵是 `username`、`password`、`hosts`（逗號分隔）；只動 `hosts` 列出的攝影機。
+- **在你的權限內**：讀裝置資訊、profile 與編碼設定；改**子串流**的編碼、解析度與位元率；設定 NTP 與時區——依你的判斷做，事後報告。
+- **為什麼是子串流**：HA 的 ONVIF 整合不收沒有 H.264 profile 的攝影機。把子串流改成 H.264、主串流留在原樣，攝影機才加得進 HA，而 NVR 的錄影不受影響。
+- **主串流是 NVR 在錄的那一條，不碰**：改之前把每個 profile 的編碼設定讀一遍；分不出哪一條是主串流，就不改，寫進 inbox。改完再讀一次，確認主串流與改之前一模一樣。
+- **沒有專用工具**：用 `python3` 標準庫自己組 SOAP（WS-Security UsernameToken 摘要）。
+- **摘要對時鐘敏感**：先對每台呼叫不需認證的 `GetSystemDateAndTime`，用攝影機自己的時間算 `Created`，不要用 pod 的時鐘。
+- **帳密不經過你的眼睛**：不要 `kubectl get secret … -o yaml`、不要 echo、不要放進指令參數；從 Secret 解出來寫進 mode 600 的暫存檔，由 python 讀，用完刪掉。也不要印出 SOAP 請求本文，它帶著使用者名稱與摘要。
+- **每一次改動都在 `~/workspace/inbox/` 留報告**（`YYYY-MM-DD-ipcam-<topic>.md`）：哪一台攝影機、哪一個欄位、舊值、新值、怎麼復原。
+- **改完子串流，報告裡寫明這台還要加進 HA**：那是公司的事（`ha-add-devices.py onvif`，由人執行，因為它要把攝影機帳密填進 HA 的設定流程），不是你的——即使「把裝置加進 HA」在別的裝置上是你的權限。
+- **以下五件不做**，即使技術上做得到：
+  - 不新增、刪除或修改攝影機的使用者與密碼。
+  - 不改主串流的任何設定。
+  - 不更新韌體、不還原原廠設定、不重開攝影機。
+  - 不改攝影機的網路設定（IP、DHCP、通訊埠）：
+    - `SetNetworkInterfaces`、`SetNetworkProtocols`、`SetDNS`、`SetNetworkDefaultGateway` 都不呼叫。
+    - NTP 與時區不算網路設定：`SetNTP` 與 `SetSystemDateAndTime` 可以。
+    - 攝影機若只在網路設定頁裡給 NTP，那裡什麼都不動，寫進 inbox。
+  - 不碰 NVR。
+- 需要上面五件之一時，寫進 inbox 的報告交給公司，不要自己找路繞過去。
+
 ## 你的路由器
 
 只在 `mcp__netdev__*` 工具存在時適用；沒有 netdev sidecar 的叢集，這一節不適用。

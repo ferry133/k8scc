@@ -149,6 +149,50 @@ check_not "no wording that re-pairs for the family"   grep -qE '替家人重新�
 check_not "no wording that turns homebridge off"      grep -qE '(關掉|停用|關閉|停止) ?homebridge' "$policy"
 check "control: the homebridge grep can match"        grep -qE '(關掉|停用|關閉|停止) ?homebridge' <<<'請停用 homebridge'
 
+echo "camera section"
+cam_section() { awk '/^## /{on = ($0 == "## 你的攝影機")} on' "$1"; }
+CAM_STATEMENTS=(
+  '只在 Secret `claudecode/im-ipcam` 存在時適用'
+  '沒有這個 Secret 的叢集，這一節不適用'
+  '只動 `hosts` 列出的攝影機'
+  '改**子串流**的編碼、解析度與位元率；設定 NTP 與時區'
+  '主串流留在原樣'
+  '分不出哪一條是主串流，就不改'
+  '確認主串流與改之前一模一樣'
+  '用攝影機自己的時間算 `Created`，不要用 pod 的時鐘'
+  '不要 `kubectl get secret … -o yaml`、不要 echo、不要放進指令參數；從 Secret 解出來寫進 mode 600 的暫存檔'
+  '也不要印出 SOAP 請求本文'
+  '哪一台攝影機、哪一個欄位、舊值、新值、怎麼復原'
+  '報告裡寫明這台還要加進 HA'
+  '不新增、刪除或修改攝影機的使用者與密碼'
+  '不改主串流的任何設定'
+  '不更新韌體、不還原原廠設定、不重開攝影機'
+  '不改攝影機的網路設定'
+  '`SetNetworkInterfaces`、`SetNetworkProtocols`、`SetDNS`、`SetNetworkDefaultGateway` 都不呼叫'
+  'NTP 與時區不算網路設定：`SetNTP` 與 `SetSystemDateAndTime` 可以'
+  '攝影機若只在網路設定頁裡給 NTP，那裡什麼都不動'
+  '不碰 NVR'
+)
+cam_checks() { # cam_checks <file> -> 0 when every statement is there
+  local pat
+  for pat in "${CAM_STATEMENTS[@]}"; do grep -qF -- "$pat" "$1" || return 1; done
+}
+cam=$(mktemp); nocam=$(mktemp); camdrop=$(mktemp)
+trap 'rm -f "$apps" "$noapps" "$kust_only" "$swapped" "$no_wait" "$late_wait" "$ha" "$noha" "$drop" "$cam" "$nocam" "$camdrop"' EXIT
+cam_section "$policy" > "$cam"
+check "section carries every statement"               cam_checks "$cam"
+awk '/^## /{on = ($0 != "## 你的攝影機")} NR==1 || on' "$policy" > "$nocam"
+check_not "control: policy without the section fails" cam_checks "$nocam"
+check "control: the stripped copy kept the rest"      grep -q '## 你的家庭自動化' "$nocam"
+for pat in "${CAM_STATEMENTS[@]}"; do
+  grep -vF -- "$pat" "$cam" > "$camdrop"
+  check_not "control: without '$pat' fails" cam_checks "$camdrop"
+  check "control: dropping '$pat' removed one line"   [ "$(( $(wc -l < "$cam") - $(wc -l < "$camdrop") ))" -eq 1 ]
+done
+# the HA section says adding devices to HA is im's; for a camera it is not
+check_not "no wording that has im add a camera to HA" grep -qE '(你|im).{0,6}(自己)?(跑|執行) ?`?ha-add-devices' "$policy"
+check "control: the add-camera grep can match"        grep -qE '(你|im).{0,6}(自己)?(跑|執行) ?`?ha-add-devices' <<<'你自己跑 ha-add-devices.py onvif'
+
 echo "router section"
 nd_section() { awk '/^## /{on = ($0 == "## 你的路由器")} on' "$1"; }
 ND_STATEMENTS=(
@@ -176,7 +220,7 @@ nd_checks() { # nd_checks <file> -> 0 when every statement is there
   for pat in "${ND_STATEMENTS[@]}"; do grep -qF -- "$pat" "$1" || return 1; done
 }
 nd=$(mktemp); nond=$(mktemp); nddrop=$(mktemp)
-trap 'rm -f "$apps" "$noapps" "$kust_only" "$swapped" "$no_wait" "$late_wait" "$ha" "$noha" "$drop" "$nd" "$nond" "$nddrop"' EXIT
+trap 'rm -f "$apps" "$noapps" "$kust_only" "$swapped" "$no_wait" "$late_wait" "$ha" "$noha" "$drop" "$cam" "$nocam" "$camdrop" "$nd" "$nond" "$nddrop"' EXIT
 nd_section "$policy" > "$nd"
 check "section carries every statement"               nd_checks "$nd"
 awk '/^## /{on = ($0 != "## 你的路由器")} NR==1 || on' "$policy" > "$nond"
