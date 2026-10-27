@@ -47,18 +47,21 @@
 
 只在 `HA_MCP_URL` 有值、而且 session 開頭沒有印出「⚠ Home Assistant 沒有設定」時適用；沒有 Home Assistant 的叢集，這一節不適用。
 
-- **它是什麼**：`mcp__ha__*` 是客戶家裡那台 Home Assistant 的 MCP server，你以非 admin 的使用者 `im` 連上去。你看得到哪些實體，由公司在 HA 的 expose 設定決定，不由你決定。
+- **它是什麼**：`mcp__ha__*` 是客戶家裡那台 Home Assistant 的 MCP server，你以非 admin 的使用者 `im` 連上去。透過它看得到哪些實體，由 HA 的 expose 設定決定。
 - **在你的權限內**：操作被 expose 的實體、建立／修改／刪除 HA 的自動化與場景、讀歷史——依你的判斷做，不需要任何人在終端機按確認。
-- **事後回報公司**：每次改過實體狀態以外的東西（自動化、場景），以及你認為公司該知道的操作，在 `~/workspace/inbox/` 留一份有日期的報告（`YYYY-MM-DD-ha-<topic>.md`：改了什麼、為什麼、怎麼復原）。
+- **把裝置加進 HA 也在你的權限內**：新增整合（以及刪除你自己加的整合）、把實體 expose 給 Assist。這些要用 admin 使用者 `im-admin` 的 token，它在 Secret `claudecode/ha-im-admin-token`（鍵 `token`、`url`）；那個 Secret 不存在的叢集，這一條不適用，寫進 inbox 交給公司。
+- **admin token 不經過你的眼睛**：它能管 HA 的使用者與全部設定，比 `im` 那顆大得多。不要 `kubectl get secret … -o yaml`、不要 echo、不要放進指令參數；從 Secret 解出來直接寫進 mode 600 的暫存檔當 curl 的 header 檔（`curl -H @<檔>`），用完刪掉。
+- **事後回報公司**：每次改過實體狀態以外的東西（自動化、場景、整合、expose），以及你認為公司該知道的操作，在 `~/workspace/inbox/` 留一份有日期的報告（`YYYY-MM-DD-ha-<topic>.md`：改了什麼、為什麼、怎麼復原）。
 - **不要跑 `claude mcp get ha`，也不要讀或印出 `.claude.json` 裡的 `ha` 項**：兩者都會把 HA 的 token 全文印出來（`claude mcp get ha` 在 2.1.261 量到）。`claude mcp list` 會不會印沒量到，當作會印、一樣不跑。要確認 HA 連不連得上，呼叫一支 `mcp__ha__*` 工具。
 - **自動化只寫在 HA**，不寫在 homebridge 或任何別的地方。同一顆裝置在 HA 與 homebridge 兩邊都看得到是正常的——MQTT 是單一真相來源，兩邊各自讀它。
-- **以下五件不做**，即使技術上做得到——它們動的是客戶家人每天在用的配對、帳號與服務：
+- **以下六件不做**，即使技術上做得到——它們動的是客戶家人每天在用的配對、帳號與服務：
   - 不啟用、也不配對 HA 的 HomeKit Bridge。
   - 不綁定或解除 Google Assistant 的帳號連結。
-  - 不新增或刪除 HA 的使用者與整合。
-  - 不升級 Home Assistant 本身。
+  - 不新增、刪除或修改 HA 的使用者，也不刪除不是你加的整合。
+  - 不升級、也不重啟 Home Assistant 本身；需要重啟才生效的整合，不加。
+  - 不碰 HA 在 Kubernetes 上的物件：不 rollout restart、scale、edit、patch、delete，不 exec 進它的 Pod，也不動它的 PVC 與 ConfigMap。讀（get、describe、logs）可以。HA 只從它的路由與 MCP 碰；它不健康就寫進 inbox，不要自己重啟它。
   - 不碰 homebridge：它仍在服務家人，它的服務、設定與 plugin 都不是你的。
-- 需要上面五件之一時，寫進 inbox 的報告交給公司，不要自己找路繞過去。
+- 需要上面六件之一時，寫進 inbox 的報告交給公司，不要自己找路繞過去。
 
 ## 你的路由器
 
