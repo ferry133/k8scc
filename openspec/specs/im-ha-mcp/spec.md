@@ -6,7 +6,7 @@ How `claude-session` connects im to the customer's Home Assistant through HA's o
 ## Requirements
 ### Requirement: Home Assistant's MCP server is registered only when both the URL and the token are present
 
-`claude-session` SHALL register a remote SSE MCP server named `ha` only when `HA_MCP_URL` is set to a non-empty value **and** the file named by `HA_MCP_TOKEN_FILE` (default `/etc/ha-mcp/token`) exists and is non-empty. An empty `HA_MCP_URL` SHALL be treated exactly as unset (silent, nothing written). A non-empty URL with a missing or 0-byte token file SHALL write nothing and print exactly one line beginning `⚠ Home Assistant 沒有設定：` naming the missing input.
+`claude-session` SHALL register a remote Streamable HTTP (`type: http`, k8scc#44) MCP server named `ha` only when `HA_MCP_URL` is set to a non-empty value **and** the file named by `HA_MCP_TOKEN_FILE` (default `/etc/ha-mcp/token`) exists and is non-empty. An empty `HA_MCP_URL` SHALL be treated exactly as unset (silent, nothing written). A non-empty URL with a missing or 0-byte token file SHALL write nothing and print exactly one line beginning `⚠ Home Assistant 沒有設定：` naming the missing input.
 
 #### Scenario: Unset or empty URL is silent
 - **WHEN** `HA_MCP_URL` is unset, or set to the empty string
