@@ -21,7 +21,7 @@
 
 ## 4. 收尾
 
-- [ ] 4.1 `im-permission-profile` 的 MODIFIED 在歸檔時合進 `openspec/specs/`；`im-ha-mcp` 成為新 spec；root spec 的 `mcp__ha__*` 字樣對齊成 `mcp__ha`（在 root 那邊改，一行）。
-- [ ] 4.2 活 pod 的格（等 jg-extras#13、jgct#237、jg-base#221 都進、拋棄式 jg-jcc2 有 HA 之後，由驗收者在 root 7.3／7.5 一併量）：`mcp__ha__*` 呼叫不被問、能讀實體、能呼叫一個服務並復原；`/etc/claude-code/CLAUDE.md` 裡有新節。本 sub-change 不等這格歸檔，但 PR 內文要寫明「活 pod 未量」。
-- [ ] 4.3 PR 內文署名；驗收者（fleet-ops 目錄的 session）在 merge 之前收；merge 後 PR 留一行 `peer name [ref]`。映像 bump 走既有流程（`bump/claudecode`）。
-- [ ] 4.4 歸檔本 sub-change，回更新 root 的 Sub-changes 表與 tasks §5。
+- [x] 4.1 （2026-10-27 歸檔時由 `openspec archive` 合進；root 那一行字樣對齊交給 fleet-ops-65）`im-permission-profile` 的 MODIFIED 在歸檔時合進 `openspec/specs/`；`im-ha-mcp` 成為新 spec；root spec 的 `mcp__ha__*` 字樣對齊成 `mcp__ha`（在 root 那邊改，一行）。
+- [x] 4.2 （2026-10-27，ferry133 在 jg-jiahd 的 im 裡從 CLI 讀到 HA，時間在 15:10Z 之前、走當時的 tenant 網址；fleet-ops-65 量 jg-jcc2：`ha` 註冊為 http、`mcp__ha` 在 allow、token 200／無 token 401、`GetLiveContext` isError=false。**未量**：呼叫一個服務並復原；URL 換成 `https://ha.jiahd.cc/api/mcp` 後下一個 session 改寫 entry（15:27Z 讀到 entry 仍是舊網址，pod 重啟後尚無 session）；#52 的新政策節要等 bump 進 pod。ferry133 裁定不等這些、直接歸檔）活 pod 的格（等 jg-extras#13、jgct#237、jg-base#221 都進、拋棄式 jg-jcc2 有 HA 之後，由驗收者在 root 7.3／7.5 一併量）：`mcp__ha__*` 呼叫不被問、能讀實體、能呼叫一個服務並復原；`/etc/claude-code/CLAUDE.md` 裡有新節。本 sub-change 不等這格歸檔，但 PR 內文要寫明「活 pod 未量」。
+- [x] 4.3 （#42、#44、#52 各由 fleet-ops-65 驗收後合併，PR 上有署名行）PR 內文署名；驗收者（fleet-ops 目錄的 session）在 merge 之前收；merge 後 PR 留一行 `peer name [ref]`。映像 bump 走既有流程（`bump/claudecode`）。
+- [x] 4.4 （本 PR；root 的 Sub-changes 表與 tasks §5 交給 fleet-ops-65）歸檔本 sub-change，回更新 root 的 Sub-changes 表與 tasks §5。
