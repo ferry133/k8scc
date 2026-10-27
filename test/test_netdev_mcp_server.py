@@ -521,6 +521,9 @@ class StartupStates(Case):
                                                                         + [f"https://probe.invalid:{bad}/x"])},
                                      f"probe 'https://probe.invalid:{bad}/x' has an invalid port")
                for bad in ("abc", "99999", "0")},
+            # str.isdigit() is True for superscripts, and int() then raises at import (fleet-ops-65, k8scc#51)
+            "tcp probe port ²": ({"NETDEV_OUTSIDE_PROBES": ",".join([p.addr for p in self.h.probes[:2]] + ["probe.invalid:5²"])},
+                                 "probe 'probe.invalid:5²': expected host:port"),
             "POD_IP unset": ({"POD_IP": None}, "POD_IP unset"),
             "snapshot dir unset": ({"NETDEV_SNAPSHOT_DIR": None}, "NETDEV_SNAPSHOT_DIR unset"),
         }

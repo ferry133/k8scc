@@ -765,7 +765,7 @@ def _parse_probes(raw: str) -> "tuple[list[Probe], str]":
         if "://" in item:
             return [], f"probe {item!r}: only https://host/path or host:port"
         host, _, port = item.rpartition(":")
-        if not host or not port.isdigit() or not 0 < int(port) < 65536:
+        if not host or not (port.isascii() and port.isdigit()) or not 0 < int(port) < 65536:   # '²'.isdigit() is True, int('²') raises
             return [], f"probe {item!r}: expected host:port"
         probes.append(Probe(item, "tcp", host, int(port)))
     return probes, ""
