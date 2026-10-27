@@ -752,15 +752,20 @@ def _parse_probes(raw: str) -> "tuple[list[Probe], str]":
     probes = []
     for item in items:
         if item.startswith("https://"):
-            host = urlsplit(item).hostname
+            try:   # .port raises on a non-number or out-of-range port; at import that is a crash loop (k8scc#49)
+                host, port = urlsplit(item).hostname, urlsplit(item).port
+            except ValueError:
+                return [], f"probe {item!r} has an invalid port"
             if not host:
                 return [], f"probe {item!r} has no host"
-            probes.append(Probe(item, "https", host, urlsplit(item).port or 443))
+            if port == 0:
+                return [], f"probe {item!r} has an invalid port"
+            probes.append(Probe(item, "https", host, port or 443))
             continue
         if "://" in item:
             return [], f"probe {item!r}: only https://host/path or host:port"
         host, _, port = item.rpartition(":")
-        if not host or not port.isdigit() or not 0 < int(port) < 65536:
+        if not host or not (port.isascii() and port.isdigit()) or not 0 < int(port) < 65536:   # '²'.isdigit() is True, int('²') raises
             return [], f"probe {item!r}: expected host:port"
         probes.append(Probe(item, "tcp", host, int(port)))
     return probes, ""

@@ -505,7 +505,7 @@ build: `build=false`, `build-ops=true`.
 | `IM_FAC_TICKET_REPO` (netdev-mcp only) | `owner/repo` of the private im→FAC ticket repo; unset ⇒ no write tools |
 | `IM_FAC_TICKET_TOKEN_FILE` (netdev-mcp only) | File holding the ticket token (issues read/write on that repo; minimal scope is root spike 1.5); missing or empty ⇒ no write tools |
 | `IM_FAC_TICKET_API` (netdev-mcp only) | Default `https://api.github.com`; the controls point it at the fake FAC. Leave unset |
-| `NETDEV_OUTSIDE_PROBES` (netdev-mcp only) | Exactly three, comma-separated: `https://host/path` (GET, 2xx/3xx) or `host:port` (TCP connect). Not three ⇒ no write tools |
+| `NETDEV_OUTSIDE_PROBES` (netdev-mcp only) | Exactly three, comma-separated: `https://host/path` (GET, 2xx/3xx) or `host:port` (TCP connect). Not three, or any one malformed — a bad port included (k8scc#49) — ⇒ no write tools |
 | `POD_IP` (netdev-mcp only) | Downward API `status.podIP` (hostNetwork ⇒ the node's address); class A starts from it. Unset ⇒ no write tools |
 | `NETDEV_SNAPSHOT_DIR` (netdev-mcp only) | Writable directory on a small PVC mounted on `netdev-mcp` only (snapshots keep secrets and must outlive a sidecar restart; root D5). Unset or not writable ⇒ no write tools |
 | `NETDEV_SNAPSHOT_KEEP`, `NETDEV_HEALTH_TIMEOUT`, `NETDEV_HEALTH_INTERVAL`, `NETDEV_WRITES_PER_HOUR`, `NETDEV_WITNESS_WAIT`, `NETDEV_WITNESS_POLL`, `NETDEV_PROBE_TIMEOUT` (netdev-mcp only) | Defaults 50, 120 s, 10 s, 12, 120 s, 5 s, 5 s |
