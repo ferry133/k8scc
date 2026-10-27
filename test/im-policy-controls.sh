@@ -110,6 +110,9 @@ HA_STATEMENTS=(
   '沒有 Home Assistant 的叢集，這一節不適用'
   '操作被 expose 的實體、建立／修改／刪除 HA 的自動化與場景'
   '依你的判斷做，不需要任何人在終端機按確認'
+  '新增整合（以及刪除你自己加的整合）、把實體 expose 給 Assist'
+  '那個 Secret 不存在的叢集，這一條不適用'
+  '不要 `kubectl get secret … -o yaml`、不要 echo、不要放進指令參數'
   '在 `~/workspace/inbox/` 留一份有日期的報告'
   '不要跑 `claude mcp get ha`，也不要讀或印出 `.claude.json` 裡的 `ha` 項'
   '`claude mcp list` 會不會印沒量到，當作會印、一樣不跑'
@@ -117,8 +120,9 @@ HA_STATEMENTS=(
   '自動化只寫在 HA'
   '不啟用、也不配對 HA 的 HomeKit Bridge'
   '不綁定或解除 Google Assistant 的帳號連結'
-  '不新增或刪除 HA 的使用者與整合'
-  '不升級 Home Assistant 本身'
+  '不新增、刪除或修改 HA 的使用者，也不刪除不是你加的整合'
+  '不升級、也不重啟 Home Assistant 本身'
+  '不碰 HA 在 Kubernetes 上的物件'
   '不碰 homebridge'
 )
 ha_checks() { # ha_checks <file> -> 0 when every statement is there
