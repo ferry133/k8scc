@@ -516,6 +516,11 @@ class StartupStates(Case):
             "ticket repo unset": ({"IM_FAC_TICKET_REPO": None}, "IM_FAC_TICKET_REPO unset"),
             "ticket token missing": ({"IM_FAC_TICKET_TOKEN_FILE": str(self.h.ticket_token) + ".absent"}, "token missing"),
             "two probes": ({"NETDEV_OUTSIDE_PROBES": ",".join(p.addr for p in self.h.probes[:2])}, "exactly three"),
+            # k8scc#49: urlsplit().port raises on these, and the parser runs at import
+            **{f"probe port {bad}": ({"NETDEV_OUTSIDE_PROBES": ",".join([p.addr for p in self.h.probes[:2]]
+                                                                        + [f"https://probe.invalid:{bad}/x"])},
+                                     f"probe 'https://probe.invalid:{bad}/x' has an invalid port")
+               for bad in ("abc", "99999", "0")},
             "POD_IP unset": ({"POD_IP": None}, "POD_IP unset"),
             "snapshot dir unset": ({"NETDEV_SNAPSHOT_DIR": None}, "NETDEV_SNAPSHOT_DIR unset"),
         }
