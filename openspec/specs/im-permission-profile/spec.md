@@ -5,7 +5,7 @@ What `claude-session` writes into im's Claude Code permission profile when the T
 ## Requirements
 ### Requirement: Permission rules follow the tool surface
 
-`claude-session` SHALL ensure, whenever the Talos MCP sidecar is registered (`TALOS_MCP_URL` set), that the agent's `settings.json` carries `permissions.allow` entries for all five Talos tools — the four read-only tools and `mcp__talos__reboot_node` — merging into any existing `permissions` object without removing or reordering entries that were already there, and SHALL remove `mcp__talos__reboot_node` from `permissions.ask` where an earlier image placed it, leaving every other `ask` entry in place. Whenever the apps-repo write path is configured (`IM_APPS_REPO` set and the write key mounted), it SHALL likewise ensure `permissions.allow` carries `Bash(git *)` and `Bash(sops *)`, with the same merge semantics, and SHALL add neither when the write path is absent.
+`claude-session` SHALL ensure, whenever the Talos MCP sidecar is registered (`TALOS_MCP_URL` set), that the agent's `settings.json` carries `permissions.allow` entries for all five Talos tools — the four read-only tools and `mcp__talos__reboot_node` — merging into any existing `permissions` object without removing or reordering entries that were already there, and SHALL remove `mcp__talos__reboot_node` from `permissions.ask` where an earlier image placed it, leaving every other `ask` entry in place. Whenever the apps-repo write path is configured (`IM_APPS_REPO` set and the write key mounted), it SHALL likewise ensure `permissions.allow` carries `Bash(git *)` and `Bash(sops *)`, with the same merge semantics, and SHALL add neither when the write path is absent. Whenever Home Assistant's MCP server is registered (`HA_MCP_URL` non-empty and the token file present and non-empty), it SHALL likewise ensure `permissions.allow` carries the server-level rule `mcp__ha`, with the same merge semantics, and SHALL not add it otherwise.
 
 #### Scenario: Fresh pod gets the profile
 - **WHEN** `claude-session` runs on a pod whose `settings.json` is the initial minimal file
@@ -34,6 +34,14 @@ What `claude-session` writes into im's Claude Code permission profile when the T
 #### Scenario: Apps repo absent adds nothing
 - **WHEN** `IM_APPS_REPO` is unset or the key is missing
 - **THEN** `permissions.allow` contains neither `Bash(git *)` nor `Bash(sops *)` unless they were already there
+
+#### Scenario: Home Assistant registered adds the server rule
+- **WHEN** `claude-session` runs with `HA_MCP_URL` non-empty and a non-empty token file, and nothing else configured
+- **THEN** `permissions.allow` gains only `mcp__ha`; no `mcp__talos__*`, `Bash(git *)` or `Bash(sops *)` entry is added, and a second run changes nothing
+
+#### Scenario: Home Assistant absent adds nothing
+- **WHEN** `HA_MCP_URL` is unset or empty, or the token file is missing or 0 bytes
+- **THEN** `permissions.allow` does not contain `mcp__ha` unless it was already there
 
 ### Requirement: No human prompt is relied upon
 
