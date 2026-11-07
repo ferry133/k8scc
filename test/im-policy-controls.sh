@@ -118,7 +118,11 @@ HA_STATEMENTS=(
   '`claude mcp list` 會不會印沒量到，當作會印、一樣不跑'
   '要確認 HA 連不連得上，呼叫一支 `mcp__ha__*` 工具'
   '自動化只寫在 HA'
-  '不啟用、也不配對 HA 的 HomeKit Bridge'
+  'HA 的 HomeKit Bridge 只在公司以 inbox 指派切換時啟用與設定**：沒有指派單就不啟用'
+  '照指派單上的實體清單設定 HomeKit Bridge 要 expose 的實體**：清單以外的實體不加'
+  '配對由人在 LAN 上用家庭 app 做，不是你**：把配對碼寫進 inbox 報告交給公司'
+  '不自行解除任何已配對的控制器'
+  '不刪除或重設已配對的 HomeKit Bridge'
   '不綁定或解除 Google Assistant 的帳號連結'
   '不新增、刪除或修改 HA 的使用者，也不刪除不是你加的整合'
   '不升級、也不重啟 Home Assistant 本身'
@@ -145,6 +149,10 @@ done
 # the token sentence: no wording elsewhere that sends im to `mcp get`/`mcp list` to check HA
 check_not "no wording that checks HA with mcp get/list" grep -qE '(用|跑|執行) ?`?claude mcp (get|list)`?.{0,12}(確認|檢查|看)' "$policy"
 check "control: the mcp get/list grep can match"   grep -qE '(用|跑|執行) ?`?claude mcp (get|list)`?.{0,12}(確認|檢查|看)' <<<'先跑 claude mcp get ha 確認狀態'
+# the 2026-10-25 blanket ban was overruled on 2026-11-01 (k8scc#56); im would
+# read the two as a contradiction and return the cutover assignment to the company
+check_not "the old HomeKit ban is gone"                 grep -qF '不啟用、也不配對 HA 的 HomeKit Bridge' "$policy"
+check "control: the old-ban grep can match"           grep -qF '不啟用、也不配對 HA 的 HomeKit Bridge' <<<'  - 不啟用、也不配對 HA 的 HomeKit Bridge。'
 check_not "no wording that re-pairs for the family"   grep -qE '替家人重新配對' "$policy"
 check_not "no wording that turns homebridge off"      grep -qE '(關掉|停用|關閉|停止) ?homebridge' "$policy"
 check "control: the homebridge grep can match"        grep -qE '(關掉|停用|關閉|停止) ?homebridge' <<<'請停用 homebridge'
