@@ -54,14 +54,18 @@
 - **事後回報公司**：每次改過實體狀態以外的東西（自動化、場景、整合、expose），以及你認為公司該知道的操作，在 `~/workspace/inbox/` 留一份有日期的報告（`YYYY-MM-DD-ha-<topic>.md`：改了什麼、為什麼、怎麼復原）。
 - **不要跑 `claude mcp get ha`，也不要讀或印出 `.claude.json` 裡的 `ha` 項**：兩者都會把 HA 的 token 全文印出來（`claude mcp get ha` 在 2.1.261 量到）。`claude mcp list` 會不會印沒量到，當作會印、一樣不跑。要確認 HA 連不連得上，呼叫一支 `mcp__ha__*` 工具。
 - **自動化只寫在 HA**，不寫在 homebridge 或任何別的地方。同一顆裝置在 HA 與 homebridge 兩邊都看得到是正常的——MQTT 是單一真相來源，兩邊各自讀它。
-- **以下六件不做**，即使技術上做得到——它們動的是客戶家人每天在用的配對、帳號與服務：
-  - 不啟用、也不配對 HA 的 HomeKit Bridge。
+- **HA 的 HomeKit Bridge 只在公司以 inbox 指派切換時啟用與設定**：沒有指派單就不啟用。指派單是公司把家庭 app 從 homebridge 切到 HA 的決定（ferry133 2026-11-01）；啟用它是新增一個整合，用上面那顆 admin token。
+- **照指派單上的實體清單設定 HomeKit Bridge 要 expose 的實體**：清單以外的實體不加；要加別的，寫進 inbox 問公司。
+- **配對由人在 LAN 上用家庭 app 做，不是你**：把配對碼寫進 inbox 報告交給公司。
+- **不自行解除任何已配對的控制器**（iPhone、iPad、HomePod、Apple TV）：解除一個，那一台的家庭 app 就斷了。
+- **不刪除或重設已配對的 HomeKit Bridge**：那會讓全家的家庭 app 一起斷掉，要重配對就寫進 inbox 交給公司。
+- **以下五件不做**，即使技術上做得到——它們動的是客戶家人每天在用的配對、帳號與服務：
   - 不綁定或解除 Google Assistant 的帳號連結。
   - 不新增、刪除或修改 HA 的使用者，也不刪除不是你加的整合。
   - 不升級、也不重啟 Home Assistant 本身；需要重啟才生效的整合，不加。
   - 不碰 HA 在 Kubernetes 上的物件：不 rollout restart、scale、edit、patch、delete，不 exec 進它的 Pod，也不動它的 PVC 與 ConfigMap。讀（get、describe、logs）可以。HA 只從它的路由與 MCP 碰；它不健康就寫進 inbox，不要自己重啟它。
   - 不碰 homebridge：它仍在服務家人，它的服務、設定與 plugin 都不是你的。
-- 需要上面六件之一時，寫進 inbox 的報告交給公司，不要自己找路繞過去。
+- 需要上面五件之一時，寫進 inbox 的報告交給公司，不要自己找路繞過去。
 
 ## 你的攝影機
 

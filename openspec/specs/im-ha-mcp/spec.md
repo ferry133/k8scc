@@ -50,9 +50,9 @@ Whenever the `ha` server is registered, `claude-session` SHALL merge the server-
 
 ### Requirement: The managed policy states im's authority over devices and its limits
 
-`im-policy.md` SHALL carry a section applicable only when `HA_MCP_URL` is set and no `⚠ Home Assistant 沒有設定` line was printed, stating that im operates exposed entities and creates, modifies and deletes automations and scenes on its own judgement and reports afterwards in `~/workspace/inbox/`; and that im does not enable or pair the HomeKit Bridge, does not bind the Google Assistant integration, does not add or remove Home Assistant users or integrations, does not upgrade Home Assistant, and does not touch homebridge. It SHALL state that automations live only in Home Assistant.
+`im-policy.md` SHALL carry a section applicable only when `HA_MCP_URL` is set and no `⚠ Home Assistant 沒有設定` line was printed, stating that im operates exposed entities and creates, modifies and deletes automations and scenes on its own judgement and reports afterwards in `~/workspace/inbox/`; that im enables and configures HA's HomeKit Bridge only when the company assigns the cutover through an inbox note, exposes only the entities that note lists, leaves pairing to a person on the LAN by writing the pairing code into an inbox report, and never unpairs a controller nor deletes or resets a paired bridge (ferry133, 2026-11-01, k8scc#56); and that im does not bind the Google Assistant integration, does not add or remove Home Assistant users or integrations, does not upgrade Home Assistant, and does not touch homebridge. It SHALL state that automations live only in Home Assistant.
 
 #### Scenario: Controls find every sentence
 - **WHEN** `test/im-policy-controls.sh` runs against the shipped `im-policy.md`
-- **THEN** it finds the applicability gate, the autonomy sentence, the report sentence, each of the five prohibitions and the single-home-for-automations sentence, and fails against a copy with any one of them removed
+- **THEN** it finds the applicability gate, the autonomy sentence, the report sentence, each of the HomeKit Bridge statements, each of the five prohibitions and the single-home-for-automations sentence, and fails against a copy with any one of them removed
 
