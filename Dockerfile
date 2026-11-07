@@ -65,7 +65,7 @@ RUN printf '%s\n' \
 # (jg-cluster-template deployments) where CC needs to inventory LAN
 # devices and debug router/DHCP/VPN config without the client having
 # any networking background. Packet-level tools (nmap, masscan,
-# arp-scan, tcpdump, fping) need CAP_NET_RAW, granted at the pod
+# arp-scan, tcpdump, fping, ping) need CAP_NET_RAW, granted at the pod
 # securityContext, not here.
 # avahi-browse/iw/nmcli deliberately omitted: the first needs a
 # privileged avahi-daemon + system D-Bus session we don't want to run
@@ -74,6 +74,7 @@ RUN printf '%s\n' \
 RUN apt-get update && apt-get install -y \
     nmap \
     fping \
+    iputils-ping \
     masscan \
     arp-scan \
     iproute2 \
@@ -101,7 +102,9 @@ RUN apt-get update && apt-get install -y \
 RUN setcap cap_net_raw+ep /usr/bin/nmap && \
     setcap cap_net_raw+ep /usr/sbin/arp-scan && \
     setcap cap_net_raw+ep /usr/bin/tcpdump && \
-    setcap cap_net_raw+ep /usr/bin/masscan
+    setcap cap_net_raw+ep /usr/bin/masscan && \
+    setcap cap_net_raw+ep /bin/ping && \
+    getcap /bin/ping | grep -q cap_net_raw
 
 # kubectl -- in-cluster troubleshooting from the web terminal. The binary
 # alone grants nothing; cluster access comes from RBAC bound to the pod's
