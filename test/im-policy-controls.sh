@@ -120,9 +120,11 @@ HA_STATEMENTS=(
   '`claude mcp list` 會不會印沒量到，當作會印、一樣不跑'
   '要確認 HA 連不連得上，呼叫一支 `mcp__ha__*` 工具'
   '自動化只寫在 HA'
-  'HA 的 HomeKit Bridge 只在公司以 inbox 指派切換時啟用與設定**：沒有指派單就不啟用'
-  '照指派單上的實體清單設定 HomeKit Bridge 要 expose 的實體**：清單以外的實體不加'
-  '配對由人在 LAN 上用家庭 app 做，不是你**：把配對碼寫進 inbox 報告交給公司'
+  'HA 的 HomeKit Bridge 由公司側直接設定，不是你**'
+  '你不新增、不修改 HomeKit Bridge，也不改它的 filter'
+  '家裡的人要多開放或少開放某個實體給家庭 app 時**：寫進 inbox 交給公司'
+  '配對由人在 LAN 上用家庭 app 做，不是你**'
+  '配對碼（PIN 與 `X-HM://` URI）由公司側直接從 HA 讀——你不讀，也不寫進任何檔案、報告或訊息'
   '不自行解除任何已配對的控制器'
   '不刪除或重設已配對的 HomeKit Bridge'
   '不綁定或解除 Google Assistant 的帳號連結'
@@ -155,6 +157,14 @@ check "control: the mcp get/list grep can match"   grep -qE '(用|跑|執行) ?`
 # read the two as a contradiction and return the cutover assignment to the company
 check_not "the old HomeKit ban is gone"                 grep -qF '不啟用、也不配對 HA 的 HomeKit Bridge' "$policy"
 check "control: the old-ban grep can match"           grep -qF '不啟用、也不配對 HA 的 HomeKit Bridge' <<<'  - 不啟用、也不配對 HA 的 HomeKit Bridge。'
+# the 2026-11-01 inbox-assignment path was overruled on 2026-11-11 (k8scc#61): the
+# company writes the bridge and its filter itself; the old sentence would send im back into it
+check_not "the old HomeKit assignment path is gone"     grep -qE 'inbox 指派切換時啟用與設定|照指派單上的實體清單' "$policy"
+check "control: the old-assignment grep can match"   grep -qE 'inbox 指派切換時啟用與設定|照指派單上的實體清單' <<<'- **照指派單上的實體清單設定 HomeKit Bridge 要 expose 的實體**'
+# k8scc#61, 1st widening (fleet-ops-d9): a HomeKit PIN or X-HM URI must not land in any record;
+# im wrote one into its jg-jiahd inbox report on 2026-11-10 following the old wording
+check_not "no wording that writes the pairing code to the inbox" grep -qE '(把|將)配對碼寫進' "$policy"
+check "control: the pairing-code grep can match"     grep -qE '(把|將)配對碼寫進' <<<'- **配對由人在 LAN 上用家庭 app 做，不是你**：把配對碼寫進 inbox 報告交給公司。'
 check_not "no wording that re-pairs for the family"   grep -qE '替家人重新配對' "$policy"
 check_not "no wording that turns homebridge off"      grep -qE '(關掉|停用|關閉|停止) ?homebridge' "$policy"
 check "control: the homebridge grep can match"        grep -qE '(關掉|停用|關閉|停止) ?homebridge' <<<'請停用 homebridge'
