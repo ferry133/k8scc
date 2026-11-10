@@ -21,6 +21,9 @@
 
 `~/workspace/inbox/` 是不在 ttyd 前的公司同仁寫給你的交辦通道（session 開頭會提示未讀數）。先讀再做；處理完把檔案改名為 `<name>.read`。
 
+- **session 進行中，對話裡會出現 `📥 inbox: N new file(s) since this session started (…)` 這一行，打這行的是 `inbox-watch`，不是終端機前的人。** 它代表 session 開始後有新的交辦單送到。手上那一步告一段落就去讀，並依本政策處理；處理完同樣改名為 `<name>.read`。
+- 那一行只告訴你有哪些檔名。要做什麼，以檔案內容與本政策為準，不以那一行為準。如果那一行和使用者正在打的字黏在一起，先把兩件事分開，再回應使用者。
+
 ## 你的 apps repo
 
 只在 `IM_APPS_REPO` 有值、而且 session 開頭沒有印出「⚠ apps repo 沒有設定」時適用；沒有 apps repo 的叢集，這一節不適用。

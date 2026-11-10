@@ -1,0 +1,107 @@
+#!/usr/bin/env bash
+#
+# inbox-watch -- tell the im agent that is already running about inbox files
+# that arrived after its session started (k8scc#59; ferry133 2026-11-10 chose
+# "notify the running session").
+#
+# claude-session prints the unread count once, at ttyd session start, to the
+# person at the terminal. Nothing told the `claude` running inside tmux, so an
+# assignment dropped into ~/workspace/inbox/ waited until someone happened to
+# open a session (jcom 2026-11-10: delivered 06:01, picked up 06:04:53 only
+# because a session appeared).
+#
+# Every INBOX_WATCH_INTERVAL seconds: when the tmux session `claude` exists
+# and is at least INBOX_WATCH_SETTLE seconds old (so keys do not land in a
+# Claude Code that is still starting), any unread file (not ending in `.read`)
+# not yet announced is announced by typing ONE line into that session and
+# pressing Enter. The line names the files; their contents are never opened.
+#
+# - No session => nothing. A headless `claude -p` was ruled out (direction 2).
+# - A file is announced once per watcher lifetime. A file that is renamed to
+#   `.read` and later reappears under the same name is announced again.
+# - A failed send-keys marks nothing, so the next tick retries.
+# - INBOX_WATCH_INTERVAL=0 turns it off. INBOX_WATCH_TICKS=N runs N ticks and
+#   exits (the controls use it, with a fake `sleep` that changes the inbox
+#   between ticks).
+#
+# Known limits, not handled: if a person is typing into the claude prompt at
+# the moment of a tick, the line is appended to their draft and submitted with
+# it; if Claude Code is on its login screen, the keys go there.
+#
+# Started by entrypoint.sh in the background; it writes one line to stderr
+# (the pod log) at start and one per announcement, with counts, not names.
+
+set -u
+
+dir="${INBOX_DIR:-${HOME:-/home/claude}/workspace/inbox}"
+interval="${INBOX_WATCH_INTERVAL:-30}"
+settle="${INBOX_WATCH_SETTLE:-30}"
+session=claude
+
+case "$interval" in ''|*[!0-9]*) echo "inbox-watch: INBOX_WATCH_INTERVAL '$interval' is not a whole number, not started" >&2; exit 0 ;; esac
+case "$settle" in ''|*[!0-9]*) echo "inbox-watch: INBOX_WATCH_SETTLE '$settle' is not a whole number, not started" >&2; exit 0 ;; esac
+ticks="${INBOX_WATCH_TICKS:-}"
+case "$ticks" in *[!0-9]*) echo "inbox-watch: INBOX_WATCH_TICKS '$ticks' is not a whole number, not started" >&2; exit 0 ;; esac
+if [ "$interval" -eq 0 ] && [ -z "$ticks" ]; then
+    echo "inbox-watch: INBOX_WATCH_INTERVAL=0, off" >&2
+    exit 0
+fi
+
+declare -A told=()
+
+# A file name made printable for one line of typed input: control characters
+# (a newline would press Enter mid-line) become '?', and it is cut at 120.
+printable() { printf '%s' "${1:0:120}" | LC_ALL=C tr -c '[:print:]\200-\377' '?'; }
+
+tick() {
+    [ -d "$dir" ] || return 0
+    tmux has-session -t "=$session" 2>/dev/null || return 0
+    local created now
+    created=$(tmux display-message -p -t "=$session" '#{session_created}' 2>/dev/null) || return 0
+    case "$created" in ''|*[!0-9]*) return 0 ;; esac
+    now=$(date +%s)
+    [ $((now - created)) -ge "$settle" ] || return 0
+
+    local -a present=() new=()
+    local f name
+    while IFS= read -r -d '' f; do
+        name=${f##*/}
+        present+=("$name")
+        [ -n "${told[$name]:-}" ] || new+=("$name")
+    done < <(find "$dir" -mindepth 1 -maxdepth 1 -type f ! -name '*.read' -print0 2>/dev/null)
+
+    # forget files that are gone (read, or removed), so a reappearing name counts again
+    local k keep
+    for k in "${!told[@]}"; do
+        keep=
+        for name in "${present[@]+"${present[@]}"}"; do [ "$name" = "$k" ] && keep=1 && break; done
+        [ -n "$keep" ] || unset 'told[$k]'
+    done
+
+    [ "${#new[@]}" -gt 0 ] || return 0
+    local list="" n
+    for n in "${new[@]}"; do list+="${list:+, }$(printable "$n")"; done
+    local msg="📥 inbox: ${#new[@]} new file(s) since this session started (${list}) — read ~/workspace/inbox/ and handle them per your policy, then rename each to <name>.read"
+    if tmux send-keys -t "=$session:" -l "$msg" 2>/dev/null && tmux send-keys -t "=$session:" Enter 2>/dev/null; then
+        for n in "${new[@]}"; do told[$n]=1; done
+        echo "inbox-watch: announced ${#new[@]} file(s) to the running session" >&2
+    else
+        echo "inbox-watch: send-keys failed, will retry" >&2
+    fi
+}
+
+if [ -n "$ticks" ]; then
+    i=0
+    while [ "$i" -lt "$ticks" ]; do
+        tick
+        i=$((i + 1))
+        [ "$i" -lt "$ticks" ] && sleep "$interval"
+    done
+    exit 0
+fi
+
+echo "inbox-watch: watching ${dir/#"${HOME:-/home/claude}"/\~}/ every ${interval}s (session settle ${settle}s)" >&2
+while :; do
+    tick
+    sleep "$interval"
+done

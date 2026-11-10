@@ -300,6 +300,7 @@ COPY talos_mcp_server.py /usr/local/bin/talos_mcp_server.py
 COPY netdev_mcp_server.py /usr/local/bin/netdev_mcp_server.py
 COPY auth0_login.py /usr/local/bin/auth0_login.py
 COPY claude-session /usr/local/bin/claude-session
+COPY inbox-watch /usr/local/bin/inbox-watch
 # im's managed policy (root 7.3b, 2026-10-15): Claude Code loads
 # /etc/claude-code/CLAUDE.md first, for every user, and personal settings
 # cannot drop it. The repo copy is not named CLAUDE.md on purpose, so that a
@@ -309,7 +310,8 @@ RUN chmod +x /usr/local/bin/memory_mcp_server.py \
              /usr/local/bin/talos_mcp_server.py \
              /usr/local/bin/netdev_mcp_server.py \
              /usr/local/bin/auth0_login.py \
-             /usr/local/bin/claude-session
+             /usr/local/bin/claude-session \
+             /usr/local/bin/inbox-watch
 
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
