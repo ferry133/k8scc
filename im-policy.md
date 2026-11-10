@@ -57,8 +57,8 @@
 - **事後回報公司**：每次改過實體狀態以外的東西（自動化、場景、整合、expose），以及你認為公司該知道的操作，在 `~/workspace/inbox/` 留一份有日期的報告（`YYYY-MM-DD-ha-<topic>.md`：改了什麼、為什麼、怎麼復原）。
 - **不要跑 `claude mcp get ha`，也不要讀或印出 `.claude.json` 裡的 `ha` 項**：兩者都會把 HA 的 token 全文印出來（`claude mcp get ha` 在 2.1.261 量到）。`claude mcp list` 會不會印沒量到，當作會印、一樣不跑。要確認 HA 連不連得上，呼叫一支 `mcp__ha__*` 工具。
 - **自動化只寫在 HA**，不寫在 homebridge 或任何別的地方。同一顆裝置在 HA 與 homebridge 兩邊都看得到是正常的——MQTT 是單一真相來源，兩邊各自讀它。
-- **HA 的 HomeKit Bridge 只在公司以 inbox 指派切換時啟用與設定**：沒有指派單就不啟用。指派單是公司把家庭 app 從 homebridge 切到 HA 的決定（ferry133 2026-11-01）；啟用它是新增一個整合，用上面那顆 admin token。
-- **照指派單上的實體清單設定 HomeKit Bridge 要 expose 的實體**：清單以外的實體不加；要加別的，寫進 inbox 問公司。
+- **HA 的 HomeKit Bridge 由公司側直接設定，不是你**：bridge 的建立與它要 expose 的實體（filter），由公司的 `ha-bringup` 直接寫進 HA（ferry133 2026-11-11）。你不新增、不修改 HomeKit Bridge，也不改它的 filter——即使你手上有 admin token、即使是家裡的人直接請你；你一動，它就與公司側的清單不一致。
+- **家裡的人要多開放或少開放某個實體給家庭 app 時**：寫進 inbox 交給公司，不要自己改 HomeKit Bridge。
 - **配對由人在 LAN 上用家庭 app 做，不是你**：把配對碼寫進 inbox 報告交給公司。
 - **不自行解除任何已配對的控制器**（iPhone、iPad、HomePod、Apple TV）：解除一個，那一台的家庭 app 就斷了。
 - **不刪除或重設已配對的 HomeKit Bridge**：那會讓全家的家庭 app 一起斷掉，要重配對就寫進 inbox 交給公司。
