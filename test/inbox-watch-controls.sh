@@ -114,6 +114,29 @@ line
 line
 '
 
+# MEASURED, not hand-written: the prompt line of Claude Code 2.1.261 in the
+# image (jg-jcc2, 2026-11-10, `capture-pane -p -e`), idle with its dim
+# placeholder, and with one character typed. NBSP after the prompt glyph.
+ESC=$'\e'; NB=$'\xc2\xa0'
+REAL_RULE="${ESC}[2m────────────────────────────────────────${ESC}[0m"
+IDLE_REAL="${REAL_RULE}
+${ESC}[39m❯${NB}${ESC}[2mTry \"fix lint errors\"${ESC}[0m
+${REAL_RULE}
+  ${ESC}[2m⏸ manual mode on · ? for shortcuts · ← for agents${ESC}[0m
+"
+TYPED_REAL="${REAL_RULE}
+${ESC}[39m❯${NB}x
+${REAL_RULE}
+  ${ESC}[2m⏸ manual mode on · ? for shortcuts · ← for agents${ESC}[0m
+"
+TRUST_REAL=" Quick safety check: Is this a project you created or one you trust?
+ Claude Code'll be able to read, edit, and execute files here.
+ Security guide
+ ❯ No, exit
+   Yes, I trust this folder
+ Enter to confirm · Esc to cancel
+"
+
 # setup <case> : fresh home with an inbox, an old session, an idle pane, empty log
 setup() {
   c="$work/$1"; mkdir -p "$c/home/workspace/inbox" "$c/fake"
@@ -207,6 +230,9 @@ echo "pane gate"
 gate() { setup "$1"; touch "$work/$1/home/workspace/inbox/a.md"; printf '%s' "$2" > "$work/$1/fake/pane"; run "$1"; }
 gate g-idle "$IDLE_BOX";            check "idle prompt (boxed, numbered reply above): typed" [ "$(sends g-idle)" = 1 ]
 gate g-rule "$IDLE_RULE";           check "idle prompt (rule-drawn, ❯): typed"            [ "$(sends g-rule)" = 1 ]
+gate g-real "$IDLE_REAL";           check "MEASURED idle prompt (dim placeholder): typed"  [ "$(sends g-real)" = 1 ]
+gate g-rtyped "$TYPED_REAL";        check "MEASURED one char typed: nothing typed"       [ "$(sends g-rtyped)" = 0 ]
+gate g-trust "$TRUST_REAL";         check "MEASURED trust dialog (no digits, no phrase): nothing typed" [ "$(sends g-trust)" = 0 ]
 gate g-perm "$PERMISSION";          check "permission dialog: nothing typed"             [ "$(sends g-perm)" = 0 ]
 check "permission dialog: no Enter either"   [ "$(enters g-perm)" = 0 ]
 check "permission dialog: pod log says why"  grep -q 'skipped (pane not idle: dialog)' "$work/g-perm/stderr"
