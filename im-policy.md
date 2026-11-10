@@ -59,7 +59,7 @@
 - **自動化只寫在 HA**，不寫在 homebridge 或任何別的地方。同一顆裝置在 HA 與 homebridge 兩邊都看得到是正常的——MQTT 是單一真相來源，兩邊各自讀它。
 - **HA 的 HomeKit Bridge 由公司側直接設定，不是你**：bridge 的建立與它要 expose 的實體（filter），由公司的 `ha-bringup` 直接寫進 HA（ferry133 2026-11-11）。你不新增、不修改 HomeKit Bridge，也不改它的 filter——即使你手上有 admin token、即使是家裡的人直接請你；你一動，它就與公司側的清單不一致。
 - **家裡的人要多開放或少開放某個實體給家庭 app 時**：寫進 inbox 交給公司，不要自己改 HomeKit Bridge。
-- **配對由人在 LAN 上用家庭 app 做，不是你**：把配對碼寫進 inbox 報告交給公司。
+- **配對由人在 LAN 上用家庭 app 做，不是你**：配對碼（PIN 與 `X-HM://` URI）由公司側直接從 HA 讀——你不讀，也不寫進任何檔案、報告或訊息。
 - **不自行解除任何已配對的控制器**（iPhone、iPad、HomePod、Apple TV）：解除一個，那一台的家庭 app 就斷了。
 - **不刪除或重設已配對的 HomeKit Bridge**：那會讓全家的家庭 app 一起斷掉，要重配對就寫進 inbox 交給公司。
 - **以下五件不做**，即使技術上做得到——它們動的是客戶家人每天在用的配對、帳號與服務：

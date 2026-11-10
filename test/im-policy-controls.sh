@@ -123,7 +123,8 @@ HA_STATEMENTS=(
   'HA 的 HomeKit Bridge 由公司側直接設定，不是你**'
   '你不新增、不修改 HomeKit Bridge，也不改它的 filter'
   '家裡的人要多開放或少開放某個實體給家庭 app 時**：寫進 inbox 交給公司'
-  '配對由人在 LAN 上用家庭 app 做，不是你**：把配對碼寫進 inbox 報告交給公司'
+  '配對由人在 LAN 上用家庭 app 做，不是你**'
+  '配對碼（PIN 與 `X-HM://` URI）由公司側直接從 HA 讀——你不讀，也不寫進任何檔案、報告或訊息'
   '不自行解除任何已配對的控制器'
   '不刪除或重設已配對的 HomeKit Bridge'
   '不綁定或解除 Google Assistant 的帳號連結'
@@ -160,6 +161,10 @@ check "control: the old-ban grep can match"           grep -qF '不啟用、也�
 # company writes the bridge and its filter itself; the old sentence would send im back into it
 check_not "the old HomeKit assignment path is gone"     grep -qE 'inbox 指派切換時啟用與設定|照指派單上的實體清單' "$policy"
 check "control: the old-assignment grep can match"   grep -qE 'inbox 指派切換時啟用與設定|照指派單上的實體清單' <<<'- **照指派單上的實體清單設定 HomeKit Bridge 要 expose 的實體**'
+# k8scc#61, 1st widening (fleet-ops-d9): a HomeKit PIN or X-HM URI must not land in any record;
+# im wrote one into its jg-jiahd inbox report on 2026-11-10 following the old wording
+check_not "no wording that writes the pairing code to the inbox" grep -qE '(把|將)配對碼寫進' "$policy"
+check "control: the pairing-code grep can match"     grep -qE '(把|將)配對碼寫進' <<<'- **配對由人在 LAN 上用家庭 app 做，不是你**：把配對碼寫進 inbox 報告交給公司。'
 check_not "no wording that re-pairs for the family"   grep -qE '替家人重新配對' "$policy"
 check_not "no wording that turns homebridge off"      grep -qE '(關掉|停用|關閉|停止) ?homebridge' "$policy"
 check "control: the homebridge grep can match"        grep -qE '(關掉|停用|關閉|停止) ?homebridge' <<<'請停用 homebridge'
