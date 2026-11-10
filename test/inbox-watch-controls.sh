@@ -25,7 +25,9 @@ cat > "$work/bin/tmux" <<'EOF'
 printf '%s\n' "$*" >> "$FAKE_DIR/tmux.log"
 case "$1" in
   has-session) [ -f "$FAKE_DIR/session" ] ;;
-  display-message) cat "$FAKE_DIR/session" ;;
+  # like tmux 3.3a (measured on jg-jcc2): a bare `=claude` target prints an
+  # empty line with rc 0; only `=claude:` names the session's window
+  display-message) if [ "$4" = "=claude:" ]; then cat "$FAKE_DIR/session"; else echo; fi ;;
   capture-pane) [ ! -f "$FAKE_DIR/capfail" ] && cat "$FAKE_DIR/pane" ;;
   send-keys) if [ -f "$FAKE_DIR/sendfail" ]; then rm -f "$FAKE_DIR/sendfail"; exit 1; fi ;;
 esac
@@ -150,6 +152,10 @@ touch "$work/nosess/home/workspace/inbox/a.md"
 run nosess
 check "no session: nothing typed"               [ "$(sends nosess)" = 0 ]
 check "control: has-session was asked"          grep -q '^has-session' "$work/nosess/fake/tmux.log"
+setup badage; echo garbage > "$work/badage/fake/session"; touch "$work/badage/home/workspace/inbox/a.md"
+run badage
+check "session age unreadable: nothing typed"   [ "$(sends badage)" = 0 ]
+check "session age unreadable: says so"         grep -q "cannot read the session's age" "$work/badage/stderr"
 setup young; date +%s > "$work/young/fake/session"
 touch "$work/young/home/workspace/inbox/a.md"
 run young

@@ -98,8 +98,11 @@ tick() {
     [ -d "$dir" ] || return 0
     tmux has-session -t "=$session" 2>/dev/null || return 0
     local created now
-    created=$(tmux display-message -p -t "=$session" '#{session_created}' 2>/dev/null) || return 0
-    case "$created" in ''|*[!0-9]*) return 0 ;; esac
+    # `=claude:` (session, then its current window), not `=claude`: tmux 3.3a
+    # answers `display-message -t =claude` with an EMPTY line and rc 0, which
+    # made every tick return silently (measured on jg-jcc2, 2026-11-10, #60).
+    created=$(tmux display-message -p -t "=$session:" '#{session_created}' 2>/dev/null)
+    case "$created" in ''|*[!0-9]*) echo "inbox-watch: cannot read the session's age ('$created'), skipped" >&2; return 0 ;; esac
     now=$(date +%s)
     [ $((now - created)) -ge "$settle" ] || return 0
 
