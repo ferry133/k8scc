@@ -24,9 +24,23 @@
 #   exits (the controls use it, with a fake `sleep` that changes the inbox
 #   between ticks).
 #
-# Known limits, not handled: if a person is typing into the claude prompt at
-# the moment of a tick, the line is appended to their draft and submitted with
-# it; if Claude Code is on its login screen, the keys go there.
+# Pane gate (fleet-ops-d9's review of #60): keys are typed ONLY when the
+# bottom of the pane reads as Claude Code's idle, empty input prompt. A
+# permission or plan prompt is a menu in which a digit picks an option and
+# Enter confirms, so typing into one could approve a tool call; a half-typed
+# prompt would be submitted with the line appended. So the tick fails closed:
+# it skips, marks nothing and retries next tick, unless all of these hold in
+# the last INBOX_WATCH_TAIL (15) lines of `tmux capture-pane -p`:
+#   - an empty prompt line (only box edges, spaces and a lone `>` or `❯`)
+#     sits in the last 6 lines;
+#   - no line after it is a numbered option (`1. Yes`, `❯ 2. No`);
+#   - none of `esc to interrupt` (a turn is running), `Do you want to`,
+#     `Would you like to` (permission / plan prompts), `reverse-i-search`
+#     appears in the tail.
+# The patterns are hand-written from how Claude Code draws those screens, not
+# recorded from the image's build; a pattern that never matches shows up as a
+# steady `skipped (pane not idle: …)` in the pod log, not as silence.
+# Residual: a dialog that opens between the capture and the keys (ms).
 #
 # Started by entrypoint.sh in the background; it writes one line to stderr
 # (the pod log) at start and one per announcement, with counts, not names.
@@ -47,11 +61,38 @@ if [ "$interval" -eq 0 ] && [ -z "$ticks" ]; then
     exit 0
 fi
 
+tail="${INBOX_WATCH_TAIL:-15}"
+case "$tail" in ''|*[!0-9]*|0) echo "inbox-watch: INBOX_WATCH_TAIL '$tail' is not a positive whole number, not started" >&2; exit 0 ;; esac
+# Alternations, not bracket expressions, so multibyte characters match in any locale.
+EMPTY_PROMPT='^( |│|┃)*(>|❯)( | |│|┃)*$'
+MENU_OPTION='^( |│|┃)*(❯|>)?( )*[0-9]+\. '
+
 declare -A told=()
 
 # A file name made printable for one line of typed input: control characters
 # (a newline would press Enter mid-line) become '?', and it is cut at 120.
 printable() { printf '%s' "${1:0:120}" | LC_ALL=C tr -c '[:print:]\200-\377' '?'; }
+
+# pane_idle: succeed only when the pane's tail is the idle, empty prompt.
+# On failure prints the reason (no pane text) and returns 1. Fail closed.
+pane_idle() {
+    local pane tail_lines
+    if ! pane=$(tmux capture-pane -p -t "=$session:" 2>/dev/null); then
+        echo "capture-pane failed"; return 1
+    fi
+    tail_lines=$(printf '%s\n' "$pane" | awk '{a[NR]=$0} /[^[:space:]]/{last=NR} END{for(i=1;i<=last;i++)print a[i]}' | tail -n "$tail")
+    [ -n "$tail_lines" ] || { echo "empty pane"; return 1; }
+    if grep -qiE 'esc to interrupt' <<<"$tail_lines"; then echo "turn running"; return 1; fi
+    if grep -qiE 'Do you want to|Would you like to' <<<"$tail_lines"; then echo "dialog"; return 1; fi
+    if grep -qiE 'reverse-i-search' <<<"$tail_lines"; then echo "history search"; return 1; fi
+    local n
+    n=$(grep -nE "$EMPTY_PROMPT" <<<"$tail_lines" | tail -n1 | cut -d: -f1)
+    [ -n "$n" ] || { echo "no empty prompt"; return 1; }
+    local total; total=$(printf '%s\n' "$tail_lines" | wc -l | tr -d ' ')
+    [ $((total - n)) -lt 6 ] || { echo "empty prompt not at the bottom"; return 1; }
+    if tail -n +"$((n + 1))" <<<"$tail_lines" | grep -qE "$MENU_OPTION"; then echo "menu below the prompt"; return 1; fi
+    return 0
+}
 
 tick() {
     [ -d "$dir" ] || return 0
@@ -79,6 +120,11 @@ tick() {
     done
 
     [ "${#new[@]}" -gt 0 ] || return 0
+    local why
+    if ! why=$(pane_idle); then
+        echo "inbox-watch: ${#new[@]} file(s) waiting, skipped (pane not idle: ${why})" >&2
+        return 0
+    fi
     local list="" n
     for n in "${new[@]}"; do list+="${list:+, }$(printable "$n")"; done
     local msg="📥 inbox: ${#new[@]} new file(s) since this session started (${list}) — read ~/workspace/inbox/ and handle them per your policy, then rename each to <name>.read"
