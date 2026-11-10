@@ -102,6 +102,11 @@ jobs:
       - name: Check the claude-session controls
         run: test/claude-session-controls.sh
 
+      # inbox-watch runs as shipped with fake tmux / sleep: it types one line
+      # into the running session per new inbox file, never the contents (k8scc#59).
+      - name: Check the inbox-watch controls
+        run: test/inbox-watch-controls.sh
+
       # im's managed policy (root 7.3b): shipped to /etc/claude-code/CLAUDE.md
       # and saying what the 2026-10-15 ruling requires, with a control per line.
       - name: Check the im policy controls

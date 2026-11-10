@@ -88,4 +88,14 @@ if [ -n "${TTYD_AUTH_HEADER}" ]; then
     TTYD_ARGS+=("--auth-header" "${TTYD_AUTH_HEADER}")
 fi
 
+# Tell the claude already running in tmux about inbox files that arrive while
+# its session is open (k8scc#59). claude-session's notice reaches only the
+# person at a terminal that is just connecting. Runs for the pod's lifetime;
+# INBOX_WATCH_INTERVAL=0 turns it off.
+if command -v inbox-watch >/dev/null 2>&1; then
+    inbox-watch &
+else
+    echo "entrypoint: inbox-watch not installed, running sessions are not told about new inbox files" >&2
+fi
+
 exec ttyd "${TTYD_ARGS[@]}" /usr/local/bin/claude-session
