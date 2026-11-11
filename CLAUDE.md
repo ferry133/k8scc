@@ -78,6 +78,10 @@ The helper:
 Unit-testable without a browser: stub `window`/`document`/`WebSocket` and feed
 simulated frames (the helper is a self-contained IIFE using only those globals).
 
+## Selecting text on macOS (`macOptionClickForcesSelection`)
+
+Claude Code and tmux (`mouse on`) turn on mouse reporting, so xterm.js hands every drag to the app instead of selecting. Elsewhere Shift-drag forces a selection; **on macOS only Option-drag does, and only when `macOptionClickForcesSelection` is true** (xterm.js default false). `entrypoint.sh` passes it as a ttyd client option (k8scc#63). ttyd 1.7.7's client copies any option it does not know into `terminal.options` (`applyPreferences`' default branch, read in the 1.7.7 source), and it also reads options from the page's URL query, typed by the option's default, so `?macOptionClickForcesSelection=true` tries the same thing on an existing image without a rebuild. `login-link-helper.js` registers no key, copy or selection handler (read, not measured in a browser).
+
 ## Talos MCP Sidecar (isolated cluster diagnostics, plus one gated reboot)
 
 A second container, `talos-mcp` (same image, `command` override — see below), gives the agent Talos diagnostics for the client's own cluster without any credential crossing the remote-operator boundary. Two credentials can be mounted into it, and only into it. The design lives in `jg-base`: `openspec/changes/insideman` (the reader) and `openspec/changes/im-onsite-operator-tools` (the operator; this repo's sub-change of the same name, archived 2026-10-16 Taipei (the folder carries the UTC date), left its contract in `openspec/specs/talos-operator-escalation`, `im-permission-profile` and `operator-inbox`, and its decisions in `openspec/changes/archive/2026-10-15-im-onsite-operator-tools/design.md`).
