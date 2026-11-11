@@ -60,6 +60,10 @@ TTYD_ARGS=(
     "--client-option" "cursorStyle=block"
     "--client-option" "fontSize=15"
     "--client-option" "scrollback=10000"
+    # k8scc#63: Claude Code and tmux turn on mouse reporting, so xterm.js hands
+    # every drag to the app. Elsewhere Shift-drag forces a selection; on macOS
+    # only Option-drag does, and only with this option (default false).
+    "--client-option" "macOptionClickForcesSelection=true"
 )
 
 # Patched client page: makes the wrapped Claude OAuth login URL clickable
