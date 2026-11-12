@@ -163,7 +163,7 @@ run one
 check "one unread: one line typed"              [ "$(sends one)" = 1 ]
 check "one unread: then Enter"                  [ "$(enters one)" = 1 ]
 check "one unread: names it"                    grep -q '2026-11-10-ha-homekit.md' "$work/one/fake/tmux.log"
-check "one unread: says 1 new file"             grep -q '📥 inbox: 1 new file(s)' "$work/one/fake/tmux.log"
+check "one unread: says 1 assignment"           grep -q '📥 inbox: 1 unread assignment(s) not yet announced to this session' "$work/one/fake/tmux.log"
 check_not "one unread: .read file not named"    grep -q 'old.read' "$work/one/fake/tmux.log"
 check_not "one unread: contents never typed"    grep -q 'SECRETCONTENT' "$work/one/fake/tmux.log"
 check "one unread: pod log line, count only"    grep -q '^inbox-watch: announced 1 file(s)' "$work/one/stderr"
@@ -267,6 +267,32 @@ check "empty inbox: nothing typed"              [ "$(sends empty)" = 0 ]
 setup readonly; touch "$work/readonly/home/workspace/inbox/x.read"
 run readonly
 check "only .read files: nothing typed"         [ "$(sends readonly)" = 0 ]
+
+echo "im's own reports (k8scc#65)"
+# a fresh process = the watcher after a pod restart; jcom 2026-11-12 held exactly this
+setup reports
+for f in 2026-11-01-ha-homekit-cutover-report.md 2026-11-11-iot-inventory-jcom-report.md 2026-11-12-netdev-revert-failed-report.md 2026-11-11-iot-inventory-jcom.md.read; do
+  touch "$work/reports/home/workspace/inbox/$f"; done
+run reports
+check "only reports and .read (after a restart): nothing typed" [ "$(sends reports)" = 0 ]
+check_not "only reports: no pod-log line either"  grep -q 'announced\|waiting' "$work/reports/stderr"
+setup mixed
+touch "$work/mixed/home/workspace/inbox/2026-11-12-ha-audit-report.md" "$work/mixed/home/workspace/inbox/2026-11-12-ha-new-task.md"
+run mixed
+check "report beside an assignment: one line"   [ "$(sends mixed)" = 1 ]
+check "report beside an assignment: counts 1"   grep -q '📥 inbox: 1 unread' "$work/mixed/fake/tmux.log"
+check "report beside an assignment: names the assignment" grep -q '(2026-11-12-ha-new-task.md)' "$work/mixed/fake/tmux.log"
+check_not "report beside an assignment: report not named" grep -q 'audit-report' "$work/mixed/fake/tmux.log"
+setup selfwrite
+touch "$work/selfwrite/home/workspace/inbox/a.md"
+echo 'touch "$FAKE_DIR/../home/workspace/inbox/2026-11-12-ha-config-entry-audit-report.md"' > "$work/selfwrite/fake/hook.1"
+run selfwrite INBOX_WATCH_TICKS=2
+check "a report im writes mid-session is not typed back to it" [ "$(sends selfwrite)" = 1 ]
+# the rule is the suffix, not the word: these are assignments
+setup notsuffix
+touch "$work/notsuffix/home/workspace/inbox/2026-11-12-report-request.md" "$work/notsuffix/home/workspace/inbox/weekly-report.md.txt"
+run notsuffix
+check "control: 'report' elsewhere in the name is still an assignment" grep -q '📥 inbox: 2 unread' "$work/notsuffix/fake/tmux.log"
 
 echo "inbox-watch controls: passed=$pass failed=$fail"
 [ "$fail" -eq 0 ]

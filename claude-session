@@ -252,13 +252,14 @@ core.sshCommand=ssh -F $cfg
 EOF
 }
 
-# Print one line when the inbox directory holds a file not yet marked read
-# (anything not ending in `.read`). Counts files; never opens them. Prints
-# nothing when the directory is absent, empty, or fully read.
+# Print one line when the inbox directory holds an assignment not yet marked
+# read: anything not ending in `.read`, and not one of im's own reports
+# (`*-report.md`, k8scc#65). Counts files; never opens them. Prints nothing
+# when the directory is absent, empty, or holds only read files and reports.
 inbox_notice() {
     local dir="$1" n
     [ -d "$dir" ] || return 0
-    n=$(find "$dir" -mindepth 1 -maxdepth 1 -type f ! -name '*.read' | wc -l | tr -d ' ')
+    n=$(find "$dir" -mindepth 1 -maxdepth 1 -type f ! -name '*.read' ! -name '*-report.md' | wc -l | tr -d ' ')
     [ "$n" -gt 0 ] || return 0
     printf '📥 inbox: %s file(s) — read %s/ before anything else\n' "$n" "${dir/#"$HOME"/\~}"
 }

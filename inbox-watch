@@ -12,13 +12,21 @@
 #
 # Every INBOX_WATCH_INTERVAL seconds: when the tmux session `claude` exists
 # and is at least INBOX_WATCH_SETTLE seconds old (so keys do not land in a
-# Claude Code that is still starting), any unread file (not ending in `.read`)
-# not yet announced is announced by typing ONE line into that session and
-# pressing Enter. The line names the files; their contents are never opened.
+# Claude Code that is still starting), any unread assignment (not ending in
+# `.read` or `-report.md`) not yet announced is announced by typing ONE line
+# into that session and pressing Enter. The line names the files; their contents are never opened.
 #
 # - No session => nothing. A headless `claude -p` was ruled out (direction 2).
-# - A file is announced once per watcher lifetime. A file that is renamed to
-#   `.read` and later reappears under the same name is announced again.
+# - im's own reports are not assignments (k8scc#65): every file im writes
+#   into the inbox ends in `-report.md` (im-policy "inbox 慣例"), and those
+#   are never announced. Measured on jcom, 2026-11-12: without this, the first
+#   idle tick after a pod restart announced im's six old reports as "6 new
+#   file(s)", and an audit report im wrote at 13:46Z was announced back to it
+#   at 13:47:21Z. Neither used mtime; nothing here reads one.
+# - A file is announced once per watcher lifetime. A pod restart starts a new
+#   watcher and a new session, so an assignment still unread (not yet `.read`)
+#   is announced again -- on purpose: the new session has not seen it. A file
+#   that is renamed to `.read` and later reappears is announced again.
 # - A failed send-keys marks nothing, so the next tick retries.
 # - INBOX_WATCH_INTERVAL=0 turns it off. INBOX_WATCH_TICKS=N runs N ticks and
 #   exits (the controls use it, with a fake `sleep` that changes the inbox
@@ -129,7 +137,7 @@ tick() {
         name=${f##*/}
         present+=("$name")
         [ -n "${told[$name]:-}" ] || new+=("$name")
-    done < <(find "$dir" -mindepth 1 -maxdepth 1 -type f ! -name '*.read' -print0 2>/dev/null)
+    done < <(find "$dir" -mindepth 1 -maxdepth 1 -type f ! -name '*.read' ! -name '*-report.md' -print0 2>/dev/null)
 
     # forget files that are gone (read, or removed), so a reappearing name counts again
     local k keep
@@ -147,7 +155,7 @@ tick() {
     fi
     local list="" n
     for n in "${new[@]}"; do list+="${list:+, }$(printable "$n")"; done
-    local msg="📥 inbox: ${#new[@]} new file(s) since this session started (${list}) — read ~/workspace/inbox/ and handle them per your policy, then rename each to <name>.read"
+    local msg="📥 inbox: ${#new[@]} unread assignment(s) not yet announced to this session (${list}) — read ~/workspace/inbox/ and handle them per your policy, then rename each to <name>.read"
     if tmux send-keys -t "=$session:" -l "$msg" 2>/dev/null && tmux send-keys -t "=$session:" Enter 2>/dev/null; then
         for n in "${new[@]}"; do told[$n]=1; done
         echo "inbox-watch: announced ${#new[@]} file(s) to the running session" >&2

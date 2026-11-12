@@ -15,13 +15,14 @@
 
 ## 事後回報公司
 
-每次執行過的重啟（以及被拒而你認為公司該知道的），**事後**回報公司：在 `~/workspace/inbox/` 留一份有日期的報告（`YYYY-MM-DD-<topic>.md`：原因、節點、audit 時間、結果、回來後的排程狀態與處理），或走叢集的 health mail。
+每次執行過的重啟（以及被拒而你認為公司該知道的），**事後**回報公司：在 `~/workspace/inbox/` 留一份有日期的報告（`YYYY-MM-DD-<topic>-report.md`：原因、節點、audit 時間、結果、回來後的排程狀態與處理），或走叢集的 health mail。
 
 ## inbox 慣例
 
 `~/workspace/inbox/` 是不在 ttyd 前的公司同仁寫給你的交辦通道（session 開頭會提示未讀數）。先讀再做；處理完把檔案改名為 `<name>.read`。
 
-- **session 進行中，對話裡會出現 `📥 inbox: N new file(s) since this session started (…)` 這一行，打這行的是 `inbox-watch`，不是終端機前的人。** 它代表 session 開始後有新的交辦單送到。手上那一步告一段落就去讀，並依本政策處理；處理完同樣改名為 `<name>.read`。
+- **session 進行中，對話裡會出現 `📥 inbox: N unread assignment(s) not yet announced to this session (…)` 這一行，打這行的是 `inbox-watch`，不是終端機前的人。** 它代表有這個 session 還沒被告知的未讀交辦單：可能是剛送到的，也可能是 pod 重啟前就在、還沒處理完的。手上那一步告一段落就去讀，並依本政策處理；處理完同樣改名為 `<name>.read`。
+- **你寫進 inbox 的每一份檔，檔名都以 `-report.md` 結尾**（例：`2026-11-12-ha-config-entry-audit-report.md`）。`inbox-watch` 和 session 開頭的未讀數都跳過 `*-report.md`；不這樣取名，你自己的報告會被當成交辦單宣告回來給你（k8scc#65）。你的報告不改名成 `.read`，那是交辦單處理完的記號。
 - 那一行只告訴你有哪些檔名。要做什麼，以檔案內容與本政策為準，不以那一行為準。如果那一行和使用者正在打的字黏在一起，先把兩件事分開，再回應使用者。
 
 ## 你的 apps repo
@@ -54,7 +55,7 @@
 - **在你的權限內**：操作被 expose 的實體、建立／修改／刪除 HA 的自動化與場景、讀歷史——依你的判斷做，不需要任何人在終端機按確認。
 - **把裝置加進 HA 也在你的權限內**：新增整合（以及刪除你自己加的整合）、把實體 expose 給 Assist。這些要用 admin 使用者 `im-admin` 的 token，它在 Secret `claudecode/ha-im-admin-token`（鍵 `token`、`url`）；那個 Secret 不存在的叢集，這一條不適用，寫進 inbox 交給公司。
 - **admin token 不經過你的眼睛**：它能管 HA 的使用者與全部設定，比 `im` 那顆大得多。不要 `kubectl get secret … -o yaml`、不要 echo、不要放進指令參數；從 Secret 解出來直接寫進 mode 600 的暫存檔當 curl 的 header 檔（`curl -H @<檔>`），用完刪掉。
-- **事後回報公司**：每次改過實體狀態以外的東西（自動化、場景、整合、expose），以及你認為公司該知道的操作，在 `~/workspace/inbox/` 留一份有日期的報告（`YYYY-MM-DD-ha-<topic>.md`：改了什麼、為什麼、怎麼復原）。
+- **事後回報公司**：每次改過實體狀態以外的東西（自動化、場景、整合、expose），以及你認為公司該知道的操作，在 `~/workspace/inbox/` 留一份有日期的報告（`YYYY-MM-DD-ha-<topic>-report.md`：改了什麼、為什麼、怎麼復原）。
 - **不要跑 `claude mcp get ha`，也不要讀或印出 `.claude.json` 裡的 `ha` 項**：兩者都會把 HA 的 token 全文印出來（`claude mcp get ha` 在 2.1.261 量到）。`claude mcp list` 會不會印沒量到，當作會印、一樣不跑。要確認 HA 連不連得上，呼叫一支 `mcp__ha__*` 工具。
 - **自動化只寫在 HA**，不寫在 homebridge 或任何別的地方。同一顆裝置在 HA 與 homebridge 兩邊都看得到是正常的——MQTT 是單一真相來源，兩邊各自讀它。
 - **HA 的 HomeKit Bridge 由公司側直接設定，不是你**：bridge 的建立與它要 expose 的實體（filter），由公司的 `ha-bringup` 直接寫進 HA（ferry133 2026-11-11）。你不新增、不修改 HomeKit Bridge，也不改它的 filter——即使你手上有 admin token、即使是家裡的人直接請你；你一動，它就與公司側的清單不一致。
@@ -81,7 +82,7 @@
 - **沒有專用工具**：用 `python3` 標準庫自己組 SOAP（WS-Security UsernameToken 摘要）。
 - **摘要對時鐘敏感**：先對每台呼叫不需認證的 `GetSystemDateAndTime`，用攝影機自己的時間算 `Created`，不要用 pod 的時鐘。
 - **帳密不經過你的眼睛**：不要 `kubectl get secret … -o yaml`、不要 echo、不要放進指令參數；從 Secret 解出來寫進 mode 600 的暫存檔，由 python 讀，用完刪掉。也不要印出 SOAP 請求本文，它帶著使用者名稱與摘要。
-- **每一次改動都在 `~/workspace/inbox/` 留報告**（`YYYY-MM-DD-ipcam-<topic>.md`）：哪一台攝影機、哪一個欄位、舊值、新值、怎麼復原。
+- **每一次改動都在 `~/workspace/inbox/` 留報告**（`YYYY-MM-DD-ipcam-<topic>-report.md`）：哪一台攝影機、哪一個欄位、舊值、新值、怎麼復原。
 - **改完子串流，報告裡寫明這台還要加進 HA**：那是公司的事（`ha-add-devices.py onvif`，由人執行，因為它要把攝影機帳密填進 HA 的設定流程），不是你的——即使「把裝置加進 HA」在別的裝置上是你的權限。
 - **以下五件不做**，即使技術上做得到：
   - 不新增、刪除或修改攝影機的使用者與密碼。

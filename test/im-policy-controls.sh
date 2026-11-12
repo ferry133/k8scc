@@ -39,6 +39,18 @@ check "only company staff sit at the ttyd"            grep -q '只會是公司�
 check_not "control: a sentence that is not there"     grep -q 'reboot is forbidden' "$policy"
 check "inbox-watch line is named as not from the person" grep -q '打這行的是 `inbox-watch`，不是終端機前的人' "$policy"
 check "inbox-watch line: act on the file, not the line"  grep -q '以檔案內容與本政策為準，不以那一行為準' "$policy"
+# k8scc#65: im names what it writes `-report.md`, and inbox-watch skips exactly that
+check "inbox: im's own files end in -report.md"       grep -qF '你寫進 inbox 的每一份檔，檔名都以 `-report.md` 結尾' "$policy"
+# the line the policy quotes is the line inbox-watch types (extracted, not copied)
+iw_line=$(sed -n 's/^ *local msg="\(📥 inbox: \)\${#new\[@\]}\(.*\) (\${list}).*/\1N\2 (…)/p' inbox-watch)
+check "control: the inbox-watch line could be extracted" test -n "$iw_line"
+check "policy quotes the line inbox-watch types"      grep -qF "\`$iw_line\`" "$policy"
+check_not "the old 'since this session started' line is gone" grep -qF 'since this session started' "$policy"
+# every report name the image hands im ends in -report.md (policy and netdev's revert-failed note)
+bad_names=$(grep -ohE '(YYYY-MM-DD|\{date\})-[A-Za-z<>{}_-]*\.md' "$policy" netdev_mcp_server.py | grep -v -- '-report\.md$')
+check "every report name im is told to write ends in -report.md" test -z "$bad_names"
+check "control: the name grep finds names at all"     grep -qE '(YYYY-MM-DD|\{date\})-[A-Za-z<>{}_-]*-report\.md' "$policy" netdev_mcp_server.py
+check "control: the name grep catches a bare .md"     bash -c 'grep -ohE "(YYYY-MM-DD|\{date\})-[A-Za-z<>{}_-]*\.md" <<<"(\`YYYY-MM-DD-ha-<topic>.md\`)" | grep -qv -- "-report\.md$"'
 
 echo "apps repo section"
 # section <file>: the "## 你的 apps repo" section alone, so a phrase elsewhere

@@ -420,6 +420,15 @@ touch "$h/workspace/inbox/second.txt"
 out=$(run_session "$h")
 check "two unread: count is 2"                      grep -q '^📥 inbox: 2 file(s)' <<<"$out"
 
+h="$work/inbox-reports"
+mkdir -p "$h/workspace/inbox"
+touch "$h/workspace/inbox/2026-11-11-iot-inventory-jcom-report.md" "$h/workspace/inbox/done.read"
+out=$(run_session "$h")
+check_not "only im's reports and .read: nothing (k8scc#65)" grep -q 'inbox' <<<"$out"
+touch "$h/workspace/inbox/2026-11-12-report-request.md"
+out=$(run_session "$h")
+check "control: an assignment beside the report: count is 1" grep -q '^📥 inbox: 1 file(s)' <<<"$out"
+
 h="$work/inbox-read"
 mkdir -p "$h/workspace/inbox"
 touch "$h/workspace/inbox/done.read"
