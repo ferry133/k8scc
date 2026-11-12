@@ -1402,7 +1402,7 @@ def _respond(body: dict) -> str:
     return json.dumps(body, indent=2, sort_keys=False, ensure_ascii=False)
 
 
-INBOX_NOTE = ("Write ~/workspace/inbox/{date}-netdev-revert-failed.md NOW, before anything else: the target, the "
+INBOX_NOTE = ("Write ~/workspace/inbox/{date}-netdev-revert-failed-report.md NOW, before anything else: the target, the "
               "will_change below, snapshot digest {digest}, what failed, and what you tried. This sidecar cannot "
               "write the inbox; you are the only way a person learns of this. Ticket #{ticket} stays open.")
 
