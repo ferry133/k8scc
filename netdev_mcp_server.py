@@ -77,6 +77,7 @@ import re
 import secrets
 import shutil
 import socket
+import ssl
 import subprocess
 import sys
 import threading
@@ -300,13 +301,67 @@ class ControllerError(Exception):
         self.answered = answered
 
 
-def _controller_client(headers: dict) -> httpx.Client:
-    verify = CA_FILE if CONTROLLER_URL.startswith("https://") else True
+class _PinnedContext(ssl.SSLContext):
+    """Accepts exactly one certificate, compared byte for byte on every new
+    connection: `wrap_socket` is where httpx's sync transport hands the
+    connected socket to TLS, after the handshake has already verified the
+    peer against the same single anchor."""
+    pinned_der = b""
+
+    def wrap_socket(self, *args, **kwargs):
+        sock = super().wrap_socket(*args, **kwargs)
+        if sock.getpeercert(binary_form=True) != self.pinned_der:
+            sock.close()
+            raise ssl.SSLCertVerificationError(
+                "the console presented a certificate that is not the one in UNIFI_CA_FILE (pinned: exactly that "
+                "certificate, nothing it signed); to trust a CA instead, give the CA and the chain (two or more "
+                "certificates), and the hostname is then checked")
+        return sock
+
+
+_PEM_CERT = re.compile(r"-----BEGIN CERTIFICATE-----.+?-----END CERTIFICATE-----", re.S)
+
+
+def _tls_context() -> "tuple[ssl.SSLContext, str]":
+    """The context every controller request is verified with, and its mode.
+
+    A UniFi console's factory certificate is self-signed for `unifi.local`,
+    valid for no address the sidecar dials. FAC1's (fleet-ops-b0, 2026-11-14):
+    SANs unifi.local, localhost, [::1], 127.0.0.1, fe80::1; keyUsage including
+    Certificate Sign; no basicConstraints, no SKI/AKI. Verified as a CA with
+    the hostname checked, every request failed the handshake (`IP address
+    mismatch`); Python 3.13's VERIFY_X509_STRICT rejects it besides ("invalid
+    CA certificate": keyCertSign without basicConstraints). OpenSSL counts it
+    as a CA, so no rule reading the CA bit can tell it from a root CA — the
+    first version of this fix tried and put FAC1 in CA mode.
+
+    So the mode is decided by count, and the pin by identity:
+    - exactly one certificate in the file ⇒ pinned: it is the only anchor, the
+      hostname is not checked, the strict flag is cleared, and the peer must
+      be that very certificate (DER equal) — so a CA alone in the file never
+      authorises what it signed with the hostname off.
+    - two or more ⇒ CA mode: the hostname and the strict flag stay on."""
     try:
-        return httpx.Client(base_url=CONTROLLER_URL, verify=verify, timeout=READ_TIMEOUT,
-                            headers={"Accept": "application/json", **headers}, follow_redirects=False)
+        with open(CA_FILE, encoding="ascii", errors="replace") as fh:
+            blocks = _PEM_CERT.findall(fh.read())
+        if len(blocks) == 1:
+            ctx = _PinnedContext(ssl.PROTOCOL_TLS_CLIENT)
+            ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+            ctx.check_hostname = False
+            ctx.load_verify_locations(cadata=blocks[0])
+            ctx.verify_flags &= ~ssl.VERIFY_X509_STRICT
+            ctx.pinned_der = ssl.PEM_cert_to_DER_cert(blocks[0])
+            return ctx, "pinned certificate (exactly the one in UNIFI_CA_FILE; hostname not checked)"
+        ctx = ssl.create_default_context(cafile=CA_FILE)
     except (OSError, ValueError) as exc:   # ssl.SSLError is an OSError
         raise ControllerError(f"controller CA {CA_FILE} (UNIFI_CA_FILE) cannot be loaded: {exc}") from None
+    return ctx, f"CA + hostname ({len(blocks)} certificates)"
+
+
+def _controller_client(headers: dict) -> httpx.Client:
+    verify = _tls_context()[0] if CONTROLLER_URL.startswith("https://") else True
+    return httpx.Client(base_url=CONTROLLER_URL, verify=verify, timeout=READ_TIMEOUT,
+                        headers={"Accept": "application/json", **headers}, follow_redirects=False)
 
 
 def _legacy_data(method: str, path: str, resp: httpx.Response) -> list:
@@ -1796,6 +1851,11 @@ def _startup_readings() -> list[str]:
     elif CONTROLLER_URL.startswith("http://"):
         readings.append("insecure http accepted (test only): NETDEV_ALLOW_INSECURE_HTTP=1")
     readings.append("controller: " + (urlsplit(CONTROLLER_URL).netloc or "(unset)") + f", site {SITE}")
+    if CONTROLLER_URL.startswith("https://") and not MISSING_CONFIG:
+        try:
+            readings.append("TLS: " + _tls_context()[1])
+        except ControllerError as exc:
+            readings.append(f"TLS: unusable ({exc})")
     # exactly "ok": jg-base's daily-check row 31 reads anything else as a fail.
     # "ok" means the account file is usable; whether the console accepts its
     # login shows on the `controller version:` line below (it reads first).

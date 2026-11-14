@@ -33,6 +33,8 @@ import pathlib
 import re
 import socket
 import socketserver
+import ssl
+import subprocess
 import sys
 import tempfile
 import threading
@@ -84,9 +86,10 @@ class _Server(ThreadingHTTPServer):
 
 
 class FakeController:
-    """Answers the paths the ROUTES table names from the fixture; records requests."""
+    """Answers the paths the ROUTES table names from the fixture; records requests.
+    `tls=(cert, key)` serves it over https with that certificate."""
 
-    def __init__(self):
+    def __init__(self, tls=None):
         self.requests = []
         self.data = json.loads(json.dumps(FIXTURES))
         self.status = {}        # path -> forced HTTP status
@@ -159,7 +162,15 @@ class FakeController:
             do_PUT = do_POST = do_DELETE = _write
 
         self.server = _Server(("127.0.0.1", 0), Handler)
-        self.url = f"http://127.0.0.1:{self.server.server_address[1]}"
+        scheme = "http"
+        if tls:
+            ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            ctx.load_cert_chain(*tls)
+            self.server.socket = ctx.wrap_socket(self.server.socket, server_side=True)
+            # a refused handshake resets the connection; the client's answer is the reading
+            self.server.handle_error = lambda request, client_address: None
+            scheme = "https"
+        self.url = f"{scheme}://127.0.0.1:{self.server.server_address[1]}"
         threading.Thread(target=self.server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True).start()
 
     def close(self):
@@ -570,6 +581,142 @@ class Configuration(Case):
         with self.subTest(control="the password really was in play: the fake received it at login"):
             self.assertIn({"username": READER_USER, "password": READER_VALUE},
                           [b for _, p, b in self.h.fake.writes if p == "/api/auth/login"])
+
+
+def _openssl(*args, cwd):
+    """openssl must exist: a TLS control that cannot make its certificate is
+    not measured, and must not read as passed."""
+    r = subprocess.run(["openssl", *args], cwd=cwd, capture_output=True, text=True)
+    if r.returncode != 0:
+        raise AssertionError(f"harness, not guard: openssl {' '.join(args)}: {r.stderr.strip()}")
+
+
+def make_certs(d: pathlib.Path) -> dict:
+    """Certificates shaped like the ones that matter:
+    - fac1: FAC1's factory certificate as fleet-ops-b0 read it (2026-11-14):
+      self-signed CN=unifi.local; keyUsage incl. Certificate Sign; its EKUs;
+      no basicConstraints, no SKI/AKI. Its SANs minus IP:127.0.0.1, which is
+      where the fake listens: with it a hostname check would pass and the
+      control below would stop discriminating (fleet-ops-b0).
+    - fac1_child: signed by fac1's key. OpenSSL counts fac1 as a CA, so this
+      chains to it; only the identity check refuses it.
+    - plain: self-signed CN=unifi.local with no extensions besides SKI.
+    - other: another such certificate, a stranger's.
+    - root + leaf_ip / leaf_name: a customer's own CA (CA:TRUE) and two leaves
+      it signed, one valid for 127.0.0.1 and one only for unifi.local; chain =
+      root + leaf_ip, a two-certificate file."""
+    (d / "plain.cnf").write_text("[req]\ndistinguished_name=dn\nprompt=no\n[dn]\nCN=unifi.local\n")
+    (d / "fac1.cnf").write_text(
+        "[req]\ndistinguished_name=dn\nprompt=no\nx509_extensions=e\n[dn]\nCN=unifi.local\n[e]\n"
+        "keyUsage=digitalSignature,nonRepudiation,keyEncipherment,dataEncipherment,keyCertSign\n"
+        "extendedKeyUsage=serverAuth,clientAuth,codeSigning,timeStamping\n"
+        "subjectAltName=DNS:unifi.local,DNS:localhost,DNS:[::1],IP:FE80::1\n"
+        "subjectKeyIdentifier=none\nauthorityKeyIdentifier=none\n")
+    (d / "ca.cnf").write_text("[req]\ndistinguished_name=dn\nprompt=no\nx509_extensions=v3\n[dn]\nCN=Customer Root CA\n"
+                              "[v3]\nbasicConstraints=critical,CA:TRUE\nkeyUsage=keyCertSign,cRLSign\n")
+    for name, cnf in (("fac1", "fac1.cnf"), ("plain", "plain.cnf"), ("other", "plain.cnf"), ("root", "ca.cnf")):
+        _openssl("req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", f"{name}.key", "-out", f"{name}.pem",
+                 "-days", "2", "-config", cnf, cwd=d)
+    for name, issuer, ext in (("fac1_child", "fac1", ""), ("leaf_ip", "root", "subjectAltName=IP:127.0.0.1\n"),
+                              ("leaf_name", "root", "subjectAltName=DNS:unifi.local\n")):
+        (d / f"{name}.ext").write_text(ext + "basicConstraints=CA:FALSE\n")
+        _openssl("req", "-new", "-newkey", "rsa:2048", "-nodes", "-keyout", f"{name}.key", "-out", f"{name}.csr",
+                 "-config", "plain.cnf", cwd=d)
+        _openssl("x509", "-req", "-in", f"{name}.csr", "-CA", f"{issuer}.pem", "-CAkey", f"{issuer}.key",
+                 "-CAcreateserial", "-out", f"{name}.pem", "-days", "2", "-extfile", f"{name}.ext", cwd=d)
+    (d / "two.pem").write_text((d / "fac1.pem").read_text() + (d / "other.pem").read_text())
+    (d / "chain.pem").write_text((d / "root.pem").read_text() + (d / "leaf_ip.pem").read_text())
+    names = ("fac1", "fac1_child", "plain", "other", "root", "leaf_ip", "leaf_name", "two", "chain")
+    return {n: d / f"{n}.pem" for n in names} | {f"{n}.key": d / f"{n}.key" for n in names if (d / f"{n}.key").exists()}
+
+
+class TLS(Case):
+    """The fake served over real TLS: what the console's certificate does to
+    the handshake is the one thing a plain-http fake cannot show."""
+
+    def setUp(self):
+        super().setUp()
+        self.certs = make_certs(pathlib.Path(self.h.tmp.name))
+
+    def serve(self, name):
+        self.h.fake.close()
+        self.h.fake = FakeController(tls=(self.certs[name], self.certs[f"{name}.key"]))
+
+    def devices(self, ca):
+        m = self.h.load(ca=str(self.certs[ca]), insecure=False)
+        return m, self.h.call(m.get_devices)[0]
+
+    def test_the_fixture_is_fac1_shaped(self):
+        # the readings fleet-ops-b0 took on FAC1's own pem, reproduced here, so
+        # a fixture that drifts from it shows (the first fixture had no
+        # keyCertSign, read as non-CA, and let a wrong rule pass)
+        ctx = ssl.create_default_context(cafile=str(self.certs["fac1"]))
+        self.assertEqual(ctx.cert_store_stats()["x509_ca"], 1, "OpenSSL counts it as a CA, as on FAC1")
+        self.serve("fac1")
+        import httpx
+        strict = ssl.create_default_context(cafile=str(self.certs["fac1"]))
+        strict.check_hostname = False
+        strict.verify_flags |= ssl.VERIFY_X509_STRICT       # Python ≥ 3.13's default; set here so 3.11/3.12 measure it too
+        with self.assertRaisesRegex(httpx.ConnectError, "invalid CA certificate"):
+            httpx.get(self.h.fake.url + LEGACY + "/stat/device", verify=strict)
+        # the first image's context: refused on 3.13 by strict, on 3.11 by the hostname
+        with self.assertRaisesRegex(httpx.ConnectError, "IP address mismatch|not valid for|invalid CA certificate"):
+            httpx.get(self.h.fake.url + LEGACY + "/stat/device", verify=str(self.certs["fac1"]))
+
+    def test_fac1_cert_pinned_is_read(self):
+        self.serve("fac1")
+        m, out = self.devices("fac1")
+        self.assertIn("dev-gw", out)
+        self.assertIn("TLS: pinned certificate", self.h.readings())
+        with self.subTest(control="the plain-shaped factory certificate is pinned the same way"):
+            self.serve("plain")
+            self.assertIn("dev-gw", self.devices("plain")[1])
+
+    def test_a_certificate_the_pin_signed_is_refused(self):
+        self.serve("fac1_child")
+        m, out = self.devices("fac1")
+        self.assertIn("error:", out)
+        self.assertIn("not the one in UNIFI_CA_FILE", out)
+        self.assertNotIn("dev-gw", out)
+        self.assertEqual(self.h.fake.requests, [], "nothing reached the console, not even the login")
+        with self.subTest(control="it does chain: without the identity check the same anchor accepts it"):
+            import httpx
+            ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+            ctx.check_hostname = False
+            ctx.load_verify_locations(cafile=str(self.certs["fac1"]))
+            ctx.verify_flags &= ~ssl.VERIFY_X509_STRICT
+            self.assertEqual(httpx.get(self.h.fake.url + LEGACY + "/stat/device", verify=ctx).status_code, 401)
+
+    def test_another_certificate_is_refused(self):
+        self.serve("fac1")
+        m, out = self.devices("other")
+        self.assertIn("CERTIFICATE_VERIFY_FAILED", out)
+        self.assertNotIn("dev-gw", out)
+        self.assertEqual(self.h.fake.requests, [])
+
+    def test_a_single_ca_is_a_pin_not_a_licence(self):
+        # a root CA alone in the file is pinned like any one certificate: what
+        # it signed is refused, never read with the hostname off
+        self.serve("leaf_ip")
+        m, out = self.devices("root")
+        self.assertIn("not the one in UNIFI_CA_FILE", out)
+        self.assertNotIn("dev-gw", out)
+
+    def test_two_certificates_keep_the_hostname_check(self):
+        # one of them is the very certificate served (fleet-ops-b0's edge)
+        self.serve("fac1")
+        m, out = self.devices("two")
+        self.assertIn("error:", out)
+        self.assertNotIn("dev-gw", out)
+        self.assertIn("TLS: CA + hostname (2 certificates)", self.h.readings())
+
+    def test_a_chain_is_ca_mode_with_the_hostname_checked(self):
+        self.serve("leaf_name")
+        m, out = self.devices("chain")
+        self.assertIn("IP address mismatch", out, "the hostname check is what refused it")
+        with self.subTest(control="the same chain reads a leaf valid for the address dialled"):
+            self.serve("leaf_ip")
+            self.assertIn("dev-gw", self.devices("chain")[1])
 
 
 class StartupStates(Case):
