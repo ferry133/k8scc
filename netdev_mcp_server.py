@@ -301,34 +301,61 @@ class ControllerError(Exception):
         self.answered = answered
 
 
+class _PinnedContext(ssl.SSLContext):
+    """Accepts exactly one certificate, compared byte for byte on every new
+    connection: `wrap_socket` is where httpx's sync transport hands the
+    connected socket to TLS, after the handshake has already verified the
+    peer against the same single anchor."""
+    pinned_der = b""
+
+    def wrap_socket(self, *args, **kwargs):
+        sock = super().wrap_socket(*args, **kwargs)
+        if sock.getpeercert(binary_form=True) != self.pinned_der:
+            sock.close()
+            raise ssl.SSLCertVerificationError(
+                "the console presented a certificate that is not the one in UNIFI_CA_FILE (pinned: exactly that "
+                "certificate, nothing it signed); to trust a CA instead, give the CA and the chain (two or more "
+                "certificates), and the hostname is then checked")
+        return sock
+
+
+_PEM_CERT = re.compile(r"-----BEGIN CERTIFICATE-----.+?-----END CERTIFICATE-----", re.S)
+
+
 def _tls_context() -> "tuple[ssl.SSLContext, str]":
     """The context every controller request is verified with, and its mode.
 
-    A UniFi console's factory certificate is self-signed for `unifi.local`:
-    on FAC1 its SANs are unifi.local, localhost, [::1], 127.0.0.1 and fe80::1,
-    never the address the sidecar dials, and it has no basicConstraints
-    (fleet-ops-b0, 2026-11-14). Verified as a CA with the hostname checked,
-    every request fails the handshake (`IP address mismatch`), and Python
-    3.13's VERIFY_X509_STRICT rejects it besides (debian:12 ships 3.11).
+    A UniFi console's factory certificate is self-signed for `unifi.local`,
+    valid for no address the sidecar dials. FAC1's (fleet-ops-b0, 2026-11-14):
+    SANs unifi.local, localhost, [::1], 127.0.0.1, fe80::1; keyUsage including
+    Certificate Sign; no basicConstraints, no SKI/AKI. Verified as a CA with
+    the hostname checked, every request failed the handshake (`IP address
+    mismatch`); Python 3.13's VERIFY_X509_STRICT rejects it besides ("invalid
+    CA certificate": keyCertSign without basicConstraints). OpenSSL counts it
+    as a CA, so no rule reading the CA bit can tell it from a root CA — the
+    first version of this fix tried and put FAC1 in CA mode.
 
-    So, two modes, decided by what UNIFI_CA_FILE holds:
-    - exactly one certificate that OpenSSL does not count as a CA ⇒ a pinned
-      leaf: it is the only trust anchor, the hostname is not checked and the
-      strict flag is cleared. A non-CA anchor signs nothing the handshake
-      would accept, so the binding is that certificate's key.
-    - anything else (a CA, a chain, several certificates) ⇒ the hostname and
-      the strict flag stay on. Turning the hostname check off under a CA
-      would accept any certificate that CA ever issued, for any host."""
+    So the mode is decided by count, and the pin by identity:
+    - exactly one certificate in the file ⇒ pinned: it is the only anchor, the
+      hostname is not checked, the strict flag is cleared, and the peer must
+      be that very certificate (DER equal) — so a CA alone in the file never
+      authorises what it signed with the hostname off.
+    - two or more ⇒ CA mode: the hostname and the strict flag stay on."""
     try:
+        with open(CA_FILE, encoding="ascii", errors="replace") as fh:
+            blocks = _PEM_CERT.findall(fh.read())
+        if len(blocks) == 1:
+            ctx = _PinnedContext(ssl.PROTOCOL_TLS_CLIENT)
+            ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+            ctx.check_hostname = False
+            ctx.load_verify_locations(cadata=blocks[0])
+            ctx.verify_flags &= ~ssl.VERIFY_X509_STRICT
+            ctx.pinned_der = ssl.PEM_cert_to_DER_cert(blocks[0])
+            return ctx, "pinned certificate (exactly the one in UNIFI_CA_FILE; hostname not checked)"
         ctx = ssl.create_default_context(cafile=CA_FILE)
     except (OSError, ValueError) as exc:   # ssl.SSLError is an OSError
         raise ControllerError(f"controller CA {CA_FILE} (UNIFI_CA_FILE) cannot be loaded: {exc}") from None
-    stats = ctx.cert_store_stats()
-    if stats.get("x509") == 1 and stats.get("x509_ca") == 0:
-        ctx.check_hostname = False
-        ctx.verify_flags &= ~ssl.VERIFY_X509_STRICT
-        return ctx, "pinned leaf (one non-CA certificate; hostname not checked)"
-    return ctx, f"CA + hostname ({stats.get('x509')} certificate(s), {stats.get('x509_ca')} CA)"
+    return ctx, f"CA + hostname ({len(blocks)} certificates)"
 
 
 def _controller_client(headers: dict) -> httpx.Client:
