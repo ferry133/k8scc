@@ -77,6 +77,7 @@ import re
 import secrets
 import shutil
 import socket
+import ssl
 import subprocess
 import sys
 import threading
@@ -300,13 +301,40 @@ class ControllerError(Exception):
         self.answered = answered
 
 
-def _controller_client(headers: dict) -> httpx.Client:
-    verify = CA_FILE if CONTROLLER_URL.startswith("https://") else True
+def _tls_context() -> "tuple[ssl.SSLContext, str]":
+    """The context every controller request is verified with, and its mode.
+
+    A UniFi console's factory certificate is self-signed for `unifi.local`:
+    on FAC1 its SANs are unifi.local, localhost, [::1], 127.0.0.1 and fe80::1,
+    never the address the sidecar dials, and it has no basicConstraints
+    (fleet-ops-b0, 2026-11-14). Verified as a CA with the hostname checked,
+    every request fails the handshake (`IP address mismatch`), and Python
+    3.13's VERIFY_X509_STRICT rejects it besides (debian:12 ships 3.11).
+
+    So, two modes, decided by what UNIFI_CA_FILE holds:
+    - exactly one certificate that OpenSSL does not count as a CA ⇒ a pinned
+      leaf: it is the only trust anchor, the hostname is not checked and the
+      strict flag is cleared. A non-CA anchor signs nothing the handshake
+      would accept, so the binding is that certificate's key.
+    - anything else (a CA, a chain, several certificates) ⇒ the hostname and
+      the strict flag stay on. Turning the hostname check off under a CA
+      would accept any certificate that CA ever issued, for any host."""
     try:
-        return httpx.Client(base_url=CONTROLLER_URL, verify=verify, timeout=READ_TIMEOUT,
-                            headers={"Accept": "application/json", **headers}, follow_redirects=False)
+        ctx = ssl.create_default_context(cafile=CA_FILE)
     except (OSError, ValueError) as exc:   # ssl.SSLError is an OSError
         raise ControllerError(f"controller CA {CA_FILE} (UNIFI_CA_FILE) cannot be loaded: {exc}") from None
+    stats = ctx.cert_store_stats()
+    if stats.get("x509") == 1 and stats.get("x509_ca") == 0:
+        ctx.check_hostname = False
+        ctx.verify_flags &= ~ssl.VERIFY_X509_STRICT
+        return ctx, "pinned leaf (one non-CA certificate; hostname not checked)"
+    return ctx, f"CA + hostname ({stats.get('x509')} certificate(s), {stats.get('x509_ca')} CA)"
+
+
+def _controller_client(headers: dict) -> httpx.Client:
+    verify = _tls_context()[0] if CONTROLLER_URL.startswith("https://") else True
+    return httpx.Client(base_url=CONTROLLER_URL, verify=verify, timeout=READ_TIMEOUT,
+                        headers={"Accept": "application/json", **headers}, follow_redirects=False)
 
 
 def _legacy_data(method: str, path: str, resp: httpx.Response) -> list:
@@ -1796,6 +1824,11 @@ def _startup_readings() -> list[str]:
     elif CONTROLLER_URL.startswith("http://"):
         readings.append("insecure http accepted (test only): NETDEV_ALLOW_INSECURE_HTTP=1")
     readings.append("controller: " + (urlsplit(CONTROLLER_URL).netloc or "(unset)") + f", site {SITE}")
+    if CONTROLLER_URL.startswith("https://") and not MISSING_CONFIG:
+        try:
+            readings.append("TLS: " + _tls_context()[1])
+        except ControllerError as exc:
+            readings.append(f"TLS: unusable ({exc})")
     # exactly "ok": jg-base's daily-check row 31 reads anything else as a fail.
     # "ok" means the account file is usable; whether the console accepts its
     # login shows on the `controller version:` line below (it reads first).
