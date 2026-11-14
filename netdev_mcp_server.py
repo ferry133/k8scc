@@ -22,13 +22,17 @@ Requires: UNIFI_CONTROLLER_URL — https://<console>. `http://` is refused
           onboarding (fleet-ops skill `unifi-im-credential`). TLS is always
           verified against it; there is no option to turn verification off,
           because `verify=False` is the one-line fix that always "works".
-          UNIFI_READER_KEY_FILE — the Integration API key (`X-API-Key`), read
-          from the file at startup, never from env or argv.
+          UNIFI_READER_FILE — the console's View Only local account, two lines
+          (user, password), read from the file at startup, never from env or
+          argv, and logged in over `/api/auth/login` (cookie + CSRF) like the
+          operator. Not an API key: on FAC1 (UniFi OS 6.0.17, Network 11.0.99)
+          a View Only user cannot create one, and the owner's key PUT a user
+          row (k8scc#67 finding 6; ferry133 ruled 2026-11-13).
           When any of the three is missing every tool answers "not configured",
           naming what is missing, and makes no request.
 
-Optional: UNIFI_SITE — the legacy site name (default `default`); the
-          Integration API's site id is looked up from it.
+Optional: UNIFI_SITE — the legacy site name (default `default`), also the v2
+          API's site.
           NETDEV_READ_TIMEOUT — seconds per HTTP request (15).
           NETDEV_MCP_PORT — listen port (8766).
 
@@ -54,10 +58,9 @@ Write tuning: NETDEV_SNAPSHOT_KEEP (50), NETDEV_HEALTH_TIMEOUT (120),
           controls point it at a fake).
 
 Which API serves which collection is data, not code: ROUTES and WRITES below.
-Their values are PROVISIONAL until root spike 1.1 reads FAC1's real console;
-every read response says which API answered (`[via integration]` /
-`[via legacy]`), so a route the spike moves shows up in the output, not only
-in this file.
+Every read response says which API answered (`[via legacy]` / `[via v2]`), so
+a route that moves shows up in the output, not only in this file. Root spike
+1.1 read FAC1 (k8scc#67); which routes that settles is noted at ROUTES.
 
 stdout carries the audit lines and nothing else: __main__ points sys.stdout at
 stderr before the server starts (uvicorn's access log is a StreamHandler on
@@ -87,7 +90,10 @@ from mcp.server.fastmcp import FastMCP
 CONTROLLER_URL = os.environ.get("UNIFI_CONTROLLER_URL", "").strip().rstrip("/")
 SITE = os.environ.get("UNIFI_SITE", "").strip() or "default"
 CA_FILE = os.environ.get("UNIFI_CA_FILE", "").strip()
-READER_KEY_FILE = os.environ.get("UNIFI_READER_KEY_FILE", "").strip()
+READER_FILE = os.environ.get("UNIFI_READER_FILE", "").strip()
+# The earlier image's reader input. Never read; named in the "not configured"
+# answer so a half-landed rollout says which half is missing (k8scc#67).
+OLD_READER_KEY_FILE = os.environ.get("UNIFI_READER_KEY_FILE", "").strip()
 ALLOW_INSECURE_HTTP = os.environ.get("NETDEV_ALLOW_INSECURE_HTTP", "") == "1"
 READ_TIMEOUT = int(os.environ.get("NETDEV_READ_TIMEOUT", "15"))
 MCP_PORT = int(os.environ.get("NETDEV_MCP_PORT", "8766"))
@@ -125,28 +131,45 @@ _now = time.time
 _clock = time.monotonic
 _sleep = time.sleep
 
-# collection -> (api, path). `integration` paths are under
-# /proxy/network/integration/v1 and take {site_id}; `legacy` paths are under
-# /proxy/network/api/s/{site}. PROVISIONAL — root spike 1.1 (FAC1) has not
-# read which API serves which collection, nor whether the reader's API key is
-# accepted on the legacy paths. Change the data here, not the tools.
+# collection -> (api, path). `legacy` paths are under /proxy/network/api/s/{site}
+# (answer {meta: {rc}, data: [...]}), `legacy-root` under /proxy/network/api,
+# `v2` under /proxy/network/v2/api/site/{site} (answer a bare list).
+#
+# No Integration API route: it refuses the View Only cookie (fleet-ops-b0 on
+# FAC1, 2026-11-14: integration/v1/sites 401 with the cookie + CSRF that
+# legacy rest/networkconf answered 200), and the reader no longer has a key.
+# Answered 200 on FAC1 (k8scc#67 findings 1-3, read with the since-revoked key
+# and with cookies): rest/networkconf, rest/portforward, rest/firewallrule,
+# rest/firewallgroup, rest/user, rest/wlanconf, stat/sysinfo, v2
+# firewall-policies. NOT read there: stat/device, stat/sta, self/sites and v2
+# firewall/zone (all four paths are UniFi's documented ones), and no v2 path
+# with the View Only cookie. Root §6 on jg-jcc2 reads those. Change the data
+# here, not the tools.
+#
+# On Network 11 the firewall is zone-based: rest/firewallrule and
+# rest/firewallgroup answer 200 with 0 rows while 91 policies live in v2
+# firewall-policies. Both are read; an empty legacy list is not "no rules".
 ROUTES = {
-    "info":           ("integration", "/info"),
-    "sites":          ("integration", "/sites"),
-    "devices":        ("integration", "/sites/{site_id}/devices"),
-    "clients":        ("integration", "/sites/{site_id}/clients"),
-    "networks":       ("legacy", "/rest/networkconf"),
-    "firewallrules":  ("legacy", "/rest/firewallrule"),
-    "firewallgroups": ("legacy", "/rest/firewallgroup"),
-    "portforwards":   ("legacy", "/rest/portforward"),
-    "users":          ("legacy", "/rest/user"),
-    "wlans":          ("legacy", "/rest/wlanconf"),
+    "info":             ("legacy", "/stat/sysinfo"),
+    "sites":            ("legacy-root", "/self/sites"),
+    "devices":          ("legacy", "/stat/device"),
+    "clients":          ("legacy", "/stat/sta"),
+    "networks":         ("legacy", "/rest/networkconf"),
+    "firewallrules":    ("legacy", "/rest/firewallrule"),
+    "firewallgroups":   ("legacy", "/rest/firewallgroup"),
+    "firewallpolicies": ("v2", "/firewall-policies"),
+    "firewallzones":    ("v2", "/firewall/zone"),
+    "portforwards":     ("legacy", "/rest/portforward"),
+    "users":            ("legacy", "/rest/user"),
+    "wlans":            ("legacy", "/rest/wlanconf"),
 }
-API_PREFIX = {"integration": "/proxy/network/integration/v1", "legacy": "/proxy/network/api/s/{site}"}
+API_PREFIX = {"legacy": "/proxy/network/api/s/{site}", "legacy-root": "/proxy/network/api",
+              "v2": "/proxy/network/v2/api/site/{site}"}
 
-# The operator's side, all legacy (cookie + CSRF from a local account).
-# PROVISIONAL for the same reason as ROUTES: these are UniFi's community-
-# documented paths, not FAC1's reading (root spike 1.1, sub-change 1.2).
+# The operator's side, all legacy (cookie + CSRF from a local account). Read
+# on FAC1 (k8scc#67 findings 4-6): login, PUT rest/user (it merges), DELETE
+# rest/user (404), cmd/stamgr forget-sta (200). The rest are UniFi's
+# documented paths, not yet read on a console.
 LOGIN_PATH = "/api/auth/login"
 WRITES = {
     "rest":   "/rest/{collection}",          # PUT …/{_id}, POST (create), DELETE …/{_id}
@@ -155,8 +178,18 @@ WRITES = {
 }
 LEGACY_NAME = {"networks": "networkconf", "firewallrules": "firewallrule", "firewallgroups": "firewallgroup",
                "portforwards": "portforward", "users": "user", "wlans": "wlanconf"}
-PAGE_LIMIT = 200
-MAX_PAGES = 50
+# A create is reverted by DELETE only where DELETE removes the object. On FAC1
+# `DELETE rest/user/<_id>` answered 404 (k8scc#67 finding 5; `forget-sta`
+# removed it instead), so a create in any other collection is never "reverted"
+# by a DELETE that cannot work. rest/portforward's DELETE is not measured.
+DELETE_REVERTS = {"portforwards"}
+
+# A PUT on the legacy API MERGES (k8scc#67 finding 4: a partial PUT kept
+# fixed_ip/use_fixedip), so PUTting the snapshot back cannot remove a key the
+# snapshot did not have. Such a key left behind is harmless only where another
+# field switches it off; this table names those, and any other leftover key is
+# reported as residue (revert-failed), never as reverted.
+INERT_RESIDUE = {("users", "fixed_ip"): lambda obj: obj.get("use_fixedip") is not True}
 
 
 # --- configuration -----------------------------------------------------------
@@ -169,14 +202,35 @@ def _read_secret_file(path: str) -> str:
         return ""
 
 
+def _account_lines(path: str) -> list[str]:
+    return [ln.strip() for ln in _read_secret_file(path).splitlines() if ln.strip()] if path else []
+
+
+def _reader_problem() -> str:
+    """'' when UNIFI_READER_FILE holds two lines (user, password), else why not.
+    Absent, unreadable and 0 bytes are the same thing: a Secret key rendered
+    from an unset value mounts as an empty file."""
+    where = f"UNIFI_READER_FILE{'=' + READER_FILE if READER_FILE else ''}"
+    lines = _account_lines(READER_FILE)
+    if not lines:
+        why = f"reader credential ({where})"
+    elif len(lines) != 2:
+        why = f"reader credential ({where}: expected two lines, user and password; found {len(lines)})"
+    else:
+        return ""
+    if OLD_READER_KEY_FILE:
+        why += (" — UNIFI_READER_KEY_FILE is set but no longer read: the reader is now the View Only account "
+                "in UNIFI_READER_FILE (k8scc#67)")
+    return why
+
+
 def _missing_config() -> list[str]:
     missing = []
     if not CONTROLLER_URL:
         missing.append("controller URL (UNIFI_CONTROLLER_URL)")
-    if not READER_KEY_FILE or not _read_secret_file(READER_KEY_FILE):
-        # absent, unreadable and 0 bytes are the same thing: a Secret key
-        # rendered from an unset value mounts as an empty file
-        missing.append(f"reader API key (UNIFI_READER_KEY_FILE{'=' + READER_KEY_FILE if READER_KEY_FILE else ''})")
+    reader = _reader_problem()
+    if reader:
+        missing.append(reader)
     if CONTROLLER_URL.startswith("https://") and (not CA_FILE or not os.path.isfile(CA_FILE) or os.path.getsize(CA_FILE) == 0):
         missing.append(f"controller CA (UNIFI_CA_FILE{'=' + CA_FILE if CA_FILE else ''})")
     return missing
@@ -200,7 +254,7 @@ def _url_refusal() -> str:
 MISSING_CONFIG = _missing_config()
 URL_REFUSAL = _url_refusal()
 # Read once at startup into this process only; never exported, never printed.
-_READER_KEY = "" if MISSING_CONFIG else _read_secret_file(READER_KEY_FILE)
+_READER_ACCOUNT = ("", "") if MISSING_CONFIG else tuple(_account_lines(READER_FILE))
 
 
 def _not_ready() -> str:
@@ -216,7 +270,10 @@ def _not_ready() -> str:
 
 # --- secrets never leave ------------------------------------------------------
 
-_SECRET_KEY = re.compile(r"^x_|_secret$|_key$|passphrase|password|psk", re.I)
+# `_keys$` and `preshared`: wlanconf's `private_preshared_keys` (PPSK) matched
+# none of the others (k8scc#67 finding 2; empty lists on FAC1, so nothing
+# leaked there).
+_SECRET_KEY = re.compile(r"^x_|_secret$|_keys?$|passphrase|password|psk|preshared", re.I)
 STRIPPED = "<stripped>"
 
 
@@ -266,87 +323,35 @@ def _legacy_data(method: str, path: str, resp: httpx.Response) -> list:
     return body["data"]
 
 
-class Controller:
-    """The reader: one HTTP client, two API shapes, the reader key sent as
-    `X-API-Key` on both. Whether the legacy paths accept it is root spike 1.1's
-    reading — if they do not, the answer is a 401 naming the route, not a
-    silent empty list. Writes never go through this client (see Operator)."""
-
-    def __init__(self):
-        self._client = _controller_client({"X-API-Key": _READER_KEY})
-        self._site_id = ""
-
-    def _get(self, path: str):
-        try:
-            resp = self._client.get(path)
-        except httpx.HTTPError as exc:
-            # the exception text names the URL and the failure, never a header
-            raise ControllerError(f"GET {path}: {type(exc).__name__}: {exc}") from None
-        if resp.status_code // 100 != 2:
-            raise ControllerError(f"GET {path}: controller answered {resp.status_code} {resp.text[:200]!r}")
-        try:
-            return resp.json()
-        except ValueError:
-            raise ControllerError(f"GET {path}: controller answered {resp.status_code} with a body that is not JSON") from None
-
-    def _path(self, collection: str) -> "tuple[str, str]":
-        api, path = ROUTES[collection]
-        prefix = API_PREFIX[api].format(site=SITE)
-        if "{site_id}" in path:
-            path = path.format(site_id=self.site_id())
-        return api, prefix + path
-
-    def site_id(self) -> str:
-        """The Integration API's id for UNIFI_SITE (matched on internalReference, then name)."""
-        if not self._site_id:
-            sites = self._integration_list(API_PREFIX["integration"] + ROUTES["sites"][1])
-            for s in sites:
-                if SITE in (s.get("internalReference"), s.get("name")):
-                    self._site_id = s.get("id") or ""
-                    break
-            if not self._site_id:
-                names = ", ".join(str(s.get("internalReference") or s.get("name")) for s in sites) or "none"
-                raise ControllerError(f"site {SITE!r} (UNIFI_SITE) not found among the controller's sites ({names})")
-        return self._site_id
-
-    def _integration_list(self, path: str) -> list:
-        items, offset = [], 0
-        for _ in range(MAX_PAGES):
-            sep = "&" if "?" in path else "?"
-            page = self._get(f"{path}{sep}offset={offset}&limit={PAGE_LIMIT}")
-            if not isinstance(page, dict) or not isinstance(page.get("data"), list):
-                raise ControllerError(f"GET {path}: not an Integration API page (no data list)")
-            items += page["data"]
-            offset += len(page["data"])
-            total = page.get("totalCount")
-            if not page["data"] or (isinstance(total, int) and offset >= total):
-                return items
-        raise ControllerError(f"GET {path}: more than {MAX_PAGES} pages of {PAGE_LIMIT}, stopped")
-
-    def read(self, collection: str) -> "tuple[str, object]":
-        """(api, data) for one collection, unstripped."""
-        api, path = self._path(collection)
-        if api == "integration":
-            if collection == "info":
-                return api, self._get(path)
-            return api, self._integration_list(path)
-        try:
-            resp = self._client.get(path)
-        except httpx.HTTPError as exc:
-            raise ControllerError(f"GET {path}: {type(exc).__name__}: {exc}") from None
-        return api, _legacy_data("GET", path, resp)
+def _v2_data(path: str, resp: httpx.Response) -> list:
+    """v2 answers a bare JSON list (FAC1: firewall-policies, 91 rows). A dict
+    holding a `data` list is accepted too; anything else is an error, never []."""
+    if resp.status_code // 100 != 2:
+        raise ControllerError(f"GET {path}: controller answered {resp.status_code} {resp.text[:200]!r}", answered=True)
+    try:
+        body = resp.json()
+    except ValueError:
+        raise ControllerError(f"GET {path}: controller answered {resp.status_code} with a body that is not JSON",
+                              answered=True) from None
+    if isinstance(body, dict) and isinstance(body.get("data"), list):
+        return body["data"]
+    if not isinstance(body, list):
+        raise ControllerError(f"GET {path}: v2 API answered {type(body).__name__}, not a list", answered=True)
+    return body
 
 
-class Operator:
-    """The writer: the local operator account over the legacy API, cookie +
-    CSRF. Its own HTTP client, so the reader key is never sent on a write and
-    the operator cookie never on a read. Neither the password nor the login
-    response body is ever put into a message."""
+class Session:
+    """One local account on its own HTTP client: POST /api/auth/login once,
+    then cookie + CSRF on every call, and a 401 logs in again once (the
+    session expired). The reader and the operator are two of these, so the
+    reader's cookie never rides a write and the operator's never a read.
+    Neither password nor any login response body is ever put into a message."""
 
-    def __init__(self, user: str, password: str):
-        self._user, self._password = user, password
+    def __init__(self, role: str, user: str, password: str):
+        self._role, self._user, self._password = role, user, password
         self._client = _controller_client({})
         self._csrf = ""
+        self._logged_in = False
 
     def _take_csrf(self, resp: httpx.Response) -> None:
         self._csrf = resp.headers.get("X-Updated-CSRF-Token") or resp.headers.get("X-CSRF-Token") or self._csrf
@@ -357,24 +362,59 @@ class Operator:
         except httpx.HTTPError as exc:
             raise ControllerError(f"POST {LOGIN_PATH}: {type(exc).__name__}: {exc}") from None
         if resp.status_code // 100 != 2:
-            raise ControllerError(f"POST {LOGIN_PATH}: controller refused the operator login ({resp.status_code})")
+            raise ControllerError(f"POST {LOGIN_PATH}: controller refused the {self._role} login ({resp.status_code})",
+                                  answered=True)
         self._take_csrf(resp)
+        self._logged_in = True
 
-    def request(self, method: str, path: str, body=None) -> list:
-        """One legacy call; a 401 logs in again once (the session expired)."""
-        path = API_PREFIX["legacy"].format(site=SITE) + path
+    def send(self, method: str, path: str, body=None) -> httpx.Response:
+        if not self._logged_in:
+            self.login()
         for attempt in (0, 1):
             try:
                 resp = self._client.request(method, path, json=body,
                                             headers={"X-CSRF-Token": self._csrf} if self._csrf else {})
             except httpx.HTTPError as exc:
+                # the exception text names the URL and the failure, never a header
                 raise ControllerError(f"{method} {path}: {type(exc).__name__}: {exc}") from None
             self._take_csrf(resp)
             if resp.status_code == 401 and attempt == 0:
                 self.login()
                 continue
-            return _legacy_data(method, path, resp)
+            return resp
         raise AssertionError("unreachable")
+
+
+class Controller:
+    """The reader: the View Only account (UNIFI_READER_FILE) on its own
+    Session, legacy and v2 paths only. Writes never go through it (Operator)."""
+
+    def __init__(self):
+        self._session = Session("reader", *_READER_ACCOUNT)
+
+    def _path(self, collection: str) -> "tuple[str, str]":
+        api, path = ROUTES[collection]
+        return api, API_PREFIX[api].format(site=SITE) + path
+
+    def read(self, collection: str) -> "tuple[str, list]":
+        """(api, data) for one collection, unstripped."""
+        api, path = self._path(collection)
+        resp = self._session.send("GET", path)
+        return api, (_v2_data(path, resp) if api == "v2" else _legacy_data("GET", path, resp))
+
+
+class Operator:
+    """The writer: the local operator account over the legacy API."""
+
+    def __init__(self, user: str, password: str):
+        self._session = Session("operator", user, password)
+
+    def login(self) -> None:
+        self._session.login()
+
+    def request(self, method: str, path: str, body=None) -> list:
+        path = API_PREFIX["legacy"].format(site=SITE) + path
+        return _legacy_data(method, path, self._session.send(method, path, body))
 
 
 _CONTROLLER: "Controller | None" = None
@@ -507,20 +547,24 @@ def get_wlans() -> str:
 
 @app.tool()
 def get_firewall_rules() -> str:
-    """防火牆規則，每條附上 group 展開後的來源／目的位址（唯讀）。"""
+    """防火牆：舊式規則（rest/firewallrule）與 Network 9 以後的 zone-based policy
+    （v2 firewall-policies），每條附上展開後的來源／目的位址（唯讀）。兩種都讀：
+    舊式那份是空的不代表沒有規則。"""
     refusal = _not_ready()
     if refusal:
         return refusal
     try:
-        api, rules = _controller().read("firewallrules")
+        _, rules = _controller().read("firewallrules")
         _, groups = _controller().read("firewallgroups")
+        _, policies = _controller().read("firewallpolicies")
         _, networks = _controller().read("networks")
     except ControllerError as exc:
-        return f"[via {ROUTES['firewallrules'][0]}]\nerror: {exc}"
-    rules, groups, networks = _strip(rules), _strip(groups), _strip(networks)
+        return f"[via legacy+v2]\nerror: {exc}"
+    zones, zones_note = _read_zones()
+    rules, groups, policies, networks = _strip(rules), _strip(groups), _strip(policies), _strip(networks)
     _remember("firewallgroups", groups)
     _remember("networks", networks)
-    out = []
+    out_rules = []
     for rule in rules:
         if not isinstance(rule, dict):
             continue
@@ -530,9 +574,31 @@ def get_firewall_rules() -> str:
             rule[f"{side}_expanded"] = members if members is not None else "any"
             if unresolved:
                 rule[f"{side}_unresolved"] = unresolved
-        out.append(rule)
-    _remember("firewallrules", out)
-    return _render(api, out)
+        out_rules.append(rule)
+    out_policies = []
+    for pol in policies:
+        if not isinstance(pol, dict):
+            continue
+        pol = dict(pol)
+        for side, key in (("src", "source"), ("dst", "destination")):
+            members, opaque = _policy_side(pol.get(key), zones, networks)
+            pol[f"{side}_expanded"] = members if members is not None else "any"
+            if opaque:
+                pol[f"{side}_unresolved"] = opaque
+        out_policies.append(pol)
+    _remember("firewallrules", out_rules)
+    _remember("firewallpolicies", out_policies)
+    return _render("legacy+v2", {"legacy_rules": out_rules, "policies": out_policies, "zones": zones_note})
+
+
+def _read_zones() -> "tuple[list | None, str]":
+    """Zones are optional: without them a policy side given only as a zone
+    cannot be expanded and counts as covering (class A), so their absence
+    makes the guard stricter, never blind."""
+    try:
+        return _strip(_controller().read("firewallzones")[1]), "read"
+    except ControllerError as exc:
+        return None, f"unreadable ({exc}); a side given only by its zone is shown unresolved"
 
 
 @app.tool()
@@ -621,6 +687,74 @@ def _side_members(rule: dict, side: str, groups: list, networks: list) -> "tuple
     return (members if constrained else None), unresolved
 
 
+def _policy_side(side, zones, networks) -> "tuple[list[str] | None, list[str]]":
+    """One side of a zone-based policy (v2 firewall-policies): the address
+    specs it matches, or None for 'any address in reach'; second value: what
+    could not be resolved (non-empty ⇒ the side counts as covering).
+
+    Field names are fleet-ops-b0's reading of FAC1 (k8scc#67 finding 1:
+    zone_id, network_ids, ips, port, matching_target(_type), match_opposite_*);
+    the values of matching_target other than ANY/IP/NETWORK are not read, so
+    every other target is opaque. A zone's own members come from the zone
+    object (network_ids / networkIds); a zone this server did not read, or one
+    with no networks (External, Gateway, VPN…), is opaque."""
+    if not isinstance(side, dict):
+        return None, ["(side missing)"]
+    target = str(side.get("matching_target") or "ANY").upper()
+    nets = {n.get("_id"): n for n in networks if isinstance(n, dict)}
+
+    def subnets(ids):
+        found, missing = [], []
+        for nid in ids or []:
+            subnet = (nets.get(nid) or {}).get("ip_subnet")
+            (found.append(subnet) if subnet else missing.append(nid))
+        return found, missing
+
+    if target == "IP":
+        ips = [i for i in side.get("ips") or [] if isinstance(i, str)]
+        opaque = ["match_opposite_ips"] if side.get("match_opposite_ips") else []
+        return ips, opaque or ([] if ips else ["ips (empty)"])
+    if target == "NETWORK":
+        found, missing = subnets(side.get("network_ids"))
+        if side.get("match_opposite_networks"):
+            missing.append("match_opposite_networks")
+        return found, missing or ([] if found else ["network_ids (empty)"])
+    if target != "ANY":
+        return None, [f"matching_target {target}"]
+    zid = side.get("zone_id")
+    if zones is None:
+        return None, [f"zone {zid} (zones unreadable)"]
+    zone = next((z for z in zones if isinstance(z, dict) and (z.get("_id") or z.get("id")) == zid), None)
+    if zone is None:
+        return None, [f"zone {zid} (not among the zones read)"]
+    found, missing = subnets(zone.get("network_ids") or zone.get("networkIds"))
+    if not found and not missing:
+        return None, [f"zone {zone.get('name') or zid} (no networks)"]
+    return found, missing
+
+
+def fw_policies_covering(addr_pairs: list, policies, zones, networks) -> "list[dict] | None":
+    """Zone-based policies whose source and destination cover any (a, b) pair,
+    in either direction. Same rule as fw_rules_covering: an unresolved side
+    covers."""
+    if policies is None or networks is None:
+        return None
+    hits = []
+    for pol in policies:
+        if not isinstance(pol, dict):
+            continue
+        sides = {s: _policy_side(pol.get(k), zones, networks) for s, k in (("src", "source"), ("dst", "destination"))}
+
+        def matches(side, ip):
+            members, opaque = sides[side]
+            return bool(opaque) or members is None or any(_contains(m, ip) for m in members)
+
+        if any((matches("src", a) and matches("dst", b)) or (matches("src", b) and matches("dst", a))
+               for a, b in addr_pairs):
+            hits.append(pol)
+    return hits
+
+
 def own_networks(pod_ip: str, controller_ip: str, api_server_ips: list, networks) -> "list[dict] | None":
     """The network objects containing POD_IP, the controller or an API server endpoint."""
     if networks is None:
@@ -677,11 +811,14 @@ def fw_rules_covering(addr_pairs: list, rules, groups, networks) -> "list[dict] 
 
 
 def class_a(target_collection: str, target_id: str, *, pod_ip: str, controller_ip: str, api_server_ips: list,
-            networks, clients, devices, rules, groups) -> "str | None":
+            networks, clients, devices, rules, groups, policies, zones=None) -> "str | None":
     """None when the target is off im's own path; otherwise what it intersects.
-    Missing inputs refuse, naming which."""
+    Missing inputs refuse, naming which. `zones` may be None (see _read_zones);
+    `policies` may not: on a zone-based console the legacy rules are empty and
+    the policies are the firewall (k8scc#67 finding 1)."""
     missing = [name for name, value in (("networks", networks), ("clients", clients), ("devices", devices),
                                         ("firewall rules", rules), ("firewall groups", groups),
+                                        ("firewall policies", policies),
                                         ("API server endpoints", api_server_ips)) if value is None]
     if not pod_ip:
         missing.append("POD_IP")
@@ -702,14 +839,23 @@ def class_a(target_collection: str, target_id: str, *, pod_ip: str, controller_i
                 return f"network {net.get('name') or target_id} ({net.get('ip_subnet')}) carries im's own path"
     if target_collection == "devices":
         attached = attachment(pod_ip, clients, devices)
-        tid = target_id.lower()
-        if any(a == tid or a.startswith(tid + "#") for a in attached):
+        # the target is named by id or MAC; a legacy client names its uplink
+        # by MAC (sw_mac / ap_mac), so compare both forms of the device
+        names = {target_id.lower()}
+        for d in devices:
+            if isinstance(d, dict) and target_id.lower() in {str(d.get(k) or "").lower() for k in ("_id", "id", "mac", "macAddress")}:
+                names |= {str(d.get(k)).lower() for k in ("_id", "id", "mac", "macAddress") if d.get(k)}
+        if any(a in names or a.split("#", 1)[0] in names for a in attached):
             return f"device {target_id} is what this node is attached to"
+    pairs = [p for p in [(pod_ip, controller_ip)] + [(pod_ip, ip) for ip in api_server_ips] if p[1]]
     if target_collection == "firewallrules":
-        pairs = [(pod_ip, controller_ip)] + [(pod_ip, ip) for ip in api_server_ips]
-        for rule in fw_rules_covering([p for p in pairs if p[1]], rules, groups, networks):
+        for rule in fw_rules_covering(pairs, rules, groups, networks):
             if rule.get("_id") == target_id:
                 return f"firewall rule {rule.get('name') or target_id} covers im's own traffic"
+    if target_collection == "firewallpolicies":
+        for pol in fw_policies_covering(pairs, policies, zones, networks):
+            if (pol.get("_id") or pol.get("id")) == target_id:
+                return f"firewall policy {pol.get('name') or target_id} covers im's own traffic"
     return None
 
 
@@ -938,11 +1084,12 @@ def _class_a_inputs() -> "tuple[dict | None, str]":
     """Everything class A reads, fresh at each write. Any one unreadable ⇒ None
     with the reader's own error — every write then refuses (fail closed)."""
     ctx, errors = {}, []
-    for name in ("networks", "clients", "devices", "firewallrules", "firewallgroups"):
+    for name in ("networks", "clients", "devices", "firewallrules", "firewallgroups", "firewallpolicies"):
         try:
             ctx[name] = _strip(_controller().read(name)[1])
         except ControllerError as exc:
             errors.append(str(exc))
+    ctx["firewallzones"], _ = _read_zones()
     ips, err = _api_server_ips()
     if ips is None:
         errors.append(err)
@@ -1057,9 +1204,9 @@ def _plan_device(tool: str, mac: str, port: "int | None") -> "tuple[Plan | None,
                     command={"cmd": "restart", "mac": mac}, class_a=("devices", did), gateway_mac=mac), ""
     if port < 1:
         return None, f"port {port} is not a switch port number (they start at 1)"
-    # Integration clients name the uplink device, not the port, so class A
-    # cannot tell which port the node is on: any port of that switch is
-    # refused (fail closed) until root spike 1.1 shows a port field.
+    # Any port of the node's switch is refused (fail closed). Legacy stat/sta
+    # carries sw_port, but that it names the node's own port on a real
+    # console is not read yet (root §6), so the refusal stays whole-switch.
     return Plan(tool, "devices", did, f"devices/{mac}#port{port}", "command", before=device, endpoint="devmgr",
                 command={"cmd": "power-cycle", "mac": mac, "port_idx": port}, class_a=("devices", did)), ""
 
@@ -1104,13 +1251,17 @@ def _class_a_refusal(plan: Plan, ctx: dict) -> str:
             if not isinstance(d, dict):
                 continue
             mac = str(d.get("macAddress") or d.get("mac") or "").lower()
-            if mac == plan.gateway_mac and (d.get("ipAddress") or d.get("ip")) in _gateway_ips(ctx["networks"], ctx["controller_ip"]):
+            # legacy stat/device's `ip` for a gateway may be its WAN address, so
+            # its type counts on its own (ugw/udm/uxg: UniFi's gateway types)
+            if mac == plan.gateway_mac and ((d.get("ipAddress") or d.get("ip")) in _gateway_ips(ctx["networks"], ctx["controller_ip"])
+                                            or str(d.get("type") or "").lower() in ("ugw", "udm", "uxg")):
                 return f"device {plan.gateway_mac} is the gateway: restarting it takes the whole LAN down, and there is no tool for that"
     if plan.class_a is None:
         return ""
     return class_a(plan.class_a[0], plan.class_a[1], pod_ip=POD_IP, controller_ip=ctx["controller_ip"],
                    api_server_ips=ctx["api_server_ips"], networks=ctx["networks"], clients=ctx["clients"],
-                   devices=ctx["devices"], rules=ctx["firewallrules"], groups=ctx["firewallgroups"]) or ""
+                   devices=ctx["devices"], rules=ctx["firewallrules"], groups=ctx["firewallgroups"],
+                   policies=ctx["firewallpolicies"], zones=ctx["firewallzones"]) or ""
 
 
 # --- write side: audit, tickets, snapshot, apply, health, revert ----------------------------------
@@ -1326,10 +1477,23 @@ def _revert(plan: Plan, snap: Snapshot, created_id: str) -> "tuple[bool, str]":
             OPERATOR.request("PUT", f"{_rest(plan)}/{plan.obj_id}", snap.obj)
             _, items = _controller().read(plan.collection)
             now = next((o for o in items if _obj_id(o) == plan.obj_id), None) or {}
-            moved = [f for f in plan.fields if now.get(f) != snap.obj.get(f)]
-            return (False, f"after the revert PUT, {', '.join(moved)} still differ from the snapshot") if moved \
-                else (True, f"PUT the snapshot of {plan.obj_id} back")
+            moved = [f for f in plan.fields if f in snap.obj and now.get(f) != snap.obj.get(f)]
+            if moved:
+                return False, f"after the revert PUT, {', '.join(moved)} still differ from the snapshot"
+            # The PUT merges, so a key the snapshot lacked can stay behind
+            # (k8scc#67 finding 4). Inert only where INERT_RESIDUE says so.
+            left = [f for f in plan.fields if f not in snap.obj and f in now]
+            live = [f for f in left if not INERT_RESIDUE.get((plan.collection, f), lambda o: False)(now)]
+            if live:
+                return False, (f"after the revert PUT, {', '.join(live)} remain on {plan.obj_id} although the snapshot "
+                               "had no such key: the controller merges a PUT, so the snapshot cannot remove them")
+            inert = f"; {', '.join(left)} left behind but switched off" if left else ""
+            return True, f"PUT the snapshot of {plan.obj_id} back{inert}"
         if plan.kind == "create":
+            if plan.collection not in DELETE_REVERTS:
+                return False, (f"a create in {plan.collection} is not reverted by DELETE on this console "
+                               f"(k8scc#67 finding 5: DELETE rest/user answered 404); created {created_id or '(no _id)'} "
+                               "is still there")
             _, items = _controller().read(plan.collection)
             new = sorted({_obj_id(o) for o in items} - set(snap.ids) - {""})
             if not created_id:
@@ -1612,9 +1776,9 @@ def power_cycle_port(switch_mac: str, port: int, reason: str, confirm: str = "")
 WRITE_TOOLS = [set_dhcp_reservation, clear_dhcp_reservation, block_client, unblock_client,
                set_port_forward, delete_port_forward, restart_device, power_cycle_port]
 
-# set_dns_forward is not here: whether UniFi exposes conditional forwarding
-# through an API at all is root spike 1.1's reading (sub-change 1.2). No
-# reading, no tool.
+# set_dns_forward is not here: it is sub-change 1.2. Root spike 1.1 found its
+# write path (v2 static-dns, record_type NS) and that every apply reloads the
+# gateway's resolver (k8scc#67 findings 7-8); the tool is that sub-change's.
 
 # Registered only when every write input is usable: there is no "present but
 # refuses for lack of configuration" state.
@@ -1632,7 +1796,11 @@ def _startup_readings() -> list[str]:
     elif CONTROLLER_URL.startswith("http://"):
         readings.append("insecure http accepted (test only): NETDEV_ALLOW_INSECURE_HTTP=1")
     readings.append("controller: " + (urlsplit(CONTROLLER_URL).netloc or "(unset)") + f", site {SITE}")
-    readings.append("reader credential: " + ("ok" if not MISSING_CONFIG else "missing " + ", ".join(MISSING_CONFIG)))
+    # exactly "ok": jg-base's daily-check row 31 reads anything else as a fail.
+    # "ok" means the account file is usable; whether the console accepts its
+    # login shows on the `controller version:` line below (it reads first).
+    readings.append("reader credential: " + ("ok" if not MISSING_CONFIG
+                                             else "missing " + ", ".join(MISSING_CONFIG)))
     readings.append(f"operator credential: {OPERATOR_STATE}")
     readings.append("ticket channel: " + (f"{TICKET_REPO} via {urlsplit(TICKET_API).netloc}" if not TICKET_REFUSAL
                                           else "missing (" + TICKET_REFUSAL + ")"))
@@ -1643,9 +1811,9 @@ def _startup_readings() -> list[str]:
         readings.append("write tools: not registered — " + "; ".join(WRITE_BLOCKERS))
     else:
         readings.append("write tools: registered — " + ", ".join(fn.__name__ for fn in WRITE_TOOLS)
-                        + "; set_dns_forward not shipped (root spike 1.1)")
-    readings.append("routes: provisional, not measured (root spike 1.1) — "
-                    + ", ".join(f"{c}={api}" for c, (api, _) in sorted(ROUTES.items())) + "; writes=legacy")
+                        + "; set_dns_forward not shipped (sub-change 1.2)")
+    readings.append("routes: " + ", ".join(f"{c}={api}" for c, (api, _) in sorted(ROUTES.items()))
+                    + "; writes=legacy (stat/device, stat/sta, self/sites, v2 firewall/zone not yet read on a console)")
     if not WRITE_BLOCKERS:
         lost = _probes_lost()
         readings.append("outside probes baseline: " + (f"{_outbound(lost)} — " + "; ".join(lost) if lost else "ok (3/3)"))
@@ -1660,7 +1828,8 @@ def _startup_readings() -> list[str]:
     if not _not_ready():
         try:
             _, info = _controller().read("info")
-            version = info.get("applicationVersion") if isinstance(info, dict) else None
+            first = info[0] if info and isinstance(info[0], dict) else {}
+            version = first.get("version")
             readings.append(f"controller version: {version or 'not reported'}")
         except ControllerError as exc:
             readings.append(f"controller version: unreadable ({exc})")
