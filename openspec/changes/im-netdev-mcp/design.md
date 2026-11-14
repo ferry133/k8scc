@@ -47,3 +47,14 @@ talos 的 own-node cooldown 要靠 `/proc/uptime`，因為重開自己會抹掉�
 - [假 controller 與真 controller 的登入流程不同（CSRF header 名、cookie 名）] → spike 1.1 在 FAC1 真 console 上錄一次 legacy 登入的 request／response（去掉值）當 fixture 的依據；controls 標「照 X 版錄的」。
 - [探針選到會被 Cloudflare 或 ISP 擋的端點] → root Open Question（三條走不同路）；server 只要求「三條、可設定」，選哪三條是 jgct／fleet-ops 的值。
 - [`set_dns_forward` 沒有 API] → spike 門控，不出這支；root 7.2 的第一筆真實寫入改用其他工具。
+
+## 補記：FAC1 讀數之後（k8scc#67，2026-11-14）
+
+root spike 1.1 在 FAC1（UCG Ultra、UniFi OS 6.0.17、Network 11.0.99）讀到的八項中，五項改了這個 server。上面 `IntegrationAPI`／`X-API-Key` 那一段因此**不再是現況**；這段不改寫上文，只記改了什麼。
+
+- **reader 是 View Only 帳號，不是 key**（finding 6，ferry133 2026-11-13 裁定）：View Only 使用者建不出 API key，owner 建的 key 能 PUT。`UNIFI_READER_FILE` 兩行，與 operator 同一個 `Session`（各自的 client、各自的 cookie）。Integration API 不收 View Only cookie（fleet-ops-b0 2026-11-14 讀到 401），所以**所有讀改走 legacy／v2**，`IntegrationAPI` 整個拿掉。契約與 jg-base-4e [17449c] 對過：jg-base#246、jgct#262。
+- **防火牆是 zone-based**（finding 1）：legacy 兩個 collection 200 但 0 列，91 條 policy 在 v2 `firewall-policies`。兩邊都讀；policy 是 class A 的必要輸入，zone 可缺（缺則 zone 那一側算 covering）。目前沒有任何寫入工具以防火牆物件為目標——這一格守的是 reader 的說法與下一支工具。
+- **strip 補 `_keys?$`、`preshared`**（finding 2）。
+- **legacy PUT 是 merge**（finding 4）：revert 的讀回對「快照沒有的欄位」另判，只在 `INERT_RESIDUE` 認定它被關掉時算 reverted。
+- **`DELETE rest/user` 回 404**（finding 5）：create 的 revert 只在 `DELETE_REVERTS`（今天只有 `portforwards`，其 DELETE 未量）裡才 DELETE。
+- 未讀過的路徑：`stat/device`、`stat/sta`、`self/sites`、v2 `firewall/zone`，以及 View Only cookie 打任何 v2 路徑——root §6 在 jg-jcc2 上讀。finding 7／8（`set_dns_forward`）屬 sub-change 1.2，不在這裡。

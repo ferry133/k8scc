@@ -6,8 +6,11 @@ makes plus a NEGATIVE CONTROL that must fail the same assertion, so 0 failures
 cannot mean "the instrument is dead". The server is imported for real (mcp
 and its httpx installed, FastMCP constructed) against a FAKE CONTROLLER: an
 in-process HTTP server that answers from test/netdev-mcp-fixtures/ and records
-every request it receives (method, path, the X-API-Key it was sent, and the
-body of every write). The operator half adds a FAKE FAC (GitHub's issues API,
+every request it receives (method, path, which account's cookie it carried,
+and the body of every write). Reader and operator are two local accounts
+logging in over /api/auth/login, each with its own cookie; the fake answers a
+write carrying the reader's cookie 403, as FAC1's View Only account did
+(k8scc#67 finding 6). The operator half adds a FAKE FAC (GitHub's issues API,
 which can pre-ack, post-ack or stay silent), three OUTSIDE PROBES (local TCP
 listeners that can be stopped one by one) and a kubectl shim
 (test/netdev-mcp-shims) answering /readyz and the API server endpoints.
@@ -51,21 +54,25 @@ READ_TOOLS = {"get_sites", "get_controller_info", "get_devices", "get_clients", 
               "get_firewall_rules", "get_port_forwards", "get_dhcp_reservations", "get_wlans", "get_lan_inventory"}
 WRITE_TOOLS = {"set_dhcp_reservation", "clear_dhcp_reservation", "block_client", "unblock_client",
                "set_port_forward", "delete_port_forward", "restart_device", "power_cycle_port"}
-ENV_KEYS = ["UNIFI_CONTROLLER_URL", "UNIFI_SITE", "UNIFI_CA_FILE", "UNIFI_READER_KEY_FILE", "UNIFI_OPERATOR_FILE",
+ENV_KEYS = ["UNIFI_CONTROLLER_URL", "UNIFI_SITE", "UNIFI_CA_FILE", "UNIFI_READER_FILE", "UNIFI_READER_KEY_FILE",
+            "UNIFI_OPERATOR_FILE",
             "NETDEV_ALLOW_INSECURE_HTTP", "NETDEV_READ_TIMEOUT", "POD_IP", "IM_FAC_TICKET_REPO",
             "IM_FAC_TICKET_TOKEN_FILE", "IM_FAC_TICKET_API", "NETDEV_OUTSIDE_PROBES", "NETDEV_SNAPSHOT_DIR",
             "NETDEV_SNAPSHOT_KEEP", "NETDEV_HEALTH_TIMEOUT", "NETDEV_HEALTH_INTERVAL", "NETDEV_WRITES_PER_HOUR",
             "NETDEV_WITNESS_WAIT", "NETDEV_WITNESS_POLL", "NETDEV_PROBE_TIMEOUT", "CLUSTER_NAME", "CLAUDE_USER_ID",
             "KUBERNETES_SERVICE_HOST", "NETDEV_SHIM_READYZ", "NETDEV_SHIM_ENDPOINTS_FAIL", "NETDEV_SHIM_APISERVER"]
-READER_KEY = "dummy-reader-key-7f3a9c"          # must never appear in any output
+READER_USER = "im-reader"
+READER_VALUE = "dummy-reader-pw-7f3a9c"         # the View Only password: sent at login, never shown
 OPERATOR_USER = "im-operator"
 OPERATOR_VALUE = "dummy-operator-pw-41be"       # the operator password: sent at login, never shown
 TICKET_TOKEN = "dummy-ticket-token-c0ffee"      # the im→FAC token: sent to the fake FAC, never shown
 USER_SECRET = "tv-user-s3cret-31"               # u-tv.x_note: stripped at every exit, kept by the snapshot
-COOKIE, CSRF = "fake-session-cookie", "fake-csrf-1"
+COOKIE, CSRF = "fake-session-cookie", "fake-csrf-1"                 # the operator's
+READER_COOKIE, READER_CSRF = "fake-reader-cookie", "fake-csrf-r"    # the reader's
 SECRETS_IN_FIXTURE = ["correct-horse-PASS-1234", "ppsk-pw-9876", "radius-s3cret-55"]
-INTEGRATION = "/proxy/network/integration/v1"
 LEGACY = "/proxy/network/api/s/default"
+LEGACY_ROOT = "/proxy/network/api"
+V2 = "/proxy/network/v2/api/site/default"
 
 
 class _Server(ThreadingHTTPServer):
@@ -89,6 +96,8 @@ class FakeController:
         self.dead = False       # every request answers 503 from now on
         self.next_id = 0
         self.swallow = set()    # methods answered "ok" but not stored (an accepted write that did not take)
+        self.logins = []        # the username of every login attempt
+        self.refuse_reader = False
         fake = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -105,11 +114,18 @@ class FakeController:
                 self.end_headers()
                 self.wfile.write(raw)
 
+            def who(self):
+                cookie = self.headers.get("Cookie") or ""
+                return "operator" if f"TOKEN={COOKIE}" in cookie else "reader" if f"TOKEN={READER_COOKIE}" in cookie else None
+
             def do_GET(self):
                 parts = urlsplit(self.path)
-                fake.requests.append(("GET", parts.path, self.headers.get("X-API-Key")))
+                fake.requests.append(("GET", parts.path, self.who()))
                 if fake.dead:
                     return self._send(503, {"error": "dead"})
+                if self.who() is None or self.headers.get("X-API-Key"):
+                    # no cookie, or a key: the reader is a cookie, never a key
+                    return self._send(401, {"meta": {"rc": "error", "msg": "api.err.LoginRequired"}, "data": []})
                 code, body = fake.answer(parts.path, parse_qs(parts.query))
                 self._send(code, body)
 
@@ -118,15 +134,21 @@ class FakeController:
                 length = int(self.headers.get("Content-Length") or 0)
                 raw = self.rfile.read(length) if length else b""
                 body = json.loads(raw) if raw else None
-                fake.requests.append((self.command, parts.path, self.headers.get("X-API-Key")))
+                fake.requests.append((self.command, parts.path, self.who()))
                 fake.writes.append((self.command, parts.path, body))
                 if fake.dead:
                     return self._send(503, {"error": "dead"})
                 if parts.path == "/api/auth/login":
+                    fake.logins.append((body or {}).get("username"))
                     if body == {"username": OPERATOR_USER, "password": OPERATOR_VALUE}:
                         return self._send(200, {"username": OPERATOR_USER},
                                           [("Set-Cookie", f"TOKEN={COOKIE}; Path=/"), ("X-CSRF-Token", CSRF)])
+                    if body == {"username": READER_USER, "password": READER_VALUE} and not fake.refuse_reader:
+                        return self._send(200, {"username": READER_USER},
+                                          [("Set-Cookie", f"TOKEN={READER_COOKIE}; Path=/"), ("X-CSRF-Token", READER_CSRF)])
                     return self._send(401, {"error": "invalid credentials"})
+                if self.who() == "reader":
+                    return self._send(403, {"meta": {"rc": "error", "msg": "api.err.NoPermission"}, "data": []})
                 if f"TOKEN={COOKIE}" not in (self.headers.get("Cookie") or "") or self.headers.get("X-CSRF-Token") != CSRF:
                     return self._send(401, {"meta": {"rc": "error", "msg": "api.err.LoginRequired"}, "data": []})
                 code, out = fake.write(self.command, parts.path, body)
@@ -144,29 +166,24 @@ class FakeController:
         self.server.shutdown()
         self.server.server_close()
 
+    LEGACY_GETS = {"/rest/networkconf": "networks", "/rest/firewallrule": "firewallrules",
+                   "/rest/firewallgroup": "firewallgroups", "/rest/portforward": "portforwards",
+                   "/rest/user": "users", "/rest/wlanconf": "wlans", "/stat/sysinfo": "info",
+                   "/stat/device": "devices", "/stat/sta": "clients"}
+    V2_GETS = {"/firewall-policies": "firewallpolicies", "/firewall/zone": "firewallzones"}
+
     def answer(self, path, query):
         if path in self.status:
             return self.status[path], {"error": "forced"}
-        site = self.data["sites"][0]["id"]
-        integration = {f"{INTEGRATION}/info": "info", f"{INTEGRATION}/sites": "sites",
-                       f"{INTEGRATION}/sites/{site}/devices": "devices",
-                       f"{INTEGRATION}/sites/{site}/clients": "clients",
-                       f"{INTEGRATION}/sites/{site}/networks": "networks"}
-        if path in integration:
-            data = self.data[integration[path]]
-            if not isinstance(data, list):
-                return 200, data
-            offset = int(query.get("offset", ["0"])[0])
-            limit = int(query.get("limit", ["25"])[0])
-            page = data[offset:offset + limit]
-            return 200, {"offset": offset, "limit": limit, "count": len(page), "totalCount": len(data), "data": page}
-        if path.startswith(LEGACY + "/rest/"):
-            name = {"networkconf": "networks", "firewallrule": "firewallrules", "firewallgroup": "firewallgroups",
-                    "portforward": "portforwards", "user": "users", "wlanconf": "wlans"}.get(path.rsplit("/", 1)[1])
-            if name:
-                if self.legacy_rc != "ok":
-                    return 200, {"meta": {"rc": "error", "msg": "api.err.NoPermission"}, "data": []}
-                return 200, {"meta": {"rc": "ok"}, "data": self.data[name]}
+        legacy = {LEGACY + k: v for k, v in self.LEGACY_GETS.items()}
+        legacy[LEGACY_ROOT + "/self/sites"] = "sites"
+        if path in legacy:
+            if self.legacy_rc != "ok":
+                return 200, {"meta": {"rc": "error", "msg": "api.err.NoPermission"}, "data": []}
+            return 200, {"meta": {"rc": "ok"}, "data": self.data[legacy[path]]}
+        v2 = {V2 + k: v for k, v in self.V2_GETS.items()}
+        if path in v2:
+            return 200, self.data[v2[path]]          # v2 answers a bare list
         return 404, {"error": f"no such path {path}"}
 
     def paths(self):
@@ -182,7 +199,7 @@ class FakeController:
         if path in (LEGACY + "/cmd/stamgr", LEGACY + "/cmd/devmgr") and method == "POST":
             if body.get("cmd") in ("block-sta", "unblock-sta"):
                 for c in self.data["clients"]:
-                    if c["macAddress"] == body.get("mac"):
+                    if c["mac"] == body.get("mac"):
                         c["blocked"] = body["cmd"] == "block-sta"
             return ok([])
         rest = path[len(LEGACY + "/rest/"):].split("/") if path.startswith(LEGACY + "/rest/") else []
@@ -203,7 +220,9 @@ class FakeController:
         if idx is None:
             return 400, {"meta": {"rc": "error", "msg": "api.err.IdInvalid"}, "data": []}
         if method == "PUT":
-            items[idx] = dict(body)
+            # legacy rest PUT merges: FAC1 kept fixed_ip/use_fixedip through a
+            # partial PUT (k8scc#67 finding 4), so a key absent from the body stays
+            items[idx] = {**items[idx], **body}
             return ok([items[idx]])
         if method == "DELETE":
             del items[idx]
@@ -334,8 +353,10 @@ class Harness:
     def __init__(self):
         self.tmp = tempfile.TemporaryDirectory()
         d = pathlib.Path(self.tmp.name)
-        self.key = d / "reader.key"
-        self.key.write_text(READER_KEY + "\n")
+        self.key = d / "reader"
+        self.key.write_text(f"{READER_USER}\n{READER_VALUE}\n")
+        self.oneline = d / "reader-oneline"
+        self.oneline.write_text("a-bare-api-key-not-an-account\n")
         self.empty = d / "empty.key"
         self.empty.write_bytes(b"")
         self.operator = d / "operator"
@@ -366,11 +387,15 @@ class Harness:
             os.environ.pop(k, None)
         os.environ["UNIFI_CONTROLLER_URL"] = self.fake.url if url == "fake" else url
         if key == "ok":
-            os.environ["UNIFI_READER_KEY_FILE"] = str(self.key)
+            os.environ["UNIFI_READER_FILE"] = str(self.key)
         elif key == "empty":
-            os.environ["UNIFI_READER_KEY_FILE"] = str(self.empty)
+            os.environ["UNIFI_READER_FILE"] = str(self.empty)
         elif key == "missing":
-            os.environ["UNIFI_READER_KEY_FILE"] = str(self.key) + ".absent"
+            os.environ["UNIFI_READER_FILE"] = str(self.key) + ".absent"
+        elif key == "oneline":
+            os.environ["UNIFI_READER_FILE"] = str(self.oneline)
+        elif key == "old":          # the previous image's input only: a rollout half landed
+            os.environ["UNIFI_READER_KEY_FILE"] = str(self.oneline)
         elif key != "unset":
             raise ValueError(key)
         if insecure:
@@ -397,6 +422,7 @@ class Harness:
         self.mod._controller_ip = lambda: "10.9.9.1"
         self.fake.requests.clear()
         self.fake.writes.clear()
+        self.fake.logins.clear()
         return self.mod
 
     def tools(self):
@@ -438,7 +464,7 @@ class Configuration(Case):
         with self.subTest(control="with the flag, requests arrive and the readings say so"):
             m = self.h.load(insecure=True)
             out, _ = self.h.call(m.get_devices)
-            self.assertTrue(out.startswith("[via integration]"), out)
+            self.assertTrue(out.startswith("[via legacy]"), out)
             self.assertGreater(len(self.h.fake.requests), 0)
             self.assertIn("insecure http accepted", self.h.readings())
 
@@ -477,18 +503,55 @@ class Configuration(Case):
         with self.subTest(control="the grep can see a verify=False when one is there"):
             self.assertIn("verify=False", "httpx.Client(verify=False)")
 
-    def test_missing_reader_key_answers_not_configured_naming_it(self):
-        for state in ("unset", "missing", "empty"):
+    def test_missing_reader_answers_not_configured_naming_it(self):
+        for state in ("unset", "missing", "empty", "oneline", "old"):
             with self.subTest(key=state):
                 m = self.h.load(key=state)
                 for name in sorted(READ_TOOLS):
                     out, _ = self.h.call(getattr(m, name))
                     self.assertIn("not configured", out, name)
-                    self.assertIn("UNIFI_READER_KEY_FILE", out, name)
+                    self.assertIn("reader credential (UNIFI_READER_FILE", out, name)
                 self.assertEqual(self.h.fake.requests, [])
-        with self.subTest(control="key present: data, not a refusal"):
+                self.assertEqual("UNIFI_READER_KEY_FILE is set but no longer read" in out, state == "old", out)
+                self.assertEqual("expected two lines" in out, state == "oneline", out)
+        with self.subTest(control="the account present: data, not a refusal"):
             m = self.h.load()
             self.assertNotIn("not configured", self.h.call(m.get_devices)[0])
+
+    def test_reader_logs_in_as_its_own_account_and_never_sends_a_key(self):
+        m = self.h.load(write=True)
+        self.h.call(m.get_devices)
+        self.h.call(m.get_networks)
+        self.assertEqual(self.h.fake.logins, [READER_USER], "one reader login, then the cookie")
+        gets = [(p, who) for meth, p, who in self.h.fake.requests if meth == "GET"]
+        self.assertTrue(gets)
+        self.assertEqual({who for _, who in gets}, {"reader"}, "every read carries the reader's cookie, never the operator's")
+        src = (ROOT / "netdev_mcp_server.py").read_text()
+        self.assertNotIn('"X-API-Key"', src)
+        with self.subTest(control="the fake refuses a key-only or cookieless GET, so a key path would show"):
+            import httpx
+            self.assertEqual(httpx.get(self.h.fake.url + LEGACY + "/stat/device", headers={"X-API-Key": "k"}).status_code, 401)
+        with self.subTest(control="a write with the reader's cookie is answered 403 by the fake, like FAC1"):
+            import httpx
+            c = httpx.Client(base_url=self.h.fake.url)
+            c.post("/api/auth/login", json={"username": READER_USER, "password": READER_VALUE})
+            r = c.put(LEGACY + "/rest/user/u-tv", json={"note": "x"}, headers={"X-CSRF-Token": READER_CSRF})
+            self.assertEqual(r.status_code, 403)
+
+    def test_reader_session_expiry_logs_in_again_once(self):
+        m = self.h.load()
+        self.h.call(m.get_devices)
+        m._controller()._session._client.cookies.clear()     # the console dropped the session
+        out = self.h.call(m.get_devices)[0]
+        self.assertIn("dev-gw", out)
+        self.assertEqual(self.h.fake.logins, [READER_USER, READER_USER])
+        with self.subTest(control="a refused login is an answer naming the refusal, not data, not the password"):
+            m = self.h.load()
+            self.h.fake.refuse_reader = True
+            out = self.h.call(m.get_devices)[0]
+            self.assertIn("controller refused the reader login (401)", out)
+            self.assertNotIn(READER_VALUE, out)
+            self.assertNotIn("dev-gw", out)
 
     def test_credentials_never_surface(self):
         m = self.h.load()
@@ -501,11 +564,12 @@ class Configuration(Case):
         self.h.fake.status[f"{LEGACY}/rest/wlanconf"] = 401
         outputs.append(self.h.call(m.get_wlans)[0])     # an error response too
         joined = "\n".join(outputs + stdouts)
-        for value in (READER_KEY, OPERATOR_VALUE):
+        for value in (READER_VALUE, OPERATOR_VALUE, READER_COOKIE, READER_CSRF):
             self.assertNotIn(value, joined)
-        self.assertNotIn(READER_KEY, json.dumps(dict(os.environ)), "the key must not be exported to env")
-        with self.subTest(control="the key really was in play: the fake received it"):
-            self.assertIn(READER_KEY, {k for _, _, k in self.h.fake.requests})
+        self.assertNotIn(READER_VALUE, json.dumps(dict(os.environ)), "the password must not be exported to env")
+        with self.subTest(control="the password really was in play: the fake received it at login"):
+            self.assertIn({"username": READER_USER, "password": READER_VALUE},
+                          [b for _, p, b in self.h.fake.writes if p == "/api/auth/login"])
 
 
 class StartupStates(Case):
@@ -573,20 +637,28 @@ class StartupStates(Case):
         m = self.h.load(key="unset")
         self.assertEqual(self.h.tools(), READ_TOOLS)
         self.assertIn("reader credential: missing", self.h.readings())
-        with self.subTest(control="configured: reader credential ok"):
+        with self.subTest(control="configured: exactly ok (jg-base daily-check row 31 reads anything else as fail)"):
             self.h.load()
-            self.assertIn("reader credential: ok", self.h.readings())
+            self.assertIn("reader credential: ok", self.h.readings().splitlines())
+        with self.subTest(control="a refused reader login shows on the version line, not as data"):
+            self.h.load()                      # a fresh process: no session yet
+            self.h.fake.refuse_reader = True
+            self.assertIn("controller version: unreadable", self.h.readings())
+            self.assertIn("refused the reader login", self.h.readings())
 
     def test_startup_reading_names_the_controller_version(self):
         self.h.load()
-        self.assertIn("controller version: 9.4.19", self.h.readings())
-        with self.subTest(control="an unreachable /info reads as unreadable, not as a version"):
-            self.h.fake.status[f"{INTEGRATION}/info"] = 503
+        self.assertIn("controller version: 11.0.99", self.h.readings())
+        with self.subTest(control="an unreachable sysinfo reads as unreadable, not as a version"):
+            self.h.fake.status[f"{LEGACY}/stat/sysinfo"] = 503
             self.assertIn("controller version: unreadable", self.h.readings())
 
-    def test_routes_are_labelled_provisional(self):
+    def test_routes_name_what_is_not_yet_read(self):
         self.h.load()
-        self.assertIn("routes: provisional, not measured (root spike 1.1)", self.h.readings())
+        readings = self.h.readings()
+        self.assertIn("firewallpolicies=v2", readings)
+        self.assertIn("not yet read on a console", readings)
+        self.assertNotIn("integration", readings)
 
 
 class ReaderTools(Case):
@@ -599,8 +671,10 @@ class ReaderTools(Case):
         wlan = body(out)[0]
         self.assertEqual(wlan["x_passphrase"], "<stripped>")
         self.assertEqual(wlan["radius_secret"], "<stripped>")
-        self.assertEqual(wlan["private_preshared_keys"][0]["password"], "<stripped>")
-        self.assertEqual(wlan["private_preshared_keys"][0]["networkconf_id"], "net-iot", "non-secrets survive")
+        # the whole list goes: FAC1's rows were empty lists, so their shape is
+        # unread, and a key whose name says "keys" is a secret (finding 2)
+        self.assertEqual(wlan["private_preshared_keys"], "<stripped>")
+        self.assertEqual(wlan["security"], "wpapsk", "non-secrets survive")
         with self.subTest(control="the fake really served them (strip off => they show)"):
             original = m._strip
             m._strip = lambda obj: obj
@@ -615,47 +689,46 @@ class ReaderTools(Case):
         m = self.h.load()
         cases = {"x_password": True, "X_IAPP_KEY": True, "radius_secret": True, "wpa_psk": True,
                  "ssh_key": True, "AdminPassword": True, "passphrase_hint": True,
-                 "name": False, "x": False, "key_count": False, "networkconf_id": False, "psk_enabled_x": True}
+                 "name": False, "x": False, "key_count": False, "networkconf_id": False, "psk_enabled_x": True,
+                 "private_preshared_keys": True, "api_keys": True, "preshared_list": True, "network_ids": False}
         for key, secret in cases.items():
             got = m._strip({key: "v"})[key]
             self.assertEqual(got == "<stripped>", secret, key)
 
     def test_path_marker_follows_the_route_table(self):
         m = self.h.load()
-        expect = {"get_sites": "integration", "get_controller_info": "integration", "get_devices": "integration",
-                  "get_clients": "integration", "get_lan_inventory": "integration", "get_networks": "legacy",
-                  "get_firewall_rules": "legacy", "get_port_forwards": "legacy",
+        expect = {"get_sites": "legacy-root", "get_controller_info": "legacy", "get_devices": "legacy",
+                  "get_clients": "legacy", "get_lan_inventory": "legacy", "get_networks": "legacy",
+                  "get_firewall_rules": "legacy+v2", "get_port_forwards": "legacy",
                   "get_dhcp_reservations": "legacy", "get_wlans": "legacy"}
         for name, api in expect.items():
             out, _ = self.h.call(getattr(m, name))
             self.assertEqual(out.split("\n", 1)[0], f"[via {api}]", name)
             self.assertNotIn("error:", out, name)
         with self.subTest(control="moving a route moves the marker and the request"):
-            m.ROUTES["networks"] = ("integration", "/sites/{site_id}/networks")
+            m.ROUTES["networks"] = ("v2", "/firewall/zone")
             out, _ = self.h.call(m.get_networks)
-            self.assertEqual(out.split("\n", 1)[0], "[via integration]")
-            self.assertIn(f"{INTEGRATION}/sites/site-uuid-1/networks", self.h.fake.paths())
+            self.assertEqual(out.split("\n", 1)[0], "[via v2]")
+            self.assertIn(f"{V2}/firewall/zone", self.h.fake.paths())
 
-    def test_integration_pages_are_all_read(self):
-        m = self.h.load()
-        m.PAGE_LIMIT = 2
-        clients = body(self.h.call(m.get_clients)[0])
-        self.assertEqual([c["id"] for c in clients], ["cl-node", "cl-phone", "cl-tv"])
-        client_reqs = [p for p in self.h.fake.paths() if p.endswith("/clients")]
-        self.assertEqual(len(client_reqs), 2)
-        with self.subTest(control="a server that stops after one page returns two"):
-            m.MAX_PAGES = 1
-            out = self.h.call(m.get_clients)[0]
-            self.assertIn("more than 1 pages", out)
-
-    def test_site_resolved_from_unifi_site(self):
+    def test_site_names_the_legacy_path(self):
         m = self.h.load(site="nosuchsite")
         out = self.h.call(m.get_devices)[0]
-        self.assertIn("site 'nosuchsite' (UNIFI_SITE) not found", out)
-        self.assertIn("default", out, "names the sites that do exist")
-        with self.subTest(control="the default site resolves"):
+        self.assertIn("/proxy/network/api/s/nosuchsite/stat/device", out)
+        self.assertIn("404", out)
+        with self.subTest(control="the default site answers"):
             m = self.h.load()
             self.assertIn("dev-gw", self.h.call(m.get_devices)[0])
+
+    def test_a_v2_answer_that_is_not_a_list_is_an_error(self):
+        m = self.h.load()
+        self.h.fake.data["firewallpolicies"] = {"unexpected": True}
+        out = self.h.call(m.get_firewall_rules)[0]
+        self.assertIn("error:", out)
+        self.assertIn("not a list", out)
+        with self.subTest(control="a list answers"):
+            self.h.fake.data["firewallpolicies"] = []
+            self.assertNotIn("error:", self.h.call(m.get_firewall_rules)[0])
 
     def test_controller_errors_are_answers_not_data(self):
         m = self.h.load()
@@ -681,28 +754,61 @@ class ReaderTools(Case):
 
     def test_firewall_rules_carry_the_expanded_addresses(self):
         m = self.h.load()
-        rules = {r["_id"]: r for r in body(self.h.call(m.get_firewall_rules)[0])}
+        rules = {r["_id"]: r for r in body(self.h.call(m.get_firewall_rules)[0])["legacy_rules"]}
         self.assertEqual(rules["rule-ctrl"]["dst_expanded"], ["10.9.9.1", "10.9.9.200-10.9.9.210"])
         self.assertEqual(rules["rule-ctrl"]["src_expanded"], "any")
         self.assertEqual(rules["rule-net"]["src_expanded"], ["10.9.9.1/24"])
         with self.subTest(control="a group that is not in the controller's answer is named, not dropped"):
             self.h.fake.data["firewallgroups"] = [g for g in FIXTURES["firewallgroups"] if g["_id"] != "grp-ctrl"]
-            rules = {r["_id"]: r for r in body(self.h.call(m.get_firewall_rules)[0])}
+            rules = {r["_id"]: r for r in body(self.h.call(m.get_firewall_rules)[0])["legacy_rules"]}
             self.assertEqual(rules["rule-ctrl"]["dst_unresolved"], ["grp-ctrl"])
+
+    def test_zone_based_policies_are_read_when_legacy_is_empty(self):
+        # FAC1 (k8scc#67 finding 1): rest/firewallrule and rest/firewallgroup
+        # 200 with 0 rows, 91 policies in v2
+        m = self.h.load()
+        self.h.fake.data["firewallrules"], self.h.fake.data["firewallgroups"] = [], []
+        out = body(self.h.call(m.get_firewall_rules)[0])
+        self.assertEqual(out["legacy_rules"], [])
+        pols = {p["_id"]: p for p in out["policies"]}
+        self.assertEqual(set(pols), {"pol-gw", "pol-node", "pol-iot", "pol-lan"})
+        self.assertEqual(pols["pol-node"]["src_expanded"], ["10.9.9.62"])
+        self.assertEqual(pols["pol-node"]["dst_expanded"], ["10.9.8.1/24"])
+        self.assertEqual(pols["pol-gw"]["src_expanded"], ["10.9.9.1/24", "10.9.8.1/24"], "a zone expands to its networks")
+        self.assertEqual(pols["pol-gw"]["dst_unresolved"], ["zone Gateway (no networks)"])
+        self.assertEqual(out["zones"], "read")
+        with self.subTest(case="a target type not modelled is named, not shown as any"):
+            self.h.fake.data["firewallpolicies"].append(
+                {"_id": "pol-mac", "name": "by client", "source": {"matching_target": "CLIENT", "client_macs": [NODE]},
+                 "destination": {"matching_target": "IP", "ips": ["10.9.9.1"]}})
+            pols = {p["_id"]: p for p in body(self.h.call(m.get_firewall_rules)[0])["policies"]}
+            self.assertEqual(pols["pol-mac"]["src_unresolved"], ["matching_target CLIENT"])
+            self.h.fake.data["firewallpolicies"].pop()
+        with self.subTest(control="zones unreadable: a zone-only side is named unresolved, the rest still expands"):
+            self.h.fake.status[f"{V2}/firewall/zone"] = 404
+            out = body(self.h.call(m.get_firewall_rules)[0])
+            pols = {p["_id"]: p for p in out["policies"]}
+            self.assertIn("unreadable", out["zones"])
+            self.assertEqual(pols["pol-gw"]["src_unresolved"], ["zone zone-internal (zones unreadable)"])
+            self.assertEqual(pols["pol-node"]["src_expanded"], ["10.9.9.62"])
+        with self.subTest(control="policies unreadable: an error, not an empty firewall"):
+            self.h.fake.status[f"{V2}/firewall-policies"] = 403
+            out = self.h.call(m.get_firewall_rules)[0]
+            self.assertTrue(out.startswith("[via legacy+v2]\nerror:"), out)
 
     def test_lan_inventory_merges_devices_and_clients(self):
         m = self.h.load()
         rows = body(self.h.call(m.get_lan_inventory)[0])
         self.assertEqual(len(rows), 6)
         node = next(r for r in rows if r["ip"] == "10.9.9.62")
-        self.assertEqual((node["kind"], node["mac"], node["uplink"]), ("client", "bb:bb:bb:00:00:62", "dev-sw"))
+        self.assertEqual((node["kind"], node["mac"], node["uplink"]), ("client", "bb:bb:bb:00:00:62", "aa:aa:aa:00:00:02"))
         self.assertEqual({r["kind"] for r in rows}, {"device", "client"})
 
     def test_reader_results_fill_the_session_cache(self):
         m = self.h.load()
         self.assertIsNone(m._seen("clients", "cl-phone"))
         self.h.call(m.get_clients)
-        self.assertEqual(m._seen("clients", "cl-phone")["ipAddress"], "10.9.9.120")
+        self.assertEqual(m._seen("clients", "cl-phone")["ip"], "10.9.9.120")
         self.h.call(m.get_wlans)
         self.assertEqual(m._seen("wlans", "wlan-1")["x_passphrase"], "<stripped>", "the cache holds stripped objects")
         with self.subTest(control="past the TTL the entry is gone"):
@@ -727,7 +833,8 @@ class ClassA(Case):
     def args(self, **over):
         f = json.loads(json.dumps(FIXTURES))
         a = dict(pod_ip=self.POD, controller_ip=self.CTRL, api_server_ips=self.API, networks=f["networks"],
-                 clients=f["clients"], devices=f["devices"], rules=f["firewallrules"], groups=f["firewallgroups"])
+                 clients=f["clients"], devices=f["devices"], rules=f["firewallrules"], groups=f["firewallgroups"],
+                 policies=f["firewallpolicies"], zones=f["firewallzones"])
         a.update(over)
         return a
 
@@ -780,13 +887,48 @@ class ClassA(Case):
             self.assertFalse(self.m.fw_rules_covering([(self.POD, self.CTRL)], rules, [], []))
 
     def test_attached_device_refused(self):
-        why = self.m.class_a("devices", "dev-sw", **self.args())
-        self.assertIn("attached", why)
+        # a legacy client names its switch by MAC (sw_mac); the device is named by _id or MAC
+        for name in ("dev-sw", SW):
+            with self.subTest(target=name):
+                self.assertIn("attached", self.m.class_a("devices", name, **self.args()))
         with self.subTest(control="the AP the node is not on passes"):
             self.assertIsNone(self.m.class_a("devices", "dev-ap", **self.args()))
 
+    def test_zone_policies_covering_im_path(self):
+        # legacy empty, as on FAC1: the policies alone must decide
+        a = self.args(rules=[], groups=[])
+        self.assertIn("internal to gateway", self.m.class_a("firewallpolicies", "pol-gw", **a))
+        self.assertIn("lan to lan", self.m.class_a("firewallpolicies", "pol-lan", **a))
+        with self.subTest(control="policies that miss the pod↔controller/API pairs pass"):
+            self.assertIsNone(self.m.class_a("firewallpolicies", "pol-iot", **a))
+            self.assertIsNone(self.m.class_a("firewallpolicies", "pol-node", **a), "node → IoT is not im's path")
+
+    def test_unresolvable_policy_side_counts_as_covering(self):
+        a = self.args(rules=[], groups=[])
+        # IoT → LAN: the destination holds the controller, so the source decides
+        iot_only = lambda **side: [{"_id": "p", "name": "p", "source": {"matching_target": "NETWORK", "network_ids": ["net-iot"], **side},
+                                    "destination": {"matching_target": "NETWORK", "network_ids": ["net-lan"]}}]
+        self.assertIsNone(self.m.class_a("firewallpolicies", "p", **{**a, "policies": iot_only()}), "baseline: misses")
+        for name, pol in {
+            "negated networks": iot_only(match_opposite_networks=True),
+            "unknown network id": iot_only(network_ids=["gone"]),
+            "a target type not modelled": [{"_id": "p", "source": {"matching_target": "CLIENT", "client_macs": [NODE]},
+                                            "destination": {"matching_target": "NETWORK", "network_ids": ["net-lan"]}}],
+            "zone not among the zones": [{"_id": "p", "source": {"matching_target": "ANY", "zone_id": "zone-vpn"},
+                                          "destination": {"matching_target": "IP", "ips": [self.CTRL]}}],
+            "side missing": [{"_id": "p", "destination": {"matching_target": "IP", "ips": [self.CTRL]}}],
+        }.items():
+            with self.subTest(case=name):
+                self.assertIsNotNone(self.m.class_a("firewallpolicies", "p", **{**a, "policies": pol}))
+        with self.subTest(case="zones unreadable: a zone-only side covers"):
+            pol = [{"_id": "p", "source": {"matching_target": "ANY", "zone_id": "zone-internal"},
+                    "destination": {"matching_target": "IP", "ips": [self.CTRL]}}]
+            self.assertIsNotNone(self.m.class_a("firewallpolicies", "p", **{**a, "policies": pol, "zones": None}))
+            self.assertIsNotNone(self.m.class_a("firewallpolicies", "p", **{**a, "policies": pol}),
+                                 "and read: Internal holds the LAN, so it covers too")
+
     def test_missing_reader_data_fails_closed(self):
-        for missing in ("networks", "clients", "devices", "rules", "groups"):
+        for missing in ("networks", "clients", "devices", "rules", "groups", "policies"):
             with self.subTest(missing=missing):
                 why = self.m.class_a("networks", "net-iot", **self.args(**{missing: None}))
                 self.assertIn("fail closed", why)
@@ -903,9 +1045,11 @@ class Writes(WriteCase):
                 self.assertEqual(v, USER_SECRET, "the write carries the secret back, not <stripped>")
             else:
                 self.assertEqual(after[k], v, k)
-        with self.subTest(control="the reader key is never sent on a write"):
-            self.assertTrue(all(k is None for meth, _, k in self.h.fake.requests if meth != "GET"))
-            self.assertIn(READER_KEY, {k for meth, _, k in self.h.fake.requests if meth == "GET"})
+        with self.subTest(control="the reader's cookie never rides a write, the operator's never a read"):
+            writes = [who for meth, p, who in self.h.fake.requests if meth != "GET" and p != "/api/auth/login"]
+            self.assertTrue(writes)
+            self.assertEqual(set(writes), {"operator"})
+            self.assertEqual({who for meth, _, who in self.h.fake.requests if meth == "GET"}, {"reader"})
 
     def test_token_single_use_bound_and_timed(self):
         self.m.WRITE_COOLDOWN = 0     # isolate the token from the cooldown gate
@@ -1155,6 +1299,58 @@ class DeadMan(WriteCase):
         self.assertEqual(res["result"], "revert-failed", res)
         self.assertIn("still differ from the snapshot", res["revert"])
 
+    def test_merged_put_leaves_residue_that_is_judged_not_ignored(self):
+        # k8scc#67 finding 4: the legacy PUT merges, so PUTting the snapshot
+        # back cannot remove fixed_ip, which u-tv did not have before
+        self.lose_two_probes_on("PUT")
+        self.read()
+        res = self.write("set_dhcp_reservation")
+        self.assertEqual(res["result"], "reverted", res)
+        self.assertIn("fixed_ip left behind but switched off", res["revert"])
+        tv = next(u for u in self.h.fake.data["users"] if u["_id"] == "u-tv")
+        self.assertEqual((tv["use_fixedip"], tv["fixed_ip"]), (False, "10.9.9.131"), "the residue really is there")
+        with self.subTest(control="without the inert rule the same residue is revert-failed, not reverted"):
+            self.h.close()
+            self.h = Harness()
+            self.m = self.h.load(write=True)
+            self.m.INERT_RESIDUE = {}
+            self.lose_two_probes_on("PUT")
+            self.read()
+            res = self.write("set_dhcp_reservation")
+            self.assertEqual(res["result"], "revert-failed", res)
+            self.assertIn("fixed_ip remain on u-tv although the snapshot had no such key", res["revert"])
+
+    def test_residue_with_no_inert_rule_is_revert_failed(self):
+        del self.h.fake.data["portforwards"][0]["enabled"]     # a key set_port_forward sets, absent before
+        self.lose_two_probes_on("PUT")
+        self.read("get_port_forwards")
+        args = {"name": "ha", "proto": "tcp", "wan_port": 8443, "lan_ip": "10.9.9.131", "lan_port": 8123}
+        res = self.write("set_port_forward", **args)
+        self.assertEqual(res["result"], "revert-failed", res)
+        self.assertIn("enabled remain on pf-1", res["revert"])
+        with self.subTest(control="a key the snapshot had is put back and the revert reads reverted"):
+            self.h.close()
+            self.h = Harness()
+            self.m = self.h.load(write=True)
+            self.lose_two_probes_on("PUT")
+            self.read("get_port_forwards")
+            self.assertEqual(self.write("set_port_forward", **args)["result"], "reverted")
+
+    def test_create_outside_delete_reverts_is_never_deleted(self):
+        # k8scc#67 finding 5: DELETE rest/user answered 404 on FAC1
+        self.read()
+        plan = self.m.Plan("x", "users", "", "users/new:x", "create", {"mac": "bb:bb:bb:00:09:99"})
+        snap = self.m.Snapshot(None, sorted(u["_id"] for u in FIXTURES["users"]), "d", "p")
+        ok, why = self.m._revert(plan, snap, "new-9")
+        self.assertFalse(ok)
+        self.assertIn("not reverted by DELETE on this console", why)
+        self.assertEqual([m for m, _, _ in self.h.fake.writes if m == "DELETE"], [])
+        with self.subTest(control="portforwards is in the table, and no shipped tool creates outside it"):
+            self.assertEqual(self.m.DELETE_REVERTS, {"portforwards"})
+            src = (ROOT / "netdev_mcp_server.py").read_text()
+            creates = re.findall(r'Plan\("[a-z_]+", "([a-z]+)", "", [^\n]*"create"', src)
+            self.assertEqual(set(creates), {"portforwards"}, creates)
+
     def test_object_changed_since_the_token_aborts(self):
         self.read()
         tok = self.token("set_dhcp_reservation")["token"]
@@ -1231,7 +1427,7 @@ class DeadMan(WriteCase):
         self.h.fake.on_write = lambda m, p, b: setattr(self.h.fake, "dead", True)
         outputs.append(repr(self.write("clear_dhcp_reservation")))
         joined = "\n".join(outputs + [json.dumps(self.audit), json.dumps(self.h.fac.issues)])
-        for value in (READER_KEY, OPERATOR_VALUE, TICKET_TOKEN, COOKIE, CSRF):
+        for value in (READER_VALUE, OPERATOR_VALUE, TICKET_TOKEN, COOKIE, CSRF, READER_COOKIE, READER_CSRF):
             self.assertNotIn(value, joined)
         with self.subTest(control="each one really was in play"):
             self.assertIn(f"Bearer {TICKET_TOKEN}", self.h.fac.tokens)
@@ -1258,7 +1454,13 @@ class WriteClassA(WriteCase):
     def test_gateway_restart_refused(self):
         self.read("get_devices")
         out = self.run_tool("restart_device", reason="x", mac=GW)
-        self.assertIn("gateway", out)
+        self.assertIn("is the gateway", out)      # not just "gateway": that is also the device's name
+        self.assertNotIn('"token"', out)
+        with self.subTest(case="legacy stat/device may report the gateway's WAN address: its type still refuses"):
+            next(d for d in self.h.fake.data["devices"] if d["mac"] == GW)["ip"] = "203.0.113.5"
+            out = self.run_tool("restart_device", reason="x", mac=GW)
+            self.assertIn("is the gateway", out)
+            self.assertNotIn('"token"', out)
         with self.subTest(control="an AP reaches the token phase"):
             self.assertIn("token", self.token("restart_device"))
 

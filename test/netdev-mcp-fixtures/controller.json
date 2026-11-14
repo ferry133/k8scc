@@ -1,41 +1,332 @@
 {
-  "_comment": "Hand-written, not recorded from a real console: root spike 1.1 has not read FAC1 yet. Field names follow UniFi Network's Integration API (camelCase, paged) and legacy API (snake_case, meta.rc) as documented, not as measured.",
+  "_comment": "Hand-written, not recorded from a console. Every collection is in the shape the reader reads it in: legacy (snake_case, under meta.rc) or v2 (a bare list). Field names follow UniFi's documented legacy API, and for v2 firewall-policies fleet-ops-b0's FAC1 reading of the field names (k8scc#67 finding 1), not recorded rows. There is no Integration API shape: the View Only reader cannot use it.",
   "_comment_x_note": "u-tv.x_note is invented: no write tool addresses a WLAN, so the secret that the write exits must strip and the snapshot must keep sits on a user row, under UniFi's x_ convention.",
-  "info": {"applicationVersion": "9.4.19"},
-  "sites": [{"id": "site-uuid-1", "internalReference": "default", "name": "Default"}],
+  "_comment_policies": "Network 11 is zone-based: FAC1's legacy firewallrule/firewallgroup were empty and its 91 policies were in v2. The legacy rows below stay so the legacy expansion keeps its controls; test cases empty them to reproduce FAC1. Zone rows (network_ids) are guessed: v2 firewall/zone was not read.",
+  "info": [
+    {
+      "name": "default",
+      "version": "11.0.99",
+      "hostname": "ucg-ultra"
+    }
+  ],
+  "sites": [
+    {
+      "_id": "site-1",
+      "name": "default",
+      "desc": "Default"
+    }
+  ],
   "devices": [
-    {"id": "dev-gw", "name": "gateway", "model": "UDM-Pro", "macAddress": "aa:aa:aa:00:00:01", "ipAddress": "10.9.9.1", "state": "ONLINE"},
-    {"id": "dev-sw", "name": "core switch", "model": "USW-24", "macAddress": "aa:aa:aa:00:00:02", "ipAddress": "10.9.9.2", "state": "ONLINE"},
-    {"id": "dev-ap", "name": "office ap", "model": "U6-Lite", "macAddress": "aa:aa:aa:00:00:03", "ipAddress": "10.9.9.3", "state": "ONLINE"}
+    {
+      "_id": "dev-gw",
+      "name": "gateway",
+      "model": "UDRULT",
+      "type": "udm",
+      "mac": "aa:aa:aa:00:00:01",
+      "ip": "10.9.9.1",
+      "state": 1
+    },
+    {
+      "_id": "dev-sw",
+      "name": "core switch",
+      "model": "USW-24",
+      "type": "usw",
+      "mac": "aa:aa:aa:00:00:02",
+      "ip": "10.9.9.2",
+      "state": 1
+    },
+    {
+      "_id": "dev-ap",
+      "name": "office ap",
+      "model": "U6-Lite",
+      "type": "uap",
+      "mac": "aa:aa:aa:00:00:03",
+      "ip": "10.9.9.3",
+      "state": 1
+    }
   ],
   "clients": [
-    {"id": "cl-node", "name": "jcc2-node", "type": "WIRED", "macAddress": "bb:bb:bb:00:00:62", "ipAddress": "10.9.9.62", "uplinkDeviceId": "dev-sw"},
-    {"id": "cl-phone", "name": "phone", "type": "WIRELESS", "macAddress": "bb:bb:bb:00:01:20", "ipAddress": "10.9.9.120", "uplinkDeviceId": "dev-ap"},
-    {"id": "cl-tv", "name": "tv", "type": "WIRED", "macAddress": "bb:bb:bb:00:01:30", "ipAddress": "10.9.9.130", "uplinkDeviceId": "dev-sw"}
+    {
+      "_id": "cl-node",
+      "hostname": "jcc2-node",
+      "is_wired": true,
+      "mac": "bb:bb:bb:00:00:62",
+      "ip": "10.9.9.62",
+      "sw_mac": "aa:aa:aa:00:00:02",
+      "sw_port": 7
+    },
+    {
+      "_id": "cl-phone",
+      "hostname": "phone",
+      "is_wired": false,
+      "mac": "bb:bb:bb:00:01:20",
+      "ip": "10.9.9.120",
+      "ap_mac": "aa:aa:aa:00:00:03"
+    },
+    {
+      "_id": "cl-tv",
+      "hostname": "tv",
+      "is_wired": true,
+      "mac": "bb:bb:bb:00:01:30",
+      "ip": "10.9.9.130",
+      "sw_mac": "aa:aa:aa:00:00:02",
+      "sw_port": 12
+    }
   ],
   "networks": [
-    {"_id": "net-lan", "name": "LAN", "purpose": "corporate", "ip_subnet": "10.9.9.1/24"},
-    {"_id": "net-iot", "name": "IoT", "purpose": "corporate", "ip_subnet": "10.9.8.1/24"}
+    {
+      "_id": "net-lan",
+      "name": "LAN",
+      "purpose": "corporate",
+      "ip_subnet": "10.9.9.1/24"
+    },
+    {
+      "_id": "net-iot",
+      "name": "IoT",
+      "purpose": "corporate",
+      "ip_subnet": "10.9.8.1/24"
+    }
   ],
   "firewallgroups": [
-    {"_id": "grp-ctrl", "name": "controller", "group_type": "address-group", "group_members": ["10.9.9.1", "10.9.9.200-10.9.9.210"]},
-    {"_id": "grp-iot", "name": "iot", "group_type": "address-group", "group_members": ["10.9.8.0/24"]},
-    {"_id": "grp-ports", "name": "web", "group_type": "port-group", "group_members": ["443"]}
+    {
+      "_id": "grp-ctrl",
+      "name": "controller",
+      "group_type": "address-group",
+      "group_members": [
+        "10.9.9.1",
+        "10.9.9.200-10.9.9.210"
+      ]
+    },
+    {
+      "_id": "grp-iot",
+      "name": "iot",
+      "group_type": "address-group",
+      "group_members": [
+        "10.9.8.0/24"
+      ]
+    },
+    {
+      "_id": "grp-ports",
+      "name": "web",
+      "group_type": "port-group",
+      "group_members": [
+        "443"
+      ]
+    }
   ],
   "firewallrules": [
-    {"_id": "rule-ctrl", "name": "drop to controller", "action": "drop", "src_address": "", "src_firewallgroup_ids": [], "dst_address": "", "dst_firewallgroup_ids": ["grp-ctrl", "grp-ports"]},
-    {"_id": "rule-iot", "name": "iot to iot", "action": "accept", "src_address": "", "src_firewallgroup_ids": ["grp-iot"], "dst_address": "", "dst_firewallgroup_ids": ["grp-iot"]},
-    {"_id": "rule-net", "name": "lan to tv", "action": "accept", "src_networkconf_id": "net-lan", "dst_address": "10.9.9.150", "dst_firewallgroup_ids": []}
+    {
+      "_id": "rule-ctrl",
+      "name": "drop to controller",
+      "action": "drop",
+      "src_address": "",
+      "src_firewallgroup_ids": [],
+      "dst_address": "",
+      "dst_firewallgroup_ids": [
+        "grp-ctrl",
+        "grp-ports"
+      ]
+    },
+    {
+      "_id": "rule-iot",
+      "name": "iot to iot",
+      "action": "accept",
+      "src_address": "",
+      "src_firewallgroup_ids": [
+        "grp-iot"
+      ],
+      "dst_address": "",
+      "dst_firewallgroup_ids": [
+        "grp-iot"
+      ]
+    },
+    {
+      "_id": "rule-net",
+      "name": "lan to tv",
+      "action": "accept",
+      "src_networkconf_id": "net-lan",
+      "dst_address": "10.9.9.150",
+      "dst_firewallgroup_ids": []
+    }
+  ],
+  "firewallzones": [
+    {
+      "_id": "zone-internal",
+      "name": "Internal",
+      "zone_key": "internal",
+      "network_ids": [
+        "net-lan",
+        "net-iot"
+      ]
+    },
+    {
+      "_id": "zone-gateway",
+      "name": "Gateway",
+      "zone_key": "gateway",
+      "network_ids": []
+    },
+    {
+      "_id": "zone-external",
+      "name": "External",
+      "zone_key": "external",
+      "network_ids": []
+    }
+  ],
+  "firewallpolicies": [
+    {
+      "_id": "pol-gw",
+      "name": "internal to gateway",
+      "action": "ALLOW",
+      "enabled": true,
+      "predefined": true,
+      "source": {
+        "zone_id": "zone-internal",
+        "matching_target": "ANY",
+        "port_matching_type": "ANY",
+        "match_opposite_ips": false,
+        "match_opposite_networks": false,
+        "match_opposite_ports": false
+      },
+      "destination": {
+        "zone_id": "zone-gateway",
+        "matching_target": "ANY",
+        "port_matching_type": "ANY",
+        "match_opposite_ips": false,
+        "match_opposite_networks": false,
+        "match_opposite_ports": false
+      }
+    },
+    {
+      "_id": "pol-node",
+      "name": "node to iot",
+      "action": "BLOCK",
+      "enabled": true,
+      "predefined": false,
+      "source": {
+        "zone_id": "zone-internal",
+        "matching_target": "IP",
+        "port_matching_type": "ANY",
+        "match_opposite_ips": false,
+        "match_opposite_networks": false,
+        "match_opposite_ports": false,
+        "matching_target_type": "SPECIFIC",
+        "ips": [
+          "10.9.9.62"
+        ]
+      },
+      "destination": {
+        "zone_id": "zone-internal",
+        "matching_target": "NETWORK",
+        "port_matching_type": "ANY",
+        "match_opposite_ips": false,
+        "match_opposite_networks": false,
+        "match_opposite_ports": false,
+        "matching_target_type": "OBJECT",
+        "network_ids": [
+          "net-iot"
+        ]
+      }
+    },
+    {
+      "_id": "pol-iot",
+      "name": "iot to iot",
+      "action": "ALLOW",
+      "enabled": true,
+      "predefined": false,
+      "source": {
+        "zone_id": "zone-internal",
+        "matching_target": "NETWORK",
+        "port_matching_type": "ANY",
+        "match_opposite_ips": false,
+        "match_opposite_networks": false,
+        "match_opposite_ports": false,
+        "network_ids": [
+          "net-iot"
+        ]
+      },
+      "destination": {
+        "zone_id": "zone-internal",
+        "matching_target": "NETWORK",
+        "port_matching_type": "ANY",
+        "match_opposite_ips": false,
+        "match_opposite_networks": false,
+        "match_opposite_ports": false,
+        "network_ids": [
+          "net-iot"
+        ]
+      }
+    },
+    {
+      "_id": "pol-lan",
+      "name": "lan to lan",
+      "action": "ALLOW",
+      "enabled": true,
+      "predefined": false,
+      "source": {
+        "zone_id": "zone-internal",
+        "matching_target": "NETWORK",
+        "port_matching_type": "ANY",
+        "match_opposite_ips": false,
+        "match_opposite_networks": false,
+        "match_opposite_ports": false,
+        "network_ids": [
+          "net-lan"
+        ]
+      },
+      "destination": {
+        "zone_id": "zone-internal",
+        "matching_target": "IP",
+        "port_matching_type": "ANY",
+        "match_opposite_ips": false,
+        "match_opposite_networks": false,
+        "match_opposite_ports": false,
+        "ips": [
+          "10.9.9.1"
+        ]
+      }
+    }
   ],
   "portforwards": [
-    {"_id": "pf-1", "name": "ha", "proto": "tcp", "dst_port": "8443", "fwd": "10.9.9.130", "fwd_port": "8123", "enabled": true}
+    {
+      "_id": "pf-1",
+      "name": "ha",
+      "proto": "tcp",
+      "dst_port": "8443",
+      "fwd": "10.9.9.130",
+      "fwd_port": "8123",
+      "enabled": true
+    }
   ],
   "users": [
-    {"_id": "u-phone", "mac": "bb:bb:bb:00:01:20", "name": "phone", "use_fixedip": true, "fixed_ip": "10.9.9.120"},
-    {"_id": "u-tv", "mac": "bb:bb:bb:00:01:30", "name": "tv", "use_fixedip": false, "last_seen": 1761480000, "x_note": "tv-user-s3cret-31"}
+    {
+      "_id": "u-phone",
+      "mac": "bb:bb:bb:00:01:20",
+      "name": "phone",
+      "use_fixedip": true,
+      "fixed_ip": "10.9.9.120"
+    },
+    {
+      "_id": "u-tv",
+      "mac": "bb:bb:bb:00:01:30",
+      "name": "tv",
+      "use_fixedip": false,
+      "last_seen": 1761480000,
+      "x_note": "tv-user-s3cret-31"
+    }
   ],
   "wlans": [
-    {"_id": "wlan-1", "name": "home", "security": "wpapsk", "x_passphrase": "correct-horse-PASS-1234",
-     "private_preshared_keys": [{"networkconf_id": "net-iot", "password": "ppsk-pw-9876"}], "radius_secret": "radius-s3cret-55"}
+    {
+      "_id": "wlan-1",
+      "name": "home",
+      "security": "wpapsk",
+      "x_passphrase": "correct-horse-PASS-1234",
+      "private_preshared_keys": [
+        {
+          "networkconf_id": "net-iot",
+          "password": "ppsk-pw-9876"
+        }
+      ],
+      "radius_secret": "radius-s3cret-55"
+    }
   ]
 }
