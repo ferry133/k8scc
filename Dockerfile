@@ -306,6 +306,11 @@ COPY inbox-watch /usr/local/bin/inbox-watch
 # operator's Mac carries installed copies. Nothing in the image calls them yet.
 COPY chamber/chamber /usr/local/bin/chamber
 COPY chamber/directive-verify /usr/local/bin/directive-verify
+# The verifier's defaults in the image (tasks 2.3): the signer list and the
+# revoked list come from a mounted directory, and a `transcript:` pointer is
+# never looked up -- the person's transcripts are on another host.
+ENV CHAMBER_SIGNERS_DIR=/etc/chamber/signers \
+    CHAMBER_TRANSCRIPTS=off
 # im's managed policy (root 7.3b, 2026-10-15): Claude Code loads
 # /etc/claude-code/CLAUDE.md first, for every user, and personal settings
 # cannot drop it. The repo copy is not named CLAUDE.md on purpose, so that a

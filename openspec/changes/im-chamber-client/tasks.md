@@ -19,8 +19,15 @@
   - **做了（2026-11-19 06:43，`k8scc-0f [7c5b85]`）**：以 Mac 側當下的位元組進 repo——`chamber` sha256 `6f7ce8a2d00f9e19…`、`directive-verify` `a58e8189b42f7670…`（兩側各量一次，`fleet-ops-98 [047e9c]` 06:42 量到相同）。**沒有在檔頭加來源註記**：正本裁定住這裡（2.4），加了就不再逐位元組相同，而雜湊已記在這一行。`test/chamber-controls.sh` 20 格（出貨、起得來、用戶端的 1 與 2 分得開、固定 sk-ecdsa 向量的 0／1／2），四個變異各自轉紅（拿掉 COPY；驗不過當通過；沒有清單當失敗；連不上當失敗）。向量在 `test/chamber-vectors/sk-ecdsa/`
   - **沒量**：映像還沒建，所以「在映像裡起得來」這次沒量（tasks 1.1 量的是以 stdin 帶進 pod 的同一份 `directive-verify`；`chamber` 在 pod 裡沒跑過）
 - [ ] 2.2 對照測試進 `test/`（用戶端 20 格、驗章 24 格＋只用一次 13 格、變異各一支）；CI 對一台本機拋棄式伺服器跑。伺服器起不來 ⇒ 那幾格是「量不到」，CI 不算綠
-- [ ] 2.3 `directive-verify` 在映像裡的預設：公鑰清單讀 `CHAMBER_SIGNERS_DIR`；`transcript:` 指標一律回 2（映像裡沒有別人的 transcript——確認不是剛好找不到，是不找）
-- [ ] 2.5 （2.4 已裁定，正本在本 repo；改在這裡做，Mac 側重新安裝）`chamber` 用戶端認得 socket 形式的位址（`unix:<path>`；design D-b 2026-11-19 的更正）。這是共用檔的修改：Mac 側一起收，同一份測試向量加一格（經 socket 與經 https 的行為逐格相同）
+  - **範圍寫明（`fleet-ops-98 [047e9c]` 驗收 #74 時指出，2026-11-19）**：`test/chamber-controls.sh` 的 20 格裡 `--relayed` 與撤銷清單是 0 格、`--use` 只有 1 格。那些格（以及 `transcript:` 的 28 格）現在只在 Mac 側的 bench。搬過來時要改兩處：它們載入 `directive-sign`（不在本 repo，也不該進映像），而且測試字串裡有叢集名（本 repo 是公開的）
+- [x] 2.3 `directive-verify` 在映像裡的預設：公鑰清單讀 `CHAMBER_SIGNERS_DIR`；`transcript:` 指標一律回 2（映像裡沒有別人的 transcript——確認不是剛好找不到，是不找）
+  - **做了（2026-11-19 06:50，`k8scc-0f [7c5b85]`）**：`CHAMBER_SIGNERS_DIR` 有值時預設清單是 `<dir>/allowed_signers`（`--signers` 仍然贏；撤銷清單照舊是清單旁的 `revoked_signers`）。`CHAMBER_TRANSCRIPTS=off` 時每個指標回 2，在找任何檔之前就回，訊息說的是「這台主機不讀」而不是「找不到」。`Dockerfile` 以 `ENV` 設這兩個。`test/test_chamber_tools.py` V1–V5、T1–T8、I1–I2
+  - ⚠️ **那個開關是預設，不是邊界**：`app` 裡的行程可以把環境變數拿掉。拿掉之後 im 讀得到的只有它自己的 transcript（人在 ttyd 打的字，那本來就是直接指令），讀不到別台主機上的
+  - **沒量**：這兩個 `ENV` 在 pod 裡是否真的傳到 tmux 裡的 `claude`（`entrypoint.sh` → ttyd → tmux 這條路，讀的，沒量）；ConfigMap 掛上去之後的實際讀數（jg-base 側還沒有）
+- [x] 2.5 （2.4 已裁定，正本在本 repo；改在這裡做，Mac 側重新安裝）`chamber` 用戶端認得 socket 形式的位址（`unix:<path>`；design D-b 2026-11-19 的更正）。這是共用檔的修改：Mac 側一起收，同一份測試向量加一格（經 socket 與經 https 的行為逐格相同）
+  - **做了（2026-11-19 06:50，`k8scc-0f [7c5b85]`）**：`CHAMBER_URL=unix:<path>` 時用戶端經那個 socket 說 HTTP，**不讀憑證、不送 `Authorization`**（憑證由另一端加）。`test/test_chamber_tools.py` C1–C9：同一台假伺服器同時開 TCP 與 socket，`whoami` 兩邊答案相同；TCP 那邊看得到憑證（正對照）、socket 那邊沒有；socket 不存在 ⇒ 2；拒絕 ⇒ 兩邊都是 1。六個變異各自轉紅（socket 仍讀憑證；socket 帶憑證；開關失效；開關分大小寫；清單目錄被忽略；連不上當成拒絕）
+  - **回歸**：Mac 側 bench 的三支對改過的 `directive-verify` 跑（`VERIFY_BIN`）：24／24、13／13、28／28，各有一格 skip（bench 沒開、沒給真的指標）
+  - **沒量**：改過的 `chamber` 對真的伺服器（https）沒跑過——Mac 側的 20 格要 bench 伺服器；`send`（POST 帶內文）經 socket 沒有格，只有 GET；真的 bridge 還不存在
 - [ ] 2.6 用過的指令的那本帳在 PVC 上（預設 `~/.claude/chamber/used_directives`，而 `~/.claude` 是 PVC——讀 `directive-verify` 與 `CLAUDE.md` 得來，沒在 pod 上量）：control 是「`--use` 之後重啟 pod，同一份再驗回 1」
 - [ ] 2.4 正本住哪（design Open Questions 1）裁定後：另一側改成安裝的副本，加一格雜湊比對
   - **裁定（ferry133 2026-11-19，在 `k8scc-0f` 的 console，逐字）：「正本放 k8scc」。** 正本是本 repo 的 `chamber/`。Mac 側（`~/.claude/scripts/`）改成安裝的副本與雜湊比對那一格由 fleet-ops 收（`fleet-ops-98 [047e9c]` 已接）；那一半做完這一項才勾

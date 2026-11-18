@@ -27,7 +27,10 @@ Exit codes
   4  wait: nothing addressed to you arrived in time
 
 Configuration
-  CHAMBER_URL          server base URL (or "url" in ~/.claude/chamber/config.json)
+  CHAMBER_URL          server base URL (or "url" in ~/.claude/chamber/config.json).
+                       `unix:<path>` speaks HTTP over that Unix socket instead: the
+                       far end (a bridge that holds the credential) adds it, so no
+                       credential is read here and no Authorization header is sent.
   CHAMBER_TOKEN_FILE   file holding the login credential (bench use), otherwise
                        the macOS keychain item: service `chamber-login`,
                        account = CHAMBER_ACCOUNT or the first line of the
@@ -35,7 +38,7 @@ Configuration
   CHAMBER_CA           CA bundle for a privately signed server
 The credential is never printed.
 """
-import json, os, ssl, subprocess, sys, time, urllib.error, urllib.parse, urllib.request
+import http.client, json, os, socket, ssl, subprocess, sys, time, urllib.error, urllib.parse, urllib.request
 
 OK, FAILED, UNMEASURED, LEFT_OFFLINE, NOTHING = 0, 1, 2, 3, 4
 
@@ -88,11 +91,14 @@ def credential():
 URL = None
 TOK = None
 CTX = None
+SOCK = None   # path of the Unix socket when CHAMBER_URL is unix:<path>
 q = lambda s: urllib.parse.quote(s, safe="")
 
 
 def call(method, path, body=None, timeout=70):
     """-> (status, json). status 0 means the server could not be reached."""
+    if SOCK is not None:
+        return call_socket(method, path, body, timeout)
     req = urllib.request.Request(URL + path, method=method,
                                  data=None if body is None else json.dumps(body, ensure_ascii=False).encode(),
                                  headers={"Authorization": "Bearer " + TOK, "Content-Type": "application/json",
@@ -108,6 +114,37 @@ def call(method, path, body=None, timeout=70):
             return e.code, {}
     except Exception as e:
         return 0, {"error": type(e).__name__}
+
+
+class UnixConnection(http.client.HTTPConnection):
+    def __init__(self, path, timeout):
+        super().__init__("localhost", timeout=timeout)
+        self.unix_path = path
+
+    def connect(self):
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(self.timeout)
+        s.connect(self.unix_path)
+        self.sock = s
+
+
+def call_socket(method, path, body, timeout):
+    """call() over the Unix socket: same (status, json), and no credential."""
+    conn = UnixConnection(SOCK, timeout)
+    try:
+        conn.request(method, path, body=None if body is None else json.dumps(body, ensure_ascii=False).encode(),
+                     headers={"Content-Type": "application/json", "User-Agent": "chamber-client/1"})
+        x = conn.getresponse()
+        raw = x.read()
+    except Exception as e:
+        return 0, {"error": type(e).__name__}
+    finally:
+        conn.close()
+    try:
+        return x.status, json.loads(raw or b"{}")
+    except Exception:
+        # same split as the https path: an unreadable body is an error only on a 200
+        return (0, {"error": "ValueError"}) if x.status == 200 else (x.status, {})
 
 
 def must(status, data, what):
@@ -185,14 +222,19 @@ def take_flag(args, flag, has_value=False):
 
 
 def main():
-    global URL, TOK, CTX
+    global URL, TOK, CTX, SOCK
     a = sys.argv[1:]
     if not a or a[0] in ("-h", "--help", "help"):
         print(__doc__)
         sys.exit(OK if a else FAILED)
     cmd, a = a[0], a[1:]
     URL = config()
-    TOK = credential()
+    if URL.startswith("unix:"):
+        SOCK = URL[len("unix:"):]
+        if not SOCK:
+            fail("CHAMBER_URL is unix: with no path")
+    else:
+        TOK = credential()
     CTX = ssl.create_default_context(cafile=os.environ.get("CHAMBER_CA")) if URL.startswith("https") else None
 
     if cmd == "whoami":
