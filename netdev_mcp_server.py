@@ -1184,7 +1184,7 @@ class Plan:
     inverse: "dict | None" = None   # command: the revert body; None ⇒ cannot be undone
     class_a: "tuple[str, str] | None" = None
     refuse_ips: tuple = ()     # addresses this write would give away (checked against im's own path)
-    gateway_mac: str = ""      # restart_device: refused when this is the gateway
+    gateway_mac: str = ""      # restart_device, power_cycle_port: refused when this is the gateway
 
 
 def _read_first(reader: str) -> str:
@@ -1263,7 +1263,8 @@ def _plan_device(tool: str, mac: str, port: "int | None") -> "tuple[Plan | None,
     # carries sw_port, but that it names the node's own port on a real
     # console is not read yet (root §6), so the refusal stays whole-switch.
     return Plan(tool, "devices", did, f"devices/{mac}#port{port}", "command", before=device, endpoint="devmgr",
-                command={"cmd": "power-cycle", "mac": mac, "port_idx": port}, class_a=("devices", did)), ""
+                command={"cmd": "power-cycle", "mac": mac, "port_idx": port}, class_a=("devices", did),
+                gateway_mac=mac), ""
 
 
 def _plan_port_forward(name: str, proto: str, wan_port: int, lan_ip: str, lan_port: int) -> "tuple[Plan | None, str]":
@@ -1310,6 +1311,11 @@ def _class_a_refusal(plan: Plan, ctx: dict) -> str:
             # its type counts on its own (ugw/udm/uxg: UniFi's gateway types)
             if mac == plan.gateway_mac and ((d.get("ipAddress") or d.get("ip")) in _gateway_ips(ctx["networks"], ctx["controller_ip"])
                                             or str(d.get("type") or "").lower() in ("ugw", "udm", "uxg")):
+                if plan.tool == "power_cycle_port":
+                    # what hangs off a gateway port is not read (a downstream switch,
+                    # the WAN modem), so every port is refused, like the node's switch
+                    return (f"device {plan.gateway_mac} is the gateway: what its ports power is not read, "
+                            "and one of them may feed the whole LAN or the WAN")
                 return f"device {plan.gateway_mac} is the gateway: restarting it takes the whole LAN down, and there is no tool for that"
     if plan.class_a is None:
         return ""
@@ -1823,7 +1829,7 @@ def restart_device(mac: str, reason: str, confirm: str = "") -> str:
 
 def power_cycle_port(switch_mac: str, port: int, reason: str, confirm: str = "") -> str:
     """對交換器的一個 PoE port 斷電再送電（須先 get_devices 讀過）。本節點接著的那台交換器
-    的任何 port 都拒絕（controller 沒說節點在哪個 port）。無法還原。兩段式。"""
+    的任何 port 都拒絕（controller 沒說節點在哪個 port）；gateway 的任何 port 也拒絕。無法還原。兩段式。"""
     return _write("power_cycle_port", f"devices/{switch_mac}#port{port}", reason, confirm,
                   lambda: _plan_device("power_cycle_port", switch_mac, port))
 
