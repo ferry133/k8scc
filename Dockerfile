@@ -301,6 +301,9 @@ COPY netdev_mcp_server.py /usr/local/bin/netdev_mcp_server.py
 COPY auth0_login.py /usr/local/bin/auth0_login.py
 COPY claude-session /usr/local/bin/claude-session
 COPY inbox-watch /usr/local/bin/inbox-watch
+# The pane gate inbox-watch sources. It must sit next to it: without the file
+# the watcher refuses to start (and says so).
+COPY pane-gate /usr/local/bin/pane-gate
 # The chamber client and the directive verifier (openspec im-chamber-client,
 # k8scc#70). These two files are the originals (ferry133, 2026-11-19); the
 # operator's Mac carries installed copies. Nothing in the image calls them yet.

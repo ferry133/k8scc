@@ -1,0 +1,61 @@
+# pane-gate -- the one reading of "is the Claude Code pane at its idle, empty
+# prompt" (openspec im-chamber-client tasks 5.1). Sourced, not run: by
+# inbox-watch, and by chamber-watch, so that the two cannot disagree about
+# when a line may be typed into the session.
+#
+# This text was moved out of inbox-watch unchanged (k8scc#59, #60); how each
+# pattern was measured is written there and in CLAUDE.md.
+#
+# Before sourcing, the caller may set:
+#   session   the tmux session name (default claude)
+#   tail      how many lines of the pane's tail are read (default 15)
+#
+# pane_idle succeeds only on the idle, empty prompt. Otherwise it prints one
+# reason and returns 1, and the caller types nothing. The reasons are:
+#   capture-pane failed | empty pane | turn running | dialog | history search
+#   | no empty prompt | empty prompt not at the bottom | menu below the prompt
+# `turn running` is the only one that also means "a session that can act".
+
+: "${session:=claude}"
+: "${tail:=15}"
+
+# Alternations, not bracket expressions, so multibyte characters match in any locale.
+# The prompt line is judged on `capture-pane -e` (colours kept), because the
+# idle prompt is not blank: measured on jg-jcc2 (Claude Code 2.1.261,
+# 2026-11-10) it reads `ESC[39m❯<NBSP>ESC[2mTry "fix lint errors"` -- a DIM
+# placeholder -- while one typed character reads `ESC[39m❯<NBSP>x`, not dim.
+# So "empty" = after the prompt character, nothing but colour codes and box
+# edges, OR the very first thing after it is the dim attribute (ESC[2m).
+E=$'\e'
+NBSP=$'\xc2\xa0'   # bytes, not $'\u00a0': the latter depends on the locale bash starts in
+SGR="(${E}\\[[0-9;]*m)*"
+EMPTY_PROMPT_BARE="^${SGR}( |│|┃)*${SGR}(>|❯)${SGR}( |${NBSP}|│|┃|${E}\\[[0-9;]*m)*\$"
+EMPTY_PROMPT_DIM="^${SGR}( |│|┃)*${SGR}(>|❯)( |${NBSP})*${E}\\[2m"
+MENU_OPTION='^( |│|┃)*(❯|>)?( )*[0-9]+\. '
+
+# pane_idle: succeed only when the pane's tail is the idle, empty prompt.
+# On failure prints the reason (no pane text) and returns 1. Fail closed.
+pane_idle() {
+    local raw plain last first tail_lines tail_raw
+    if ! raw=$(tmux capture-pane -p -e -t "=$session:" 2>/dev/null); then
+        echo "capture-pane failed"; return 1
+    fi
+    # one capture, two views with the same line numbers: colours kept (raw)
+    # for the prompt line, stripped (plain) for every text check
+    plain=$(printf '%s\n' "$raw" | sed "s/${E}\\[[0-9;]*[A-Za-z]//g")
+    last=$(printf '%s\n' "$plain" | awk '/[^[:space:]]/{l=NR} END{print l+0}')
+    [ "$last" -gt 0 ] || { echo "empty pane"; return 1; }
+    first=$(( last > tail ? last - tail + 1 : 1 ))
+    tail_lines=$(printf '%s\n' "$plain" | sed -n "${first},${last}p")
+    tail_raw=$(printf '%s\n' "$raw" | sed -n "${first},${last}p")
+    if grep -qiE 'esc to interrupt' <<<"$tail_lines"; then echo "turn running"; return 1; fi
+    if grep -qiE 'Do you want to|Would you like to' <<<"$tail_lines"; then echo "dialog"; return 1; fi
+    if grep -qiE 'reverse-i-search' <<<"$tail_lines"; then echo "history search"; return 1; fi
+    local n
+    n=$(grep -nE "$EMPTY_PROMPT_BARE|$EMPTY_PROMPT_DIM" <<<"$tail_raw" | tail -n1 | cut -d: -f1)
+    [ -n "$n" ] || { echo "no empty prompt"; return 1; }
+    local total; total=$(printf '%s\n' "$tail_lines" | wc -l | tr -d ' ')
+    [ $((total - n)) -lt 6 ] || { echo "empty prompt not at the bottom"; return 1; }
+    if tail -n +"$((n + 1))" <<<"$tail_lines" | grep -qE "$MENU_OPTION"; then echo "menu below the prompt"; return 1; fi
+    return 0
+}

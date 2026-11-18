@@ -294,5 +294,27 @@ touch "$work/notsuffix/home/workspace/inbox/2026-11-12-report-request.md" "$work
 run notsuffix
 check "control: 'report' elsewhere in the name is still an assignment" grep -q '📥 inbox: 2 unread' "$work/notsuffix/fake/tmux.log"
 
+echo "the shared pane gate (im-chamber-client 5.1)"
+check "Dockerfile copies the gate next to inbox-watch" grep -qE '^COPY pane-gate /usr/local/bin/pane-gate$' Dockerfile
+check "inbox-watch carries no pane pattern of its own" [ "$(grep -cE 'EMPTY_PROMPT_BARE=|EMPTY_PROMPT_DIM=|MENU_OPTION=|^pane_idle\(\)' inbox-watch)" = 0 ]
+check "control: the gate file does carry them"       [ "$(grep -cE 'EMPTY_PROMPT_BARE=|EMPTY_PROMPT_DIM=|MENU_OPTION=|^pane_idle\(\)' pane-gate)" = 4 ]
+# a copy of the watcher in a directory that has no gate: it must not start,
+# must say so, and must type nothing -- with a file waiting and an idle pane,
+# i.e. the same input the first case above announces
+setup nogate
+touch "$work/nogate/home/workspace/inbox/a.md"
+mkdir -p "$work/nogate/bin" && cp inbox-watch "$work/nogate/bin/inbox-watch"
+env -i PATH="$work/bin:$PATH" HOME="$work/nogate/home" FAKE_DIR="$work/nogate/fake" \
+    INBOX_WATCH_INTERVAL=1 INBOX_WATCH_SETTLE=30 INBOX_WATCH_TICKS=1 \
+    bash "$work/nogate/bin/inbox-watch" 2>"$work/nogate/stderr"
+check "no gate file: says it did not start"   grep -q 'the pane gate is missing at .*/pane-gate, not started' "$work/nogate/stderr"
+check "no gate file: nothing typed"           [ "$(sends nogate)" = 0 ]
+check "no gate file: tmux was not asked anything" [ ! -s "$work/nogate/fake/tmux.log" ]
+cp pane-gate "$work/nogate/bin/pane-gate"
+env -i PATH="$work/bin:$PATH" HOME="$work/nogate/home" FAKE_DIR="$work/nogate/fake" \
+    INBOX_WATCH_INTERVAL=1 INBOX_WATCH_SETTLE=30 INBOX_WATCH_TICKS=1 \
+    bash "$work/nogate/bin/inbox-watch" 2>"$work/nogate/stderr"
+check "control: the same copy with the gate beside it announces" [ "$(sends nogate)" = 1 ]
+
 echo "inbox-watch controls: passed=$pass failed=$fail"
 [ "$fail" -eq 0 ]

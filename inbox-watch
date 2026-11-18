@@ -72,52 +72,22 @@ fi
 
 tail="${INBOX_WATCH_TAIL:-15}"
 case "$tail" in ''|*[!0-9]*|0) echo "inbox-watch: INBOX_WATCH_TAIL '$tail' is not a positive whole number, not started" >&2; exit 0 ;; esac
-# Alternations, not bracket expressions, so multibyte characters match in any locale.
-# The prompt line is judged on `capture-pane -e` (colours kept), because the
-# idle prompt is not blank: measured on jg-jcc2 (Claude Code 2.1.261,
-# 2026-11-10) it reads `ESC[39m❯<NBSP>ESC[2mTry "fix lint errors"` -- a DIM
-# placeholder -- while one typed character reads `ESC[39m❯<NBSP>x`, not dim.
-# So "empty" = after the prompt character, nothing but colour codes and box
-# edges, OR the very first thing after it is the dim attribute (ESC[2m).
-E=$'\e'
-NBSP=$'\xc2\xa0'   # bytes, not $'\u00a0': the latter depends on the locale bash starts in
-SGR="(${E}\\[[0-9;]*m)*"
-EMPTY_PROMPT_BARE="^${SGR}( |│|┃)*${SGR}(>|❯)${SGR}( |${NBSP}|│|┃|${E}\\[[0-9;]*m)*\$"
-EMPTY_PROMPT_DIM="^${SGR}( |│|┃)*${SGR}(>|❯)( |${NBSP})*${E}\\[2m"
-MENU_OPTION='^( |│|┃)*(❯|>)?( )*[0-9]+\. '
+# The pane gate lives in its own file, shared with chamber-watch (openspec
+# im-chamber-client 5.1). It sits next to this script, in the repo and in the
+# image alike. Without it nothing may be typed, so the watcher does not start.
+gate="$(dirname "${BASH_SOURCE[0]}")/pane-gate"
+if [ ! -r "$gate" ]; then
+    echo "inbox-watch: the pane gate is missing at $gate, not started" >&2
+    exit 0
+fi
+# shellcheck source=pane-gate
+. "$gate"
 
 declare -A told=()
 
 # A file name made printable for one line of typed input: control characters
 # (a newline would press Enter mid-line) become '?', and it is cut at 120.
 printable() { printf '%s' "${1:0:120}" | LC_ALL=C tr -c '[:print:]\200-\377' '?'; }
-
-# pane_idle: succeed only when the pane's tail is the idle, empty prompt.
-# On failure prints the reason (no pane text) and returns 1. Fail closed.
-pane_idle() {
-    local raw plain last first tail_lines tail_raw
-    if ! raw=$(tmux capture-pane -p -e -t "=$session:" 2>/dev/null); then
-        echo "capture-pane failed"; return 1
-    fi
-    # one capture, two views with the same line numbers: colours kept (raw)
-    # for the prompt line, stripped (plain) for every text check
-    plain=$(printf '%s\n' "$raw" | sed "s/${E}\\[[0-9;]*[A-Za-z]//g")
-    last=$(printf '%s\n' "$plain" | awk '/[^[:space:]]/{l=NR} END{print l+0}')
-    [ "$last" -gt 0 ] || { echo "empty pane"; return 1; }
-    first=$(( last > tail ? last - tail + 1 : 1 ))
-    tail_lines=$(printf '%s\n' "$plain" | sed -n "${first},${last}p")
-    tail_raw=$(printf '%s\n' "$raw" | sed -n "${first},${last}p")
-    if grep -qiE 'esc to interrupt' <<<"$tail_lines"; then echo "turn running"; return 1; fi
-    if grep -qiE 'Do you want to|Would you like to' <<<"$tail_lines"; then echo "dialog"; return 1; fi
-    if grep -qiE 'reverse-i-search' <<<"$tail_lines"; then echo "history search"; return 1; fi
-    local n
-    n=$(grep -nE "$EMPTY_PROMPT_BARE|$EMPTY_PROMPT_DIM" <<<"$tail_raw" | tail -n1 | cut -d: -f1)
-    [ -n "$n" ] || { echo "no empty prompt"; return 1; }
-    local total; total=$(printf '%s\n' "$tail_lines" | wc -l | tr -d ' ')
-    [ $((total - n)) -lt 6 ] || { echo "empty prompt not at the bottom"; return 1; }
-    if tail -n +"$((n + 1))" <<<"$tail_lines" | grep -qE "$MENU_OPTION"; then echo "menu below the prompt"; return 1; fi
-    return 0
-}
 
 tick() {
     [ -d "$dir" ] || return 0
