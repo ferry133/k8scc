@@ -14,7 +14,7 @@ What it stops is the credential being carried away. It does not stop a process
 in `app` from speaking as the im: whoever can open the socket can.
 
 Three start states, each one line in the pod log:
-  not configured     CHAMBER_URL is empty. Nothing is opened.
+  not configured     no server address, in CHAMBER_URL or in the file. Nothing is opened.
   incomplete         CHAMBER_URL is set and something else is missing; the
                      line names it. Nothing is opened.
   started            the line gives the mode, the account, the socket, and
@@ -37,7 +37,10 @@ Pod log
 No line carries the credential, a message's text or a sender.
 
 Configuration (environment)
-  CHAMBER_URL          https://… of the server. Empty = not configured.
+  CHAMBER_URL          https://… of the server.
+  CHAMBER_URL_FILE     read when CHAMBER_URL is empty: a file holding that address
+                       (default /etc/chamber/url; trailing whitespace is dropped).
+                       Both empty, or the file absent or empty = not configured.
   CHAMBER_ACCOUNT      the im's account name (the localpart). Required.
   CHAMBER_TOKEN_FILE   file holding the login credential (default /etc/chamber/token)
   CHAMBER_MODE         observe | deliver (default observe)
@@ -318,9 +321,19 @@ def main():
             raise ValueError
     except ValueError:
         beat = 20.0
-    url = (env("CHAMBER_URL") or "").strip().rstrip("/")
+    url = (env("CHAMBER_URL") or "").strip()
+    url_file = env("CHAMBER_URL_FILE") or "/etc/chamber/url"
     if not url:
-        idle(beat, "chamber-bridge: not configured (CHAMBER_URL is empty) — nothing is opened")
+        # The address may be something a public repo cannot carry, so it can
+        # arrive in the same optional Secret volume as the credential. An absent
+        # or empty file is "not configured", the same as an empty variable.
+        try:
+            url = open(url_file).read().strip()
+        except OSError:
+            url = ""
+    url = url.rstrip("/")
+    if not url:
+        idle(beat, "chamber-bridge: not configured (CHAMBER_URL is empty and %s is absent or empty) — nothing is opened" % url_file)
     missing = []
     insecure = url.startswith("http://") and env("CHAMBER_ALLOW_INSECURE_HTTP") == "1"
     if not (url.startswith("https://") or insecure):

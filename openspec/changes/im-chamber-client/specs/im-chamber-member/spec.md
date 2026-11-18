@@ -2,7 +2,7 @@
 
 ### Requirement: Nothing starts unless the chamber is configured
 
-The image SHALL start no chamber component when `CHAMBER_URL` is empty or unset, and SHALL say so in one pod-log line. When `CHAMBER_URL` is set and any other required input is missing (`CHAMBER_ACCOUNT`, the login credential in the bridge, the signer list in `app`), the component that lacks it SHALL open nothing, SHALL contact no server and SHALL name what is missing. The bridge SHALL stay alive and idle in both cases rather than exit: as a sidecar its exit would make the pod not ready and take the terminal's route down with it. No log line SHALL contain the credential or any message text.
+The image SHALL start no chamber component when `CHAMBER_URL` is empty or unset, and SHALL say so in one pod-log line. The bridge SHALL also accept the server address from a file (`CHAMBER_URL_FILE`, default `/etc/chamber/url`) when the variable is empty; an absent or empty file is the same as not configured. The address cannot be written into a public repo and has to arrive in the same optional Secret volume as the credential. When `CHAMBER_URL` is set and any other required input is missing (`CHAMBER_ACCOUNT`, the login credential in the bridge, the signer list in `app`), the component that lacks it SHALL open nothing, SHALL contact no server and SHALL name what is missing. The bridge SHALL stay alive and idle in both cases rather than exit: as a sidecar its exit would make the pod not ready and take the terminal's route down with it. No log line SHALL contain the credential or any message text.
 
 #### Scenario: Unconfigured pod
 - **WHEN** a pod starts with `CHAMBER_URL` empty

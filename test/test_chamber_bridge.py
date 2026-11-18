@@ -123,7 +123,8 @@ def start(name, **over):
     os.makedirs(d, exist_ok=True)
     env = {"PATH": os.environ["PATH"], "HOME": T, "CHAMBER_URL": FAKE_URL, "CHAMBER_ACCOUNT": "im-test",
            "CHAMBER_TOKEN_FILE": os.path.join(T, "tok"), "CHAMBER_SOCKET": os.path.join(d, "b.sock"),
-           "CHAMBER_BEAT": "0.3", "CHAMBER_ALLOW_INSECURE_HTTP": "1"}
+           "CHAMBER_BEAT": "0.3", "CHAMBER_ALLOW_INSECURE_HTTP": "1",
+           "CHAMBER_URL_FILE": os.path.join(T, "no-url-file")}
     env.update(over)
     env = {k: v for k, v in env.items() if v is not None}
     logp = os.path.join(d, "log")
@@ -186,6 +187,8 @@ print("start states (nothing is opened unless everything is there)")
 for name, over, word in (
         ("s-unset", {"CHAMBER_URL": None}, "not configured"),
         ("s-empty", {"CHAMBER_URL": ""}, "not configured"),
+        ("s-nofile", {"CHAMBER_URL": "", "CHAMBER_URL_FILE": os.path.join(T, "absent-url")}, "not configured"),
+        ("s-0file", {"CHAMBER_URL": "", "CHAMBER_URL_FILE": os.devnull}, "not configured"),
         ("s-notok", {"CHAMBER_TOKEN_FILE": os.path.join(T, "absent-token")}, "absent-token is absent or unreadable"),
         ("s-emptytok", {"CHAMBER_TOKEN_FILE": os.devnull}, "is empty"),
         ("s-noacct", {"CHAMBER_ACCOUNT": None}, "CHAMBER_ACCOUNT is not set"),
@@ -335,6 +338,22 @@ with fake.lock:
     first = [pth for m, pth, a in fake.seen[mark:] if pth.startswith(P + "/sync")][0]
 check("N4 control: with no saved position the first sync has no since", (False, True), ("since=" in first, until(lambda: "receiving from now" in logged(log2))))
 stop(p2)
+
+print("the server address from a file")
+open(os.path.join(T, "url"), "w").write(FAKE_URL + "/\n\n")
+p, SOCK, LOG = start("urlfile", CHAMBER_URL=None, CHAMBER_URL_FILE=os.path.join(T, "url"))
+check("F1 no variable, the file has the address (with a trailing slash and newlines): started and confirmed", True,
+      until(lambda: os.path.exists(SOCK) and "the server confirms the account" in logged(LOG)))
+check("F2 the client through it", (0, "@im-test:fake"), client(SOCK, "whoami")[:2])
+stop(p)
+open(os.path.join(T, "url-dead"), "w").write("http://127.0.0.1:1\n")
+p, SOCK, LOG = start("urlwins", CHAMBER_URL_FILE=os.path.join(T, "url-dead"))
+check("F3 the variable wins over the file (the file names a dead address)", True,
+      until(lambda: os.path.exists(SOCK) and "the server confirms the account" in logged(LOG)))
+stop(p)
+p, SOCK, LOG = start("urldead", CHAMBER_URL=None, CHAMBER_URL_FILE=os.path.join(T, "url-dead"))
+check("F4 control: that file alone is read — the same address is then unreachable", True, until(lambda: "server=unreachable" in logged(LOG)))
+stop(p)
 
 # ---------------------------------------------------------------- deliver mode
 print("deliver mode")
