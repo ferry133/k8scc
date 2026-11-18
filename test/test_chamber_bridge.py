@@ -355,6 +355,47 @@ p, SOCK, LOG = start("urldead", CHAMBER_URL=None, CHAMBER_URL_FILE=os.path.join(
 check("F4 control: that file alone is read — the same address is then unreachable", True, until(lambda: "server=unreachable" in logged(LOG)))
 stop(p)
 
+print("inputs that arrive after the start (an optional Secret mounted late)")
+late = os.path.join(T, "late-url")
+open(late, "w").close()
+p, SOCK, LOG = start("late", CHAMBER_URL=None, CHAMBER_URL_FILE=late)
+until(lambda: logged(LOG).count("chamber-status ") >= 4)
+check("A1 an empty address file: idle, no socket, and the reason is printed once over several beats", (False, 1, None),
+      (os.path.exists(SOCK), logged(LOG).count("not configured"), p.poll()))
+open(late, "w").write(FAKE_URL + "\n")
+check("A2 the address appears in the file: the bridge starts by itself", True,
+      until(lambda: os.path.exists(SOCK) and "the server confirms the account" in logged(LOG)))
+check("A3 and the client goes through", (0, "@im-test:fake"), client(SOCK, "whoami")[:2])
+stop(p)
+latetok = os.path.join(T, "late-tok")
+p, SOCK, LOG = start("latetok", CHAMBER_TOKEN_FILE=latetok)
+until(lambda: "is absent or unreadable" in logged(LOG))
+before = count()
+time.sleep(0.7)
+check("A4 no credential file: idle, the server asked nothing", (False, 0), (os.path.exists(SOCK), count() - before))
+open(latetok, "w").write(CRED + "\n")
+check("A5 the credential file appears: the bridge starts by itself", True,
+      until(lambda: os.path.exists(SOCK) and "the server confirms the account" in logged(LOG)))
+stop(p)
+
+print("a socket path the system will not take")
+longdir = os.path.join(T, "d" * 120)
+os.mkdir(longdir)
+p, SOCK, LOG = start("toolong", CHAMBER_SOCKET=os.path.join(longdir, "b.sock"))
+said = until(lambda: "cannot listen on" in logged(LOG) and "mode=unconfigured" in logged(LOG))
+time.sleep(0.4)
+check("X1 too long for a Unix socket: one line, stays alive, no traceback", (True, None, False), (said, p.poll(), "Traceback" in logged(LOG)))
+check("X2 ends on SIGTERM", 0, stop(p))
+bare = os.path.join(T, "bare")
+os.makedirs(bare, exist_ok=True)
+env = {"PATH": os.environ["PATH"], "HOME": T, "CHAMBER_URL": FAKE_URL, "CHAMBER_ACCOUNT": "im-test", "CHAMBER_TOKEN_FILE": os.path.join(T, "tok"),
+       "CHAMBER_SOCKET": "b.sock", "CHAMBER_BEAT": "0.3", "CHAMBER_ALLOW_INSECURE_HTTP": "1", "CHAMBER_URL_FILE": os.path.join(T, "no-url-file")}
+p = subprocess.Popen([sys.executable, "-I", BRIDGE], env=env, stdout=open(os.path.join(bare, "log"), "a"), stderr=subprocess.STDOUT, cwd=bare)
+procs.append(p)
+check("X3 a socket name with no directory is taken in the working directory", True,
+      until(lambda: os.path.exists(os.path.join(bare, "b.sock")) and "started" in logged(os.path.join(bare, "log"))))
+stop(p)
+
 # ---------------------------------------------------------------- deliver mode
 print("deliver mode")
 p, SOCK, LOG = start("deliver", CHAMBER_MODE="deliver", CHAMBER_BRIDGE_IN_APP="1")

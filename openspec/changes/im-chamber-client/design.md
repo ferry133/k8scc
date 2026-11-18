@@ -34,7 +34,9 @@ ferry133 偏好 sidecar（2026-11-15）；sidecar 的實質好處是登入憑證
 
 **2026-11-19 更正（`k8scc-0f [7c5b85]` 驗收時；讀數＋提案）**：初稿寫 loopback。im 的 pod 是 `hostNetwork: true`（拋棄式叢集的 im pod 上讀 `.spec.hostNetwork` → `true`；`CLAUDE.md` 也這樣寫），所以 `127.0.0.1` 是**節點的** loopback：節點網路命名空間裡的每個行程、同一節點上每個 host-network 的 pod 都連得到，不只「pod 裡的行程」。改成 **Unix socket，放在只有 `app` 與 bridge 兩個 container 掛的 `emptyDir` 裡**（jg-base 的 sidecar 要多這一個 volume）；bridge 不開任何 TCP。代價：`chamber` 用戶端要認得 socket 形式的位址（`unix:<path>`）——那是共用檔的修改，要 Mac 側一起收（tasks 2.5）。既有的 `talos-mcp`（8765）與 `netdev-mcp`（8766）有同一個暴露面；那是它們的事，這裡只記一筆，不在本 change 處理。
 
-後果，明寫：能打開那個 socket 的行程（`app` 裡的任何行程）都能以 im 的名義收發——擋的是**憑證被帶走**，不是 `app` 內的冒用。驗章仍在 `app` 做，不經橋接程式：保留類不信伺服器，也不信橋接程式。
+後果，明寫：能打開那個 socket 的行程（`app` 裡的任何行程）都能以 im 的名義收發——擋的不是 `app` 內的冒用。
+
+**2026-11-19 更正（`jg-base-56 [c30591]` 驗收 jg-base#250 時指出，`fleet-ops-98 [047e9c]` 轉來）**：初稿寫「擋的是憑證被帶走」。在 jg-base 的 im pod 上這句不成立：im 的 ServiceAccount 綁 `cluster-admin`，`app` 不必掛載，問 API server 就讀得到那個 Secret。sidecar 實際換到的是**憑證不躺在 `app` 的檔案與環境變數裡**（防的是不小心帶出去，不是有心去拿）——與 `CLAUDE.md` 對 HA token 的說法是同一個等級。這一點在 jg-base 那側已列成給 ferry133 的未決項。驗章仍在 `app` 做，不經橋接程式：保留類不信伺服器，也不信橋接程式。
 
 沒有 sidecar 的 pod（jg-base 還沒改）：`chamber-bridge` 可以在 `app` 裡由 `entrypoint.sh` 起，憑證就在 `app` 裡——**只給拋棄式叢集的第一次走通用**，啟動行印出「憑證在 app 內」。
 

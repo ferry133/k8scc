@@ -10,8 +10,11 @@ else is answered 404 here and never reaches the server.
 It listens on the Unix socket and on nothing else. An im pod runs with
 hostNetwork, so a loopback port would be the node's loopback.
 
-What it stops is the credential being carried away. It does not stop a process
-in `app` from speaking as the im: whoever can open the socket can.
+What the split buys is that the credential is not in `app`'s files or
+environment. It is not a wall. A process in `app` can speak as the im through
+the socket, and where `app`'s ServiceAccount can read Secrets (on jg-base's
+im pod it is cluster-admin) it can ask the API server for the credential
+itself.
 
 Three start states, each one line in the pod log:
   not configured     no server address, in CHAMBER_URL or in the file. Nothing is opened.
@@ -20,7 +23,10 @@ Three start states, each one line in the pod log:
   started            the line gives the mode, the account, the socket, and
                      which container holds the credential.
 In the first two the process stays alive and idle: as a sidecar, exiting would
-make the pod NotReady and take the terminal's route down with it.
+make the pod NotReady and take the terminal's route down with it. While idle
+it reads its inputs again every CHAMBER_BEAT seconds and starts once they are
+all there. After it has started, a changed credential or address needs a
+restart.
 
 Modes (CHAMBER_MODE)
   observe (default)  receives and counts; refuses to send; never shows online
@@ -34,6 +40,11 @@ Pod log
                                     one line every CHAMBER_BEAT seconds. Every
                                     field is always present; a reading that
                                     could not be taken is `unmeasured`.
+                                    `online` is what the server answers when
+                                    this account asks for its own presence.
+                                    It is not this program's opinion, and it
+                                    was read to differ from what another
+                                    member saw for up to 90 s (bench, #76).
 No line carries the credential, a message's text or a sender.
 
 Configuration (environment)
@@ -299,11 +310,72 @@ def receive_loop(state_dir, beat):
             log("chamber-bridge: cannot save the sync position (%s)" % type(e).__name__)
 
 
-def idle(beat, line):
-    log(line)
-    while True:
-        log("chamber-status ts=%d interval=%g mode=unconfigured server=unmeasured rooms=unmeasured online=unmeasured" % (time.time(), beat))
-        time.sleep(beat)
+def settings():
+    """Read every input once. -> (None, why) while something is missing, where
+    why is the one line to print; or (dict, None)."""
+    env = os.environ.get
+    url = (env("CHAMBER_URL") or "").strip()
+    url_file = env("CHAMBER_URL_FILE") or "/etc/chamber/url"
+    if not url:
+        # The address may be something a public repo cannot carry, so it can
+        # arrive in the same optional Secret volume as the credential. An absent
+        # or empty file is "not configured", the same as an empty variable.
+        try:
+            url = open(url_file).read().strip()
+        except OSError:
+            url = ""
+    url = url.rstrip("/")
+    if not url:
+        return None, "chamber-bridge: not configured (CHAMBER_URL is empty and %s is absent or empty) — nothing is opened" % url_file
+    missing = []
+    insecure = url.startswith("http://") and env("CHAMBER_ALLOW_INSECURE_HTTP") == "1"
+    if not (url.startswith("https://") or insecure):
+        missing.append("CHAMBER_URL must be https://")
+    account = (env("CHAMBER_ACCOUNT") or "").strip()
+    if not account:
+        missing.append("CHAMBER_ACCOUNT is not set")
+    mode = (env("CHAMBER_MODE") or "observe").strip()
+    if mode not in ("observe", "deliver"):
+        missing.append("CHAMBER_MODE must be observe or deliver")
+    tok_file = env("CHAMBER_TOKEN_FILE") or "/etc/chamber/token"
+    try:
+        tok = open(tok_file).read().strip()
+    except OSError:
+        tok = None
+    if tok is None:
+        missing.append("the credential file %s is absent or unreadable" % tok_file)
+    elif not tok:
+        missing.append("the credential file %s is empty" % tok_file)
+    sock = env("CHAMBER_SOCKET") or "/run/chamber/bridge.sock"
+    sock_dir = os.path.dirname(sock) or "."
+    state_dir = env("CHAMBER_STATE_DIR") or sock_dir
+    for d in sorted({sock_dir, state_dir}):
+        if not (os.path.isdir(d) and os.access(d, os.W_OK)):
+            missing.append("the directory %s is absent or not writable" % d)
+    if os.path.lexists(sock) and not stat.S_ISSOCK(os.lstat(sock).st_mode):
+        missing.append("%s exists and is not a socket" % sock)
+    ca = env("CHAMBER_CA")
+    if ca and not os.path.isfile(ca):
+        missing.append("the CA file %s is absent" % ca)
+    if missing:
+        return None, "chamber-bridge: incomplete — " + "; ".join(missing) + " — nothing is opened"
+    return {"url": url, "tok": tok, "account": account, "mode": mode, "sock": sock, "state_dir": state_dir,
+            "ca": ca, "insecure": insecure}, None
+
+
+def listen(sock):
+    """-> (server, None) or (None, why). A path the system will not bind (too
+    long for a Unix socket, for one) is one more way of being incomplete."""
+    try:
+        if os.path.lexists(sock):
+            os.unlink(sock)                   # a socket left by the previous run
+        old = os.umask(0o177)                 # the socket is 0600: its owner only
+        try:
+            return Server(sock, Handler), None
+        finally:
+            os.umask(old)
+    except OSError as e:
+        return None, "chamber-bridge: incomplete — cannot listen on %s (%s: %s) — nothing is opened" % (sock, type(e).__name__, e.strerror or "the path is not usable")
 
 
 def main():
@@ -321,63 +393,32 @@ def main():
             raise ValueError
     except ValueError:
         beat = 20.0
-    url = (env("CHAMBER_URL") or "").strip()
-    url_file = env("CHAMBER_URL_FILE") or "/etc/chamber/url"
-    if not url:
-        # The address may be something a public repo cannot carry, so it can
-        # arrive in the same optional Secret volume as the credential. An absent
-        # or empty file is "not configured", the same as an empty variable.
-        try:
-            url = open(url_file).read().strip()
-        except OSError:
-            url = ""
-    url = url.rstrip("/")
-    if not url:
-        idle(beat, "chamber-bridge: not configured (CHAMBER_URL is empty and %s is absent or empty) — nothing is opened" % url_file)
-    missing = []
-    insecure = url.startswith("http://") and env("CHAMBER_ALLOW_INSECURE_HTTP") == "1"
-    if not (url.startswith("https://") or insecure):
-        missing.append("CHAMBER_URL must be https://")
-    ACCOUNT = (env("CHAMBER_ACCOUNT") or "").strip()
-    if not ACCOUNT:
-        missing.append("CHAMBER_ACCOUNT is not set")
-    MODE = (env("CHAMBER_MODE") or "observe").strip()
-    if MODE not in ("observe", "deliver"):
-        missing.append("CHAMBER_MODE must be observe or deliver")
-    tok_file = env("CHAMBER_TOKEN_FILE") or "/etc/chamber/token"
-    try:
-        tok = open(tok_file).read().strip()
-    except OSError:
-        tok = None
-    if tok is None:
-        missing.append("the credential file %s is absent or unreadable" % tok_file)
-    elif not tok:
-        missing.append("the credential file %s is empty" % tok_file)
-    sock = env("CHAMBER_SOCKET") or "/run/chamber/bridge.sock"
-    state_dir = env("CHAMBER_STATE_DIR") or os.path.dirname(sock)
-    for d in {os.path.dirname(sock), state_dir}:
-        if not (os.path.isdir(d) and os.access(d, os.W_OK)):
-            missing.append("the directory %s is absent or not writable" % d)
-    if os.path.lexists(sock) and not stat.S_ISSOCK(os.lstat(sock).st_mode):
-        missing.append("%s exists and is not a socket" % sock)
-    ca = env("CHAMBER_CA")
-    if ca and not os.path.isfile(ca):
-        missing.append("the CA file %s is absent" % ca)
-    if missing:
-        idle(beat, "chamber-bridge: incomplete — " + "; ".join(missing) + " — nothing is opened")
 
-    URL, TOK = url, tok
-    CTX = ssl.create_default_context(cafile=ca) if url.startswith("https://") else None
+    # Idle until everything is there, and look again every beat: the Secret
+    # that carries the address and the credential is optional and may be
+    # mounted after this container started, and nothing else would restart it
+    # (fleet-ops-98's reading on #76: an address written 16 s later was never
+    # noticed). The reason is printed when it changes, not every beat.
+    said = None
+    while True:
+        cfg, why = settings()
+        srv = None
+        if cfg:
+            srv, why = listen(cfg["sock"])
+        if srv:
+            break
+        if why != said:
+            log(why)
+            said = why
+        log("chamber-status ts=%d interval=%g mode=unconfigured server=unmeasured rooms=unmeasured online=unmeasured" % (time.time(), beat))
+        time.sleep(beat)
+
+    URL, TOK, ACCOUNT, MODE = cfg["url"], cfg["tok"], cfg["account"], cfg["mode"]
+    sock, state_dir, insecure = cfg["sock"], cfg["state_dir"], cfg["insecure"]
+    CTX = ssl.create_default_context(cafile=cfg["ca"]) if URL.startswith("https://") else None
     handlers = [NoRedirect()] + ([urllib.request.HTTPSHandler(context=CTX)] if CTX else [])
     OPENER = urllib.request.build_opener(*handlers)
 
-    if os.path.lexists(sock):
-        os.unlink(sock)                       # a socket left by the previous run
-    old = os.umask(0o177)                     # the socket is 0600: its owner only
-    try:
-        srv = Server(sock, Handler)
-    finally:
-        os.umask(old)
     log("chamber-bridge: started — mode=%s account=%s socket=%s — %s%s" % (
         MODE, ACCOUNT, sock,
         "the credential is inside app (no sidecar)" if env("CHAMBER_BRIDGE_IN_APP") == "1" else "the credential is in this container only",
