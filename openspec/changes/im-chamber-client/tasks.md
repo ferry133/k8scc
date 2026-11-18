@@ -53,7 +53,10 @@
 
 ## 5. 宣告與回程（root 6.3、6.5）
 
-- [ ] 5.1 pane 閘門抽成 `inbox-watch` 與 `chamber-watch` 共用的一個檔；`test/inbox-watch-controls.sh` 原有的格全數照過
+- [x] 5.1 pane 閘門抽成 `inbox-watch` 與 `chamber-watch` 共用的一個檔；`test/inbox-watch-controls.sh` 原有的格全數照過
+  - **做了（2026-11-19 07:27，`k8scc-0f [7c5b85]`）**：`pane-gate`（被 source 的 shell 檔），樣式與 `pane_idle` 原封搬過去，`inbox-watch` 從自己旁邊讀它；映像 COPY 到 `/usr/local/bin/pane-gate`。**閘門檔不在 ⇒ `inbox-watch` 不啟動、說出來、什麼都不打**（不是「沒有閘門照打」）。原有 57 格照過，新增 7 格（共 64）。五個變異各自轉紅：閘門永遠回閒置（14 紅）、看不到跑中的回合（2）、忽略下方選單（1）、拿掉 dim 規則（1）、容忍閘門檔不在（2）
+  - **順手補的一個洞**：`test/inbox-watch-controls.sh` 原本只在 `build.yaml`（推到 main 之後）跑，不在 PR 的 `controls.yaml`——動到 `inbox-watch` 的 PR，它的對照是合併之後才第一次在 Linux 上跑。已加進 `controls.yaml`
+  - **沒量**：新映像裡 `inbox-watch` 真的找得到 `/usr/local/bin/pane-gate`（讀的：`BASH_SOURCE` 在經 PATH 執行時是完整路徑）。**這是生產 im 現在就在跑的元件**，所以 bump 到含這一顆的映像之後，要在拋棄式叢集的 pod log 確認啟動行是 `watching …` 而不是 `the pane gate is missing`
 - [ ] 5.2 `chamber-watch` 的宣告（design D-e）與 controls（閒置時宣告一次、permission prompt 時不打字、點名別人的不宣告、送失敗不標記）
 - [ ] 5.3 回程（design D-f）：四個詞、`--reply-to`、並存期間「從哪裡來回哪裡」；`observe` 下不送
 
