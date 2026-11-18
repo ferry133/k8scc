@@ -14,7 +14,7 @@ The image SHALL start no chamber component when `CHAMBER_URL` is empty or unset,
 
 ### Requirement: The login credential lives only in the bridge
 
-`chamber-bridge` SHALL be the only process that reads the login credential. It SHALL listen on loopback only and forward only the listed Matrix client paths the `chamber` client uses, adding the credential itself; any other path SHALL be refused. The `chamber` client in `app` SHALL reach the server only through the bridge. When the bridge runs inside `app` (no sidecar), its start line SHALL say that the credential is inside `app`.
+`chamber-bridge` SHALL be the only process that reads the login credential. It SHALL listen only on a Unix socket in a directory shared by `app` and the bridge and by nothing else, and SHALL open no TCP listener: an im pod runs with `hostNetwork: true`, so a loopback port is the node's loopback, reachable by every process in the node's network namespace and by every other host-network pod on that node (read on a throwaway cluster's im pod, 2026-11-19). It SHALL forward only the listed Matrix client paths the `chamber` client uses, adding the credential itself; any other path SHALL be refused. The `chamber` client in `app` SHALL reach the server only through the bridge. When the bridge runs inside `app` (no sidecar), its start line SHALL say that the credential is inside `app`.
 
 #### Scenario: The agent looks for the credential
 - **WHEN** the bridge runs as a sidecar and a process in `app` lists its environment and mounted files
@@ -25,8 +25,8 @@ The image SHALL start no chamber component when `CHAMBER_URL` is empty or unset,
 - **THEN** the bridge refuses and forwards nothing
 
 #### Scenario: From outside the pod
-- **WHEN** another pod connects to the bridge's port on the pod IP
-- **THEN** the connection is refused
+- **WHEN** the bridge is running and the node's listening TCP sockets are listed
+- **THEN** none belongs to the bridge, on loopback or on any other address (positive control: the same listing shows ttyd's port)
 
 ### Requirement: Observe mode receives and stays silent
 
@@ -38,7 +38,7 @@ With `CHAMBER_MODE=observe` (the default) the bridge SHALL connect and count wha
 
 ### Requirement: Online means a session that can act
 
-In `deliver` mode the im SHALL show as online only while `chamber-watch` reports that the tmux session `claude` exists, its foreground process is `claude`, and its pane is not a login or trust dialog. When that report stops for three beat intervals, or cannot be made, the bridge SHALL show the im as not online. A running container, bridge or watcher SHALL NOT by itself count as online.
+In `deliver` mode the im SHALL show as online only while `chamber-watch` reports that the tmux session `claude` exists, its foreground process is `claude`, and its pane reads as one of exactly two things: the idle, empty prompt (the shared pane gate), or a turn in progress (`esc to interrupt`). Every other pane — a login screen, a trust dialog, a one-time feature dialog, a permission prompt nobody answers, a capture that fails — SHALL NOT count: a detached `claude` was read stopped at a one-time dialog with its process alive (2026-11-19, tasks 1.2). When that report stops for three beat intervals, or cannot be made, the bridge SHALL show the im as not online. A running container, bridge or watcher SHALL NOT by itself count as online.
 
 #### Scenario: The session ends
 - **WHEN** the `claude` process exits while the pod keeps running
@@ -48,9 +48,9 @@ In `deliver` mode the im SHALL show as online only while `chamber-watch` reports
 - **WHEN** a session exists again and reaches its prompt
 - **THEN** the im shows as online (positive control for the scenario above)
 
-#### Scenario: Stuck at a login screen
-- **WHEN** `claude` is running but the pane shows the login or trust dialog
-- **THEN** the im shows as not online
+#### Scenario: Stuck at a dialog
+- **WHEN** `claude` is running but the pane shows a login screen, a trust dialog or a one-time feature dialog
+- **THEN** the im shows as not online, and the pod log names the reason the pane gate gave
 
 ### Requirement: The im's session is kept running, and no message ever starts one
 
@@ -82,7 +82,7 @@ In `deliver` mode, when messages naming the im or `all` have arrived that the se
 
 ### Requirement: The directive verifier works inside the image
 
-The image SHALL carry `directive-verify` and an OpenSSH that verifies every signature type the signer list contains. `directive-verify` in the image SHALL read the signer list and the revoked list from the mounted directory, SHALL return "cannot measure" when either the list or `ssh-keygen` is missing, and SHALL treat a `transcript:` pointer as "cannot measure". The image SHALL carry the same controls as the reference implementation and they SHALL pass in the built image.
+The image SHALL carry `directive-verify` and an OpenSSH that verifies every signature type the signer list contains. `directive-verify` in the image SHALL read the signer list and the revoked list from the mounted directory, SHALL return "cannot measure" when either the list or `ssh-keygen` is missing, and SHALL treat a `transcript:` pointer as "cannot measure". The record of used directives SHALL live on the pod's persistent volume, so that a directive used before a pod restart still fails after it. The image SHALL carry the same controls as the reference implementation and they SHALL pass in the built image.
 
 #### Scenario: A directive relayed into the im's room
 - **WHEN** a directive signed by a listed person is relayed into the room and read with `chamber get`
@@ -91,6 +91,10 @@ The image SHALL carry `directive-verify` and an OpenSSH that verifies every sign
 #### Scenario: A transcript pointer reaches an im
 - **WHEN** a message carries `transcript:<session>/<record>` instead of a signature
 - **THEN** `directive-verify` exits 2 and the im treats the item as having no directive
+
+#### Scenario: A used directive after a pod restart
+- **WHEN** a directive was verified with `--use`, the pod restarts, and the same directive is verified again
+- **THEN** `directive-verify` exits 1 (positive control: a directive not yet used exits 0 in the same pod)
 
 #### Scenario: The signer list is not mounted
 - **WHEN** the signer directory is empty

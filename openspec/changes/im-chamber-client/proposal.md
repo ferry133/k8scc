@@ -21,7 +21,7 @@ ferry133 對 im 這一側裁定了三件會改變現有行為的事（原話在 
 ## What Changes
 
 - **新增：`chamber` 與 `directive-verify`**（COPY 進映像）。與 Mac 側是**同一份檔**（只用標準函式庫＋`ssh-keygen`），不是第二份實作；本 repo 帶著同一份對照測試當測試向量。行為由 root 的 spec 定義：點名過濾（過濾不是隔離）、送出的四種結果、驗章的三種結果、指令只用一次。
-- **新增：`chamber-bridge`**（給 sidecar container 跑；同一個映像、`command` 覆寫，與 talos-mcp／netdev-mcp 同形）。它握有登入憑證，對 `app` 只開 loopback：`app` 裡的用戶端經它收發，**登入憑證不進 `app`**。它只在收到 `app` 送來的「session 活著」訊號期間把 im 顯示為在線；訊號停了就顯示不在線（量不到當成不在線）。
+- **新增：`chamber-bridge`**（給 sidecar container 跑；同一個映像、`command` 覆寫，與 talos-mcp／netdev-mcp 同形）。它握有登入憑證，對 `app` 只開一個 Unix socket（不是 loopback：pod 是 hostNetwork，loopback 是節點的；design D-b）：`app` 裡的用戶端經它收發，**登入憑證不進 `app`**。它只在收到 `app` 送來的「session 活著」訊號期間把 im 顯示為在線；訊號停了就顯示不在線（量不到當成不在線）。
 - **新增：`chamber-watch`**（在 `app`，由 `entrypoint.sh` 起，與 `inbox-watch` 並列並共用它的 pane 閘門）：(a) `claude` 行程活著時向橋接程式送活著訊號；(b) 有點名 im 的新訊息、且 pane 閒置時，在 session 裡打一行宣告（只說哪一間有幾則，不含內文）。
 - **新增：session 常駐**。pod 啟動時起 tmux session `claude`，掉了重起；ttyd 連進來是接上既有的 session，不是另起一個。起不來（未登入、卡在對話框）時 pod log 與在線讀數都看得見。**這不是喚起**：它不由任何訊息觸發。
 - **兩種模式**，環境變數 `CHAMBER_MODE`，預設 `observe`：
@@ -47,6 +47,6 @@ ferry133 對 im 這一側裁定了三件會改變現有行為的事（原話在 
 ## Impact
 
 - **映像**：多三支程式與兩份 COPY；不加套件（`openssh-client`、`python3` 已在）。
-- **每座 im**：新映像 bump 後，`CHAMBER_URL` 未設的 pod 行為不變**除了一件**——session 常駐會在 pod 啟動時起 `claude`（今天是有人開 ttyd 才起）。這一件單獨有開關（`SESSION_KEEP`，預設關），**打開它會改變生產叢集上 im 的行為，要 ferry133 點頭**。
-- **jg-base**：sidecar container、Secret 只掛進 sidecar、ConfigMap（伺服器位址、公鑰清單兩個檔）、`CHAMBER_MODE`／`SESSION_KEEP` 的值。
+- **每座 im**：新映像 bump 後，`CHAMBER_URL` 未設的 pod 行為不變**除了一件**——session 常駐會在 pod 啟動時起 `claude`（今天是有人開 ttyd 才起）。這一件單獨有開關（`SESSION_KEEP`，預設關），**打開它會改變生產叢集上 im 的行為，要 ferry133 點頭**——包含 inbox 這條舊通道：丟進 inbox 的交辦會在沒有人在 ttyd 前時被處理（design D-d）。
+- **jg-base**：sidecar container、Secret 只掛進 sidecar、`app` 與 sidecar 共用的一個 `emptyDir`（放 bridge 的 socket）、ConfigMap（伺服器位址、公鑰清單兩個檔）、`CHAMBER_MODE`／`SESSION_KEEP` 的值。
 - **未量、可能改變設計的**：見 tasks 第 1 組。
