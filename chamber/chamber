@@ -1,0 +1,291 @@
+#!/usr/bin/env python3
+"""chamber — room client for agents (Matrix). Standard library only.
+
+  chamber whoami
+  chamber rooms
+  chamber read  ROOM [N] [--everything]
+  chamber wait  ROOM [SECONDS] [--everything]
+  chamber send  ROOM --to NAME|all [--ref REF] [--reply-to EVENT_ID] TEXT|-
+  chamber presence NAME
+  chamber get   ROOM EVENT_ID        (the message text only, byte for byte — pipe it to directive-verify)
+
+Addressing (ferry133 2026-11-15): every message names its recipient — one agent
+or `all`. `read` and `wait` return only messages addressed to you or to all.
+This is a FILTER, NOT ISOLATION: any member of the room can read everything in
+it with `--everything`. What may be said in a room is decided by who is in the
+room, never by who is named.
+
+`send` leaves the message in the room whether or not the recipient is online,
+then reports which it was. TEXT is sent byte-for-byte (use `-` to read stdin),
+so a signed directive survives.
+
+Exit codes
+  0  ok / sent and every recipient is online
+  1  failed (refused, not a member, bad arguments)
+  2  cannot measure (server unreachable, or presence unreadable after sending)
+  3  sent and left in the room — a recipient is NOT online
+  4  wait: nothing addressed to you arrived in time
+
+Configuration
+  CHAMBER_URL          server base URL (or "url" in ~/.claude/chamber/config.json)
+  CHAMBER_TOKEN_FILE   file holding the login credential (bench use), otherwise
+                       the macOS keychain item: service `chamber-login`,
+                       account = CHAMBER_ACCOUNT or the first line of the
+                       nearest `.chamber-identity` file at or above the cwd.
+  CHAMBER_CA           CA bundle for a privately signed server
+The credential is never printed.
+"""
+import json, os, ssl, subprocess, sys, time, urllib.error, urllib.parse, urllib.request
+
+OK, FAILED, UNMEASURED, LEFT_OFFLINE, NOTHING = 0, 1, 2, 3, 4
+
+
+def fail(msg, code=FAILED):
+    print("chamber: " + msg, file=sys.stderr)
+    sys.exit(code)
+
+
+def config():
+    url = os.environ.get("CHAMBER_URL", "")
+    if not url:
+        try:
+            url = json.load(open(os.path.expanduser("~/.claude/chamber/config.json"))).get("url", "")
+        except Exception:
+            url = ""
+    if not url:
+        fail("no server: set CHAMBER_URL or ~/.claude/chamber/config.json")
+    return url.rstrip("/")
+
+
+def identity():
+    acct = os.environ.get("CHAMBER_ACCOUNT")
+    if acct:
+        return acct
+    d = os.path.realpath(os.getcwd())
+    while True:
+        p = os.path.join(d, ".chamber-identity")
+        if os.path.isfile(p):
+            return open(p).readline().strip()
+        if d == os.path.dirname(d):
+            fail("no identity: no .chamber-identity at or above the cwd, and CHAMBER_ACCOUNT is unset")
+        d = os.path.dirname(d)
+
+
+def credential():
+    tf = os.environ.get("CHAMBER_TOKEN_FILE")
+    if tf:
+        try:
+            return open(tf).read().strip()
+        except Exception:
+            fail("cannot read CHAMBER_TOKEN_FILE")
+    r = subprocess.run(["security", "find-generic-password", "-s", "chamber-login", "-a", identity(), "-w"],
+                       capture_output=True, text=True)
+    if r.returncode != 0 or not r.stdout.strip():
+        fail("no login credential in the keychain for this identity (service chamber-login)")
+    return r.stdout.strip()
+
+
+URL = None
+TOK = None
+CTX = None
+q = lambda s: urllib.parse.quote(s, safe="")
+
+
+def call(method, path, body=None, timeout=70):
+    """-> (status, json). status 0 means the server could not be reached."""
+    req = urllib.request.Request(URL + path, method=method,
+                                 data=None if body is None else json.dumps(body, ensure_ascii=False).encode(),
+                                 headers={"Authorization": "Bearer " + TOK, "Content-Type": "application/json",
+                                          # measured 2026-11-16: Cloudflare answers 403 to the default Python-urllib name
+                                          "User-Agent": "chamber-client/1"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout, context=CTX) as x:
+            return x.status, json.loads(x.read() or b"{}")
+    except urllib.error.HTTPError as e:
+        try:
+            return e.code, json.loads(e.read() or b"{}")
+        except Exception:
+            return e.code, {}
+    except Exception as e:
+        return 0, {"error": type(e).__name__}
+
+
+def must(status, data, what):
+    if status == 0:
+        fail("cannot reach the server (%s) while %s" % (data.get("error"), what), UNMEASURED)
+    if status != 200:
+        fail("refused while %s: http=%s %s %s" % (what, status, data.get("errcode", ""), data.get("error", "")))
+    return data
+
+
+def whoami():
+    return must(*call("GET", "/_matrix/client/v3/account/whoami"), "asking who I am")["user_id"]
+
+
+def rooms():
+    out = {}
+    for rid in must(*call("GET", "/_matrix/client/v3/joined_rooms"), "listing rooms")["joined_rooms"]:
+        s, n = call("GET", "/_matrix/client/v3/rooms/%s/state/m.room.name" % q(rid))
+        out[n.get("name", rid) if s == 200 else rid] = rid
+    return out
+
+
+def room_id(name):
+    r = rooms()
+    if name not in r:
+        fail("you are not in a room named %r" % name)
+    return r[name]
+
+
+def members(rid):
+    d = must(*call("GET", "/_matrix/client/v3/rooms/%s/joined_members" % q(rid)), "listing members")
+    return set(d.get("joined", {}))
+
+
+def user_id(name, me):
+    return name if name.startswith("@") else "@%s:%s" % (name, me.split(":", 1)[1])
+
+
+def addressed_to(event, me):
+    m = event.get("content", {}).get("m.mentions") or {}
+    return bool(m.get("room")) or me in (m.get("user_ids") or [])
+
+
+def show(e):
+    c = e["content"]
+    to = "all" if (c.get("m.mentions") or {}).get("room") else ",".join((c.get("m.mentions") or {}).get("user_ids") or []) or "-"
+    ref = (" [%s]" % c["chamber.ref"]) if c.get("chamber.ref") else ""
+    print("%s %s %s -> %s%s" % (time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(e["origin_server_ts"] / 1000)),
+                                 e["event_id"], e["sender"], to, ref))
+    print(c.get("body", ""))
+    print("--")
+
+
+def presence_of(uid):
+    """-> 'online' | 'offline' | None (cannot measure)."""
+    s, d = call("GET", "/_matrix/client/v3/presence/%s/status" % q(uid))
+    if s != 200 or "presence" not in d:
+        return None
+    # 'unavailable' is Matrix for connected-but-idle: the client is still there.
+    return "online" if d["presence"] in ("online", "unavailable") else "offline"
+
+
+def take_flag(args, flag, has_value=False):
+    if flag not in args:
+        return None if has_value else False
+    i = args.index(flag)
+    if not has_value:
+        del args[i]
+        return True
+    if i + 1 >= len(args):
+        fail("%s needs a value" % flag)
+    v = args[i + 1]
+    del args[i:i + 2]
+    return v
+
+
+def main():
+    global URL, TOK, CTX
+    a = sys.argv[1:]
+    if not a or a[0] in ("-h", "--help", "help"):
+        print(__doc__)
+        sys.exit(OK if a else FAILED)
+    cmd, a = a[0], a[1:]
+    URL = config()
+    TOK = credential()
+    CTX = ssl.create_default_context(cafile=os.environ.get("CHAMBER_CA")) if URL.startswith("https") else None
+
+    if cmd == "whoami":
+        print(whoami())
+    elif cmd == "rooms":
+        print("\n".join(sorted(rooms())))
+    elif cmd == "presence":
+        if len(a) != 1:
+            fail("usage: chamber presence NAME")
+        p = presence_of(user_id(a[0], whoami()))
+        if p is None:
+            fail("cannot read presence for %s" % a[0], UNMEASURED)
+        print(p)
+        sys.exit(OK if p == "online" else LEFT_OFFLINE)
+    elif cmd == "get":
+        if len(a) != 2:
+            fail("usage: chamber get ROOM EVENT_ID")
+        d = must(*call("GET", "/_matrix/client/v3/rooms/%s/event/%s" % (q(room_id(a[0])), q(a[1]))), "fetching the message")
+        sys.stdout.buffer.write(d.get("content", {}).get("body", "").encode("utf-8"))
+    elif cmd == "read":
+        everything = take_flag(a, "--everything")
+        if not a:
+            fail("usage: chamber read ROOM [N] [--everything]")
+        me, n = whoami(), int(a[1]) if len(a) > 1 else 10
+        d = must(*call("GET", "/_matrix/client/v3/rooms/%s/messages?dir=b&limit=%d" % (q(room_id(a[0])), max(n * 5, 50))), "reading")
+        msgs = [e for e in d["chunk"] if e["type"] == "m.room.message"]
+        mine = msgs if everything else [e for e in msgs if addressed_to(e, me)]
+        for e in reversed(mine[:n]):
+            show(e)
+        if not everything and len(msgs) != len(mine):
+            print("(%d message(s) not addressed to you were left out; --everything shows them)" % (len(msgs) - len(mine)), file=sys.stderr)
+    elif cmd == "wait":
+        everything = take_flag(a, "--everything")
+        if not a:
+            fail("usage: chamber wait ROOM [SECONDS] [--everything]")
+        me, rid, secs = whoami(), room_id(a[0]), int(a[1]) if len(a) > 1 else 60
+        # "Now" is taken from the newest event already in the room, on the server's clock.
+        # The position an initial sync returns cannot be used for this: Synapse 1.165.0 hands
+        # back a cached, stale position for repeated initial syncs (measured 2026-11-15), and
+        # the next incremental sync then replays messages that arrived before the wait began.
+        old = must(*call("GET", "/_matrix/client/v3/rooms/%s/messages?dir=b&limit=50" % q(rid)), "reading the room")["chunk"]
+        seen, newest = {e["event_id"] for e in old}, max([e["origin_server_ts"] for e in old] or [0])
+        since = must(*call("GET", "/_matrix/client/v3/sync?timeout=0"), "syncing")["next_batch"]
+        end = time.time() + secs
+        while time.time() < end:
+            t = int(min(30, max(1, end - time.time())) * 1000)
+            d = must(*call("GET", "/_matrix/client/v3/sync?timeout=%d&since=%s" % (t, q(since))), "waiting")
+            since = d.get("next_batch", since)
+            ev = d.get("rooms", {}).get("join", {}).get(rid, {}).get("timeline", {}).get("events", [])
+            ev = [e for e in ev if e["event_id"] not in seen and e["origin_server_ts"] > newest]
+            ev = [e for e in ev if e["type"] == "m.room.message" and e["sender"] != me and (everything or addressed_to(e, me))]
+            if ev:
+                for e in ev:
+                    show(e)
+                sys.exit(OK)
+        sys.exit(NOTHING)
+    elif cmd == "send":
+        to, ref, reply = take_flag(a, "--to", True), take_flag(a, "--ref", True), take_flag(a, "--reply-to", True)
+        if len(a) != 2 or not to:
+            fail("usage: chamber send ROOM --to NAME|all [--ref REF] [--reply-to EVENT_ID] TEXT|-\n"
+                 "         a message without a recipient is not sent")
+        text = sys.stdin.buffer.read().decode("utf-8") if a[1] == "-" else a[1]
+        me, rid = whoami(), room_id(a[0])
+        mem = members(rid)
+        if to == "all":
+            targets, mentions = sorted(mem - {me}), {"room": True}
+        else:
+            t = user_id(to, me)
+            if t not in mem:
+                fail("%s is not a member of %s — nothing sent" % (t, a[0]))
+            targets, mentions = [t], {"user_ids": [t]}
+        content = {"msgtype": "m.text", "body": text, "m.mentions": mentions}
+        if ref:
+            content["chamber.ref"] = ref
+        if reply:
+            content["m.relates_to"] = {"rel_type": "m.thread", "event_id": reply}
+        s, d = call("PUT", "/_matrix/client/v3/rooms/%s/send/m.room.message/%d" % (q(rid), time.time_ns()), content)
+        if s != 200:
+            fail("NOT SENT: %s" % ("cannot reach the server" if s == 0 else "http=%s %s %s" % (s, d.get("errcode", ""), d.get("error", ""))),
+                 UNMEASURED if s == 0 else FAILED)
+        states = {t: presence_of(t) for t in targets}
+        print("sent %s to=%s" % (d["event_id"], to))
+        for t, p in states.items():
+            print("  %s: %s" % (t, p or "presence unknown"))
+        if any(p is None for p in states.values()):
+            print("chamber: sent, but presence could not be read — do not assume the recipient is there", file=sys.stderr)
+            sys.exit(UNMEASURED)
+        if any(p == "offline" for p in states.values()):
+            print("chamber: left in the room — recipient not online", file=sys.stderr)
+            sys.exit(LEFT_OFFLINE)
+    else:
+        fail("unknown command %r (try --help)" % cmd)
+
+
+if __name__ == "__main__":
+    main()

@@ -43,5 +43,7 @@ jobs:
         run: test/claude-session-controls.sh
       - name: Check the im policy controls
         run: test/im-policy-controls.sh
+      - name: Check the chamber tool controls
+        run: test/chamber-controls.sh
       - name: Check the entrypoint secret-service controls
         run: test/entrypoint-controls.sh

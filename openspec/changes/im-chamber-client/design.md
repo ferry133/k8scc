@@ -17,11 +17,13 @@
 
 ## Decisions
 
-### D-a 用戶端與驗章工具是同一份檔，不是第二份實作（提案）
+### D-a 用戶端與驗章工具是同一份檔，不是第二份實作（正本住哪已裁定）
 
 root tasks 6.2 留了一個選擇：共用檔，或各自實作加共用測試向量。選共用檔：`chamber` 與 `directive-verify` 各只有幾百行、只用標準函式庫，映像裡的 python3 與 OpenSSH 都夠（OpenSSH 9.2 在 im pod 裡驗 ed25519 簽章量過，2026-11-17；`sk-ecdsa-sha2-nistp256@openssh.com` 量過，2026-11-19，映像 `e8d7522`，tasks 1.1——用的是固定向量，不是 ferry133 的金鑰）。
 
 **正本住哪**是開著的問題：Mac 側那份在 `~/.claude/scripts/`，不在任何 repo。提案：**本 repo 的 `chamber/` 目錄是正本**（它在 git 裡、有 CI），Mac 側是安裝出來的副本，由一格檢查比對雜湊。在裁定之前，本 repo 的副本帶著來源的雜湊與日期，測試向量兩邊跑同一份。
+
+**裁定（ferry133 2026-11-19，逐字）：「正本放 k8scc」。** 所以往後這兩個檔的修改在本 repo 做、經 PR 與 CI，Mac 側重新安裝；Mac 側那一格雜湊比對回答的是「這份副本是不是 main 上的那一份」。
 
 ### D-b 橋接程式握憑證，`app` 經一個 Unix socket 說話（裁定的偏好＋提案的形狀）
 
@@ -88,12 +90,12 @@ ferry133 偏好 sidecar（2026-11-15）；sidecar 的實質好處是登入憑證
 - **[常駐的 session 沒人看著]** 它會讀房間裡的東西並動作。保留類有簽章擋；一般類的上限是 im 的權限 profile。`observe` 先行，就是為了在它動作之前先看它收到什麼。
 - **[一行宣告打進不該打的畫面]** 沿用並共用 `inbox-watch` 的閘門與它的 controls。
 - **[橋接程式是 pod 內的開放面]** 只開 Unix socket（pod 是 hostNetwork，loopback 等於節點）、只轉送列出的路徑；controls 有「其他路徑 404」與「bridge 沒有任何 TCP listener」。
-- **[兩份檔分岔]** D-a；在正本定下來之前靠雜湊與同一份測試。
+- **[兩份檔分岔]** D-a；正本在本 repo，Mac 側是副本，靠那一側的雜湊比對（tasks 2.4）。
 - **[在線讀數說謊]** 兩個方向都要 control：session 沒了仍顯示在線（R19 的答覆說不出來）；session 在卻顯示不在線（發送方白等）。
 
 ## Open Questions
 
-1. `chamber` 與 `directive-verify` 的正本住哪（D-a）。
+1. ~~`chamber` 與 `directive-verify` 的正本住哪（D-a）。~~ 已裁定：本 repo（ferry133 2026-11-19）。
 2. 沒有 sidecar 時允不允許憑證在 `app` 裡跑生產（提案：不允許）。
 3. session 常駐起來的 `claude` 用哪一個權限 profile——與有人在 ttyd 前時相同，還是更窄。
 4. 伺服器側多久把斷線的帳號標成不在線（tasks 1.3 量了再定 `CHAMBER_BEAT`）。

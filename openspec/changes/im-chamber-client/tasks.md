@@ -15,12 +15,15 @@
 
 ## 2. 用戶端與驗章（root 6.2）
 
-- [ ] 2.1 `chamber/chamber`、`chamber/directive-verify` 進 repo（與 Mac 側逐位元組相同；檔頭記來源的雜湊與日期）；`Dockerfile` COPY 到 `/usr/local/bin/`
+- [x] 2.1 `chamber/chamber`、`chamber/directive-verify` 進 repo；`Dockerfile` COPY 到 `/usr/local/bin/`
+  - **做了（2026-11-19 06:43，`k8scc-0f [7c5b85]`）**：以 Mac 側當下的位元組進 repo——`chamber` sha256 `6f7ce8a2d00f9e19…`、`directive-verify` `a58e8189b42f7670…`（兩側各量一次，`fleet-ops-98 [047e9c]` 06:42 量到相同）。**沒有在檔頭加來源註記**：正本裁定住這裡（2.4），加了就不再逐位元組相同，而雜湊已記在這一行。`test/chamber-controls.sh` 20 格（出貨、起得來、用戶端的 1 與 2 分得開、固定 sk-ecdsa 向量的 0／1／2），四個變異各自轉紅（拿掉 COPY；驗不過當通過；沒有清單當失敗；連不上當失敗）。向量在 `test/chamber-vectors/sk-ecdsa/`
+  - **沒量**：映像還沒建，所以「在映像裡起得來」這次沒量（tasks 1.1 量的是以 stdin 帶進 pod 的同一份 `directive-verify`；`chamber` 在 pod 裡沒跑過）
 - [ ] 2.2 對照測試進 `test/`（用戶端 20 格、驗章 24 格＋只用一次 13 格、變異各一支）；CI 對一台本機拋棄式伺服器跑。伺服器起不來 ⇒ 那幾格是「量不到」，CI 不算綠
 - [ ] 2.3 `directive-verify` 在映像裡的預設：公鑰清單讀 `CHAMBER_SIGNERS_DIR`；`transcript:` 指標一律回 2（映像裡沒有別人的 transcript——確認不是剛好找不到，是不找）
-- [ ] 2.5 （**等 2.4 的裁定；在那之前兩邊都不改，Mac 側由 fleet-ops 收**）`chamber` 用戶端認得 socket 形式的位址（`unix:<path>`；design D-b 2026-11-19 的更正）。這是共用檔的修改：Mac 側一起收，同一份測試向量加一格（經 socket 與經 https 的行為逐格相同）
+- [ ] 2.5 （2.4 已裁定，正本在本 repo；改在這裡做，Mac 側重新安裝）`chamber` 用戶端認得 socket 形式的位址（`unix:<path>`；design D-b 2026-11-19 的更正）。這是共用檔的修改：Mac 側一起收，同一份測試向量加一格（經 socket 與經 https 的行為逐格相同）
 - [ ] 2.6 用過的指令的那本帳在 PVC 上（預設 `~/.claude/chamber/used_directives`，而 `~/.claude` 是 PVC——讀 `directive-verify` 與 `CLAUDE.md` 得來，沒在 pod 上量）：control 是「`--use` 之後重啟 pod，同一份再驗回 1」
 - [ ] 2.4 正本住哪（design Open Questions 1）裁定後：另一側改成安裝的副本，加一格雜湊比對
+  - **裁定（ferry133 2026-11-19，在 `k8scc-0f` 的 console，逐字）：「正本放 k8scc」。** 正本是本 repo 的 `chamber/`。Mac 側（`~/.claude/scripts/`）改成安裝的副本與雜湊比對那一格由 fleet-ops 收（`fleet-ops-98 [047e9c]` 已接）；那一半做完這一項才勾
 
 ## 3. 橋接程式（root 6.3 的一半）
 

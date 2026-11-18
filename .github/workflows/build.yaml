@@ -111,6 +111,8 @@ jobs:
       # and saying what the 2026-10-15 ruling requires, with a control per line.
       - name: Check the im policy controls
         run: test/im-policy-controls.sh
+      - name: Check the chamber tool controls
+        run: test/chamber-controls.sh
 
       # entrypoint.sh's D-Bus / GNOME Keyring startup (k8scc#19): every outcome
       # leaves its own `entrypoint:` line, and none stops the container. The
