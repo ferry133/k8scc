@@ -1,0 +1,353 @@
+#!/usr/bin/env python3
+"""directive-verify — check a person-signed chamber directive. Standard library + ssh-keygen.
+
+  directive-verify [--me AGENT] [--relayed] [--signers FILE] [--print-body] [FILE|-]
+
+A directive is one chamber message:
+
+    chamber-directive v1
+    id: <id>
+    signer: <person>
+    issued: <UTC, e.g. 2026-11-15T03:00:00Z>
+    expires: <UTC>
+    delegable: yes|no
+    to: any|<agent>
+    ---
+    <the person's words, verbatim>
+    -----BEGIN SSH SIGNATURE-----
+    ...
+    -----END SSH SIGNATURE-----
+
+What is signed is every byte before the LAST `-----BEGIN SSH SIGNATURE-----`
+line (header, `---`, and the words), with ssh-keygen namespace `chamber-directive`.
+Nothing is normalised: whoever relays a directive must relay it untouched.
+
+Exit codes
+  0  PASS  — signed by a listed person, not expired, addressed to you (or any),
+             and (with --relayed) delegable
+  1  FAIL  — it is a directive but one of those does not hold
+  2  CANNOT MEASURE — no signature block, no signer list, no ssh-keygen, no
+             identity to compare `to` against. Treat as "no directive".
+
+A pass proves the person said these words. It does not prove that what you are
+about to do is within them — that is yours to judge after reading the words.
+
+  --me AGENT     who you are, for the `to` check (default: CHAMBER_ACCOUNT, or the
+                 first line of the nearest .chamber-identity at or above the cwd)
+  --relayed      the directive reached you through another agent, not from the
+                 person directly: `delegable: no` then fails
+  --signers FILE allowed-signers file (default ~/.claude/chamber/allowed_signers)
+                 A file named revoked_signers next to it (one public key per line) is
+                 honoured: a signature by a key on it fails even if the key is still listed.
+                 Both files are copies; the original and `chamber-signers check` say whether
+                 this copy is current. A stale copy still accepts a revoked key.
+  --print-body   on PASS, write the person's words to stdout, byte for byte
+
+Same-host shortcut (design D8) — a pointer instead of a signature:
+
+  directive-verify transcript:<SESSION-UUID>/<RECORD-UUID>
+  (or a message on stdin / in FILE that has no signature block and exactly one
+   such pointer on a line of its own)
+
+The record is looked up in <dir>/*/<SESSION-UUID>.jsonl (--transcripts DIR,
+default ~/.claude/projects). Four results:
+  0  the record is what a person entered (origin.kind=human, typed or queued):
+     the words go to stdout, byte for byte
+  0  origin.kind=human, suggestion_accepted: same, and the PASS line says
+     "model-drafted, accepted by the person"
+  1  the record exists and came from something else (peer, channel, task…)
+  2  cannot open the file, no such record, no `origin`, or a shape this tool
+     does not know — treat as "no directive"
+It catches misquoting. It does NOT catch forgery: a session on this host can
+write that file. It never applies across hosts — a reader that cannot open
+the file gets 2. `to`, `expires`, `delegable` do not exist here; --me and
+--relayed are ignored.
+
+Used once (ferry133 2026-11-19: a directive is not reusable)
+
+  --use          on PASS, record this directive as used, in the same call
+  --ledger FILE  where uses are recorded (default ~/.claude/chamber/used_directives)
+
+A directive (or pointer) already in the ledger FAILS (1), with or without --use.
+Verify without --use to read the words and decide; verify again WITH --use at the
+moment you start the action it covers. A ledger that exists but cannot be read, or
+cannot be written under --use, is CANNOT MEASURE (2) — never a pass.
+The ledger is per host and per OS user: it stops this agent on this host from acting
+twice on one directive. It does not know what another host or another agent did.
+"""
+import datetime, glob, hashlib, json, os, re, shutil, subprocess, sys, tempfile
+
+PASS, FAIL, UNMEASURED = 0, 1, 2
+NS = "chamber-directive"
+BEGIN = b"-----BEGIN SSH SIGNATURE-----"
+END = b"-----END SSH SIGNATURE-----"
+FIELDS = ("id", "signer", "issued", "expires", "delegable", "to")
+SKEW = datetime.timedelta(minutes=5)
+
+
+def out(code, word, why):
+    print("%s: %s" % (word, why), file=sys.stderr)
+    sys.exit(code)
+
+
+def once(key, ledger, use):
+    """Used-once check. Returns only when the key is unused (and, with use, now recorded)."""
+    try:
+        lines = open(ledger, encoding="utf-8").read().split("\n") if os.path.exists(ledger) else []
+    except Exception as e:
+        out(UNMEASURED, "CANNOT MEASURE", "cannot read the ledger of used directives (%s)" % type(e).__name__)
+    for ln in lines:
+        c = ln.split("\t")
+        if c[0] == key:
+            out(FAIL, "FAIL", "this directive was already used on this host at %s — a directive is used once" % (c[1] if len(c) > 1 else "?"))
+    if use:
+        try:
+            os.makedirs(os.path.dirname(os.path.abspath(ledger)), exist_ok=True)
+            with open(ledger, "a", encoding="utf-8") as fh:
+                fh.write("%s\t%s\n" % (key, datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")))
+        except Exception as e:
+            out(UNMEASURED, "CANNOT MEASURE", "cannot record the use (%s) — do not act" % type(e).__name__)
+
+
+def split(raw):
+    """-> (signed_bytes, signature_bytes) or None when there is no signature block."""
+    i = raw.rfind(b"\n" + BEGIN)
+    if i < 0:
+        return None
+    signed, sig = raw[:i + 1], raw[i + 1:]
+    j = sig.find(END)
+    if j < 0:
+        return None
+    return signed, sig[:j + len(END)] + b"\n"
+
+
+def parse(signed):
+    """-> (fields, body_bytes); raises ValueError with the reason."""
+    head, sep, body = signed.partition(b"\n---\n")
+    if not sep:
+        raise ValueError("no `---` line between header and words")
+    lines = head.decode("utf-8", "strict").split("\n")
+    if lines[0] != "chamber-directive v1":
+        raise ValueError("first line is not `chamber-directive v1`")
+    f = {}
+    for ln in lines[1:]:
+        m = re.fullmatch(r"([a-z]+): (\S.*)", ln)
+        if not m or m.group(1) not in FIELDS or m.group(1) in f:
+            raise ValueError("bad or repeated header line: %r" % ln[:60])
+        f[m.group(1)] = m.group(2)
+    missing = [k for k in FIELDS if k not in f]
+    if missing:
+        raise ValueError("header lacks: " + ", ".join(missing))
+    if f["delegable"] not in ("yes", "no"):
+        raise ValueError("delegable must be yes or no")
+    if not re.fullmatch(r"[A-Za-z0-9._-]+", f["signer"]):
+        raise ValueError("signer is not a plain name")
+    return f, body
+
+
+def when(s):
+    if not re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ", s):
+        raise ValueError("time is not UTC `YYYY-MM-DDTHH:MM:SSZ`: %r" % s)
+    return datetime.datetime.strptime(s, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)
+
+
+def my_name(arg):
+    if arg:
+        return arg
+    if os.environ.get("CHAMBER_ACCOUNT"):
+        return os.environ["CHAMBER_ACCOUNT"]
+    d = os.path.realpath(os.getcwd())
+    while True:
+        p = os.path.join(d, ".chamber-identity")
+        if os.path.isfile(p):
+            return open(p).readline().strip()
+        if d == os.path.dirname(d):
+            return None
+        d = os.path.dirname(d)
+
+
+U = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+POINTER = re.compile(r"transcript:(%s)/(%s)" % (U, U))
+
+
+def transcript(session, record, root, ledger, use):
+    """D8. Never returns: exits 0 / 1 / 2."""
+    seen, files = set(), []
+    for p in sorted(glob.glob(os.path.join(root, "*", session + ".jsonl"))):
+        rp = os.path.realpath(p)
+        if rp not in seen:
+            seen.add(rp)
+            files.append(rp)
+    if not files:
+        out(UNMEASURED, "CANNOT MEASURE", "no transcript %s under %s — treat as no directive" % (session, root))
+    hits = []
+    for p in files:
+        try:
+            fh = open(p, "rb")
+        except OSError as e:
+            out(UNMEASURED, "CANNOT MEASURE", "cannot open the transcript (%s) — treat as no directive" % type(e).__name__)
+        with fh:
+            for ln in fh:
+                if record.encode() not in ln:
+                    continue
+                try:
+                    r = json.loads(ln)
+                except ValueError:
+                    continue
+                if isinstance(r, dict) and r.get("uuid") == record:
+                    hits.append(r)
+    if not hits:
+        out(UNMEASURED, "CANNOT MEASURE", "no record %s in that transcript" % record)
+    key = lambda r: json.dumps([r.get("type"), r.get("origin"), r.get("promptSource"), r.get("message")], sort_keys=True)
+    if len({key(r) for r in hits}) != 1:
+        out(UNMEASURED, "CANNOT MEASURE", "that record id appears %d times and the copies differ" % len(hits))
+    r = hits[0]
+    o = r.get("origin")
+    if not isinstance(o, dict) or not isinstance(o.get("kind"), str):
+        out(UNMEASURED, "CANNOT MEASURE", "the record has no `origin` (a summary, a tool result, or an old version) — not a pass")
+    if o["kind"] != "human":
+        out(FAIL, "FAIL", "the record came from %r, not from a person" % o["kind"])
+    if r.get("type") != "user" or r.get("isMeta") or r.get("isSidechain") or r.get("isCompactSummary"):
+        out(UNMEASURED, "CANNOT MEASURE", "marked human, but not a plain entry in the main conversation")
+    how = r.get("promptSource")
+    if how not in ("typed", "queued", "suggestion_accepted"):
+        out(UNMEASURED, "CANNOT MEASURE", "marked human, entered in a way this tool does not know (%r)" % how)
+    c = r.get("message", {}).get("content") if isinstance(r.get("message"), dict) else None
+    other = 0
+    if isinstance(c, str):
+        words = c
+    elif isinstance(c, list) and all(isinstance(b, dict) for b in c):
+        words = "".join(b.get("text", "") for b in c if b.get("type") == "text")
+        other = sum(1 for b in c if b.get("type") != "text")
+    else:
+        out(UNMEASURED, "CANNOT MEASURE", "the record has no readable words")
+    if not words.strip():
+        out(UNMEASURED, "CANNOT MEASURE", "the record has no words")
+    once("transcript:%s/%s" % (session, record), ledger, use)
+    print("PASS: %s · session %s · record %s · at %s%s — same host only; shows the words were not misquoted, not that the file was not written by a session" % (
+        "model-drafted, accepted by the person" if how == "suggestion_accepted" else "entered by the person (%s)" % how,
+        session, record, r.get("timestamp", "?"),
+        " · %d attachment(s) not shown" % other if other else ""), file=sys.stderr)
+    sys.stdout.buffer.write(words.encode("utf-8"))
+    sys.exit(PASS)
+
+
+def main():
+    a = sys.argv[1:]
+    if "-h" in a or "--help" in a:
+        print(__doc__)
+        sys.exit(0)
+    opt = {"--me": None, "--signers": os.path.expanduser("~/.claude/chamber/allowed_signers"),
+           "--transcripts": os.path.expanduser("~/.claude/projects"),
+           "--ledger": os.path.expanduser("~/.claude/chamber/used_directives")}
+    relayed = print_body = use = False
+    src = "-"
+    i = 0
+    while i < len(a):
+        if a[i] in opt:
+            if i + 1 >= len(a):
+                out(UNMEASURED, "CANNOT MEASURE", "%s needs a value" % a[i])
+            opt[a[i]] = a[i + 1]
+            i += 2
+        elif a[i] == "--relayed":
+            relayed = True
+            i += 1
+        elif a[i] == "--use":
+            use = True
+            i += 1
+        elif a[i] == "--print-body":
+            print_body = True
+            i += 1
+        elif a[i].startswith("--"):
+            out(UNMEASURED, "CANNOT MEASURE", "unknown option %s" % a[i])
+        else:
+            src = a[i]
+            i += 1
+    if src.startswith("transcript:"):
+        m = POINTER.fullmatch(src)
+        if not m:
+            out(UNMEASURED, "CANNOT MEASURE", "not a pointer of the form transcript:<session-uuid>/<record-uuid>")
+        transcript(m.group(1), m.group(2), opt["--transcripts"], opt["--ledger"], use)
+    try:
+        raw = sys.stdin.buffer.read() if src == "-" else open(src, "rb").read()
+    except Exception as e:
+        out(UNMEASURED, "CANNOT MEASURE", "cannot read input (%s)" % type(e).__name__)
+
+    parts = split(raw)
+    if parts is None:
+        ptrs = {m.groups() for ln in raw.decode("utf-8", "replace").split("\n") for m in [POINTER.fullmatch(ln.strip())] if m}
+        if len(ptrs) == 1:
+            transcript(*ptrs.pop(), opt["--transcripts"], opt["--ledger"], use)
+        if ptrs:
+            out(UNMEASURED, "CANNOT MEASURE", "no signature block and %d different transcript pointers" % len(ptrs))
+        out(UNMEASURED, "CANNOT MEASURE", "no signature block — this is not a signed directive")
+    signed, sig = parts
+    if not shutil.which("ssh-keygen"):
+        out(UNMEASURED, "CANNOT MEASURE", "ssh-keygen not found")
+    if not os.path.isfile(opt["--signers"]) or os.path.getsize(opt["--signers"]) == 0:
+        out(UNMEASURED, "CANNOT MEASURE", "no signer list at %s" % opt["--signers"])
+
+    try:
+        f, body = parse(signed)
+        issued, expires = when(f["issued"]), when(f["expires"])
+    except (ValueError, UnicodeDecodeError) as e:
+        out(FAIL, "FAIL", "malformed directive: %s" % e)
+
+    # 1. the signature, over the exact bytes, by a key listed for the named person
+    with tempfile.NamedTemporaryFile(suffix=".sig") as sf:
+        sf.write(sig)
+        sf.flush()
+        base = ["ssh-keygen", "-Y", "verify", "-f", opt["--signers"], "-I", f["signer"], "-n", NS, "-s", sf.name]
+        revoked = os.path.join(os.path.dirname(os.path.abspath(opt["--signers"])), "revoked_signers")
+        use_r = os.path.isfile(revoked) and os.path.getsize(revoked) > 0
+        r = subprocess.run(base + (["-r", revoked] if use_r else []), input=signed, capture_output=True)
+        if r.returncode != 0 and use_r:
+            # say why: is this a good signature by a key that is on the revoked list? (the answer is FAIL either way)
+            if subprocess.run(base, input=signed, capture_output=True).returncode == 0:
+                out(FAIL, "FAIL", "the signing key of %r is on the revoked list (or that list cannot be read)" % f["signer"])
+            try:
+                keys = [l.split()[:2] for l in open(revoked, encoding="utf-8").read().split("\n") if l.strip() and not l.startswith("#")]
+                with tempfile.NamedTemporaryFile("w", suffix=".rev") as rf:
+                    rf.write("".join('%s namespaces="%s" %s %s\n' % (f["signer"], NS, k[0], k[1]) for k in keys if len(k) == 2))
+                    rf.flush()
+                    was = subprocess.run(base[:4] + [rf.name] + base[5:], input=signed, capture_output=True).returncode == 0
+            except Exception:
+                was = False
+            if was:
+                out(FAIL, "FAIL", "signed with a key of %r that has been revoked" % f["signer"])
+    if r.returncode != 0:
+        out(FAIL, "FAIL", "signature does not verify for signer %r" % f["signer"])
+
+    # 2. time
+    now = datetime.datetime.now(datetime.timezone.utc)
+    if now >= expires:
+        out(FAIL, "FAIL", "expired at %s" % f["expires"])
+    if issued > now + SKEW:
+        out(FAIL, "FAIL", "issued in the future (%s)" % f["issued"])
+    if expires <= issued:
+        out(FAIL, "FAIL", "expires is not after issued")
+
+    # 3. addressee
+    if f["to"] != "any":
+        me = my_name(opt["--me"])
+        if not me:
+            out(UNMEASURED, "CANNOT MEASURE", "directive is addressed to %r and I do not know who I am (--me)" % f["to"])
+        if f["to"] != me:
+            out(FAIL, "FAIL", "addressed to %r, not to %r" % (f["to"], me))
+
+    # 4. delegation
+    if relayed and f["delegable"] != "yes":
+        out(FAIL, "FAIL", "relayed, but the person marked it delegable: no")
+
+    # 5. used once
+    once("signed:%s" % hashlib.sha256(signed).hexdigest(), opt["--ledger"], use)
+
+    print("PASS: signed by %s · id %s · to %s · delegable %s · expires %s%s" % (
+        f["signer"], f["id"], f["to"], f["delegable"], f["expires"], " · relayed" if relayed else ""), file=sys.stderr)
+    if print_body:
+        sys.stdout.buffer.write(body)
+    sys.exit(PASS)
+
+
+if __name__ == "__main__":
+    main()

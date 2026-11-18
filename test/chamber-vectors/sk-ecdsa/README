@@ -1,0 +1,4 @@
+Fixed test vector: a v1 directive signed by a Secure Enclave key (sk-ecdsa-sha2-nistp256@openssh.com) made with
+`sc_auth create-ctk-identity -k p-256-ne -t none` on 2026-11-15 and deleted right after. The key is gone; the vector
+only proves a verifier can check this signature type. Expected: directive-verify --signers allowed_signers directive.txt -> 0;
+change any byte -> 1. The signer name is `vector-person` on purpose: it must never appear in a real signer list.
