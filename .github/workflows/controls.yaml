@@ -45,5 +45,7 @@ jobs:
         run: test/im-policy-controls.sh
       - name: Check the chamber tool controls
         run: test/chamber-controls.sh
+      - name: Check the chamber socket and image-default controls
+        run: python3 test/test_chamber_tools.py
       - name: Check the entrypoint secret-service controls
         run: test/entrypoint-controls.sh

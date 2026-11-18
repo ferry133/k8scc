@@ -36,7 +36,8 @@ about to do is within them — that is yours to judge after reading the words.
                  first line of the nearest .chamber-identity at or above the cwd)
   --relayed      the directive reached you through another agent, not from the
                  person directly: `delegable: no` then fails
-  --signers FILE allowed-signers file (default ~/.claude/chamber/allowed_signers)
+  --signers FILE allowed-signers file (default ~/.claude/chamber/allowed_signers, or
+                 $CHAMBER_SIGNERS_DIR/allowed_signers when that variable is set and not empty)
                  A file named revoked_signers next to it (one public key per line) is
                  honoured: a signature by a key on it fails even if the key is still listed.
                  Both files are copies; the original and `chamber-signers check` say whether
@@ -58,6 +59,9 @@ default ~/.claude/projects). Four results:
   1  the record exists and came from something else (peer, channel, task…)
   2  cannot open the file, no such record, no `origin`, or a shape this tool
      does not know — treat as "no directive"
+With CHAMBER_TRANSCRIPTS=off in the environment every pointer answers 2 and no
+file is looked for (an im: the person's transcripts are on another host, and the
+ones that are here are its own).
 It catches misquoting. It does NOT catch forgery: a session on this host can
 write that file. It never applies across hosts — a reader that cannot open
 the file gets 2. `to`, `expires`, `delegable` do not exist here; --me and
@@ -172,6 +176,8 @@ POINTER = re.compile(r"transcript:(%s)/(%s)" % (U, U))
 
 def transcript(session, record, root, ledger, use):
     """D8. Never returns: exits 0 / 1 / 2."""
+    if os.environ.get("CHAMBER_TRANSCRIPTS", "").strip().lower() == "off":
+        out(UNMEASURED, "CANNOT MEASURE", "transcript pointers are not read on this host (CHAMBER_TRANSCRIPTS=off) — treat as no directive")
     seen, files = set(), []
     for p in sorted(glob.glob(os.path.join(root, "*", session + ".jsonl"))):
         rp = os.path.realpath(p)
@@ -237,7 +243,8 @@ def main():
     if "-h" in a or "--help" in a:
         print(__doc__)
         sys.exit(0)
-    opt = {"--me": None, "--signers": os.path.expanduser("~/.claude/chamber/allowed_signers"),
+    sdir = os.environ.get("CHAMBER_SIGNERS_DIR", "")
+    opt = {"--me": None, "--signers": os.path.join(sdir, "allowed_signers") if sdir else os.path.expanduser("~/.claude/chamber/allowed_signers"),
            "--transcripts": os.path.expanduser("~/.claude/projects"),
            "--ledger": os.path.expanduser("~/.claude/chamber/used_directives")}
     relayed = print_body = use = False
