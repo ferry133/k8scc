@@ -18,13 +18,13 @@
 - [ ] 2.1 `chamber/chamber`、`chamber/directive-verify` 進 repo（與 Mac 側逐位元組相同；檔頭記來源的雜湊與日期）；`Dockerfile` COPY 到 `/usr/local/bin/`
 - [ ] 2.2 對照測試進 `test/`（用戶端 20 格、驗章 24 格＋只用一次 13 格、變異各一支）；CI 對一台本機拋棄式伺服器跑。伺服器起不來 ⇒ 那幾格是「量不到」，CI 不算綠
 - [ ] 2.3 `directive-verify` 在映像裡的預設：公鑰清單讀 `CHAMBER_SIGNERS_DIR`；`transcript:` 指標一律回 2（映像裡沒有別人的 transcript——確認不是剛好找不到，是不找）
-- [ ] 2.5 `chamber` 用戶端認得 socket 形式的位址（`unix:<path>`；design D-b 2026-11-19 的更正）。這是共用檔的修改：Mac 側一起收，同一份測試向量加一格（經 socket 與經 https 的行為逐格相同）
+- [ ] 2.5 （**等 2.4 的裁定；在那之前兩邊都不改，Mac 側由 fleet-ops 收**）`chamber` 用戶端認得 socket 形式的位址（`unix:<path>`；design D-b 2026-11-19 的更正）。這是共用檔的修改：Mac 側一起收，同一份測試向量加一格（經 socket 與經 https 的行為逐格相同）
 - [ ] 2.6 用過的指令的那本帳在 PVC 上（預設 `~/.claude/chamber/used_directives`，而 `~/.claude` 是 PVC——讀 `directive-verify` 與 `CLAUDE.md` 得來，沒在 pod 上量）：control 是「`--use` 之後重啟 pod，同一份再驗回 1」
 - [ ] 2.4 正本住哪（design Open Questions 1）裁定後：另一側改成安裝的副本，加一格雜湊比對
 
 ## 3. 橋接程式（root 6.3 的一半）
 
-- [ ] 3.1 `chamber-bridge`：讀憑證、Unix socket（不開 TCP）、路徑白名單、sync 位置落檔接著用、`observe`／`deliver`、啟動的三種狀態
+- [ ] 3.1 `chamber-bridge`：讀憑證、Unix socket（不開 TCP；**socket 檔的擁有者與權限要有一格**——兩個 container 的 uid 相不相同沒量，design 沒寫；`fleet-ops-98 [047e9c]` 2026-11-19 確認 `6cb3be3` 時指出）、路徑白名單、sync 位置落檔接著用、`observe`／`deliver`、啟動的三種狀態
 - [ ] 3.2 controls：白名單外的路徑被拒；bridge 沒有任何 TCP listener（正對照：同一份列表看得到 ttyd 的 port）；憑證不出現在 log 與任何回應；`observe` 下 `send` 被拒、在線讀數不變；伺服器連不上時用戶端得到「量不到」不是「不在線」
 - [ ] 3.3 在沒有 sidecar 的 pod 上由 `entrypoint.sh` 起（只給拋棄式叢集），啟動行說「憑證在 app 內」
 
