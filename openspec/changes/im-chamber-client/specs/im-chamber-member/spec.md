@@ -2,7 +2,7 @@
 
 ### Requirement: Nothing starts unless the chamber is configured
 
-The image SHALL start no chamber component when `CHAMBER_URL` is empty or unset, and SHALL say so in one pod-log line. When `CHAMBER_URL` is set and any other required input is missing (`CHAMBER_ACCOUNT`, the login credential in the bridge, the signer list in `app`), the component that lacks it SHALL NOT start and SHALL name what is missing. No log line SHALL contain the credential or any message text.
+The image SHALL start no chamber component when `CHAMBER_URL` is empty or unset, and SHALL say so in one pod-log line. When `CHAMBER_URL` is set and any other required input is missing (`CHAMBER_ACCOUNT`, the login credential in the bridge, the signer list in `app`), the component that lacks it SHALL open nothing, SHALL contact no server and SHALL name what is missing. The bridge SHALL stay alive and idle in both cases rather than exit: as a sidecar its exit would make the pod not ready and take the terminal's route down with it. No log line SHALL contain the credential or any message text.
 
 #### Scenario: Unconfigured pod
 - **WHEN** a pod starts with `CHAMBER_URL` empty
@@ -10,11 +10,11 @@ The image SHALL start no chamber component when `CHAMBER_URL` is empty or unset,
 
 #### Scenario: Credential missing
 - **WHEN** `CHAMBER_URL` is set and the credential file is absent or empty
-- **THEN** the bridge does not start, the log line names the credential file by path, and the im shows as not online
+- **THEN** the bridge opens no socket and asks the server nothing, stays alive, the log line names the credential file by path, and the im shows as not online
 
 ### Requirement: The login credential lives only in the bridge
 
-`chamber-bridge` SHALL be the only process that reads the login credential. It SHALL listen only on a Unix socket in a directory shared by `app` and the bridge and by nothing else, and SHALL open no TCP listener: an im pod runs with `hostNetwork: true`, so a loopback port is the node's loopback, reachable by every process in the node's network namespace and by every other host-network pod on that node (read on a throwaway cluster's im pod, 2026-11-19). It SHALL forward only the listed Matrix client paths the `chamber` client uses, adding the credential itself; any other path SHALL be refused. The `chamber` client in `app` SHALL reach the server only through the bridge. When the bridge runs inside `app` (no sidecar), its start line SHALL say that the credential is inside `app`.
+`chamber-bridge` SHALL be the only process that reads the login credential. It SHALL listen only on a Unix socket in a directory shared by `app` and the bridge and by nothing else, and SHALL open no TCP listener: an im pod runs with `hostNetwork: true`, so a loopback port is the node's loopback, reachable by every process in the node's network namespace and by every other host-network pod on that node (read on a throwaway cluster's im pod, 2026-11-19). It SHALL forward only the listed Matrix client paths the `chamber` client uses, adding the credential itself; any other path SHALL be refused without reaching the server. It SHALL NOT follow a redirect, since that would send the credential to another host, and SHALL forward nothing until the server has confirmed that the credential belongs to `CHAMBER_ACCOUNT`. When the server cannot be reached it SHALL give the client no HTTP answer, so that the client reports "cannot measure" and not a refusal. The `chamber` client in `app` SHALL reach the server only through the bridge. When the bridge runs inside `app` (no sidecar), its start line SHALL say that the credential is inside `app`.
 
 #### Scenario: The agent looks for the credential
 - **WHEN** the bridge runs as a sidecar and a process in `app` lists its environment and mounted files
@@ -24,13 +24,17 @@ The image SHALL start no chamber component when `CHAMBER_URL` is empty or unset,
 - **WHEN** a process in the pod asks the bridge for an admin or account-management path
 - **THEN** the bridge refuses and forwards nothing
 
+#### Scenario: The server is down
+- **WHEN** the server cannot be reached and a process in `app` runs `chamber whoami`
+- **THEN** the client exits 2 (cannot measure), not 1
+
 #### Scenario: From outside the pod
 - **WHEN** the bridge is running and the node's listening TCP sockets are listed
 - **THEN** none belongs to the bridge, on loopback or on any other address (positive control: the same listing shows ttyd's port)
 
 ### Requirement: Observe mode receives and stays silent
 
-With `CHAMBER_MODE=observe` (the default) the bridge SHALL connect and count what arrives, writing counts per room to the pod log, and SHALL NOT announce anything to the session, SHALL NOT show the im as online, and SHALL refuse to send. Assignments keep arriving through `~/workspace/inbox/` unchanged.
+With `CHAMBER_MODE=observe` (the default) the bridge SHALL connect and count what arrives, writing counts per room to the pod log, and SHALL NOT announce anything to the session, SHALL NOT show the im as online, and SHALL refuse to send. Every sync the bridge forwards or makes SHALL ask the server not to mark the account present: a sync is what shows a Matrix account as online. Assignments keep arriving through `~/workspace/inbox/` unchanged.
 
 #### Scenario: A request arrives in observe mode
 - **WHEN** a message naming the im is posted to its room

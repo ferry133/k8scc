@@ -1,0 +1,387 @@
+#!/usr/bin/env python3
+"""chamber-bridge — the only process in an im pod that holds the chamber login
+credential (openspec im-chamber-client, design D-b). Standard library only.
+
+The `chamber` client in the `app` container speaks plain HTTP to a Unix socket
+(CHAMBER_URL=unix:<path>); this program adds the credential and forwards the
+request to the server. It forwards only the paths the client uses. Everything
+else is answered 404 here and never reaches the server.
+
+It listens on the Unix socket and on nothing else. An im pod runs with
+hostNetwork, so a loopback port would be the node's loopback.
+
+What it stops is the credential being carried away. It does not stop a process
+in `app` from speaking as the im: whoever can open the socket can.
+
+Three start states, each one line in the pod log:
+  not configured     CHAMBER_URL is empty. Nothing is opened.
+  incomplete         CHAMBER_URL is set and something else is missing; the
+                     line names it. Nothing is opened.
+  started            the line gives the mode, the account, the socket, and
+                     which container holds the credential.
+In the first two the process stays alive and idle: as a sidecar, exiting would
+make the pod NotReady and take the terminal's route down with it.
+
+Modes (CHAMBER_MODE)
+  observe (default)  receives and counts; refuses to send; never shows online
+  deliver            sending is forwarded. Showing online needs the session's
+                     alive signal, which this version does not have yet, so
+                     the im stays not online in both modes.
+
+Pod log
+  chamber-bridge: …                 start line, counts per room, faults
+  chamber-status ts=… interval=… mode=… server=… rooms=… online=…
+                                    one line every CHAMBER_BEAT seconds. Every
+                                    field is always present; a reading that
+                                    could not be taken is `unmeasured`.
+No line carries the credential, a message's text or a sender.
+
+Configuration (environment)
+  CHAMBER_URL          https://… of the server. Empty = not configured.
+  CHAMBER_ACCOUNT      the im's account name (the localpart). Required.
+  CHAMBER_TOKEN_FILE   file holding the login credential (default /etc/chamber/token)
+  CHAMBER_MODE         observe | deliver (default observe)
+  CHAMBER_SOCKET       where to listen (default /run/chamber/bridge.sock)
+  CHAMBER_STATE_DIR    where the sync position is kept (default: the socket's directory)
+  CHAMBER_BEAT         seconds between status lines (default 20)
+  CHAMBER_CA           CA bundle for a privately signed server
+  CHAMBER_BRIDGE_IN_APP=1          say in the start line that the credential is inside app
+  CHAMBER_ALLOW_INSECURE_HTTP=1    accept an http:// server (the controls' fake only)
+"""
+import http.server, json, os, re, signal, socketserver, ssl, stat, sys, threading, time
+import urllib.error, urllib.parse, urllib.request
+
+SEG = r"[^/?#]+"
+P = "/_matrix/client/v3"
+# (method, path) pairs the `chamber` client uses. Nothing else is forwarded.
+ALLOWED = [(m, re.compile(p)) for m, p in (
+    ("GET", P + r"/account/whoami"),
+    ("GET", P + r"/joined_rooms"),
+    ("GET", P + r"/rooms/" + SEG + r"/state/m\.room\.name"),
+    ("GET", P + r"/rooms/" + SEG + r"/joined_members"),
+    ("GET", P + r"/presence/" + SEG + r"/status"),
+    ("GET", P + r"/rooms/" + SEG + r"/event/" + SEG),
+    ("GET", P + r"/rooms/" + SEG + r"/messages"),
+    ("GET", P + r"/sync"),
+    ("PUT", P + r"/rooms/" + SEG + r"/send/m\.room\.message/" + SEG),
+)]
+SEND = ALLOWED[-1][1]
+MAX_BODY = 1 << 20
+
+URL = TOK = CTX = OPENER = None
+MODE = "observe"
+ACCOUNT = ""
+ME = None                     # the server's answer to "who am I", once it matched ACCOUNT
+STATE = {"server": "unmeasured"}
+LOCK = threading.Lock()
+
+
+def log(msg):
+    print(msg, flush=True)
+
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    """A redirect is returned as it is. Following one would send the credential
+    to whatever host the answer names."""
+    def redirect_request(self, *a, **k):
+        return None
+
+
+def upstream(method, path, body=None, timeout=70):
+    """-> (status, bytes). status 0 = the server could not be reached; the
+    bytes are then the exception's type name, never its text."""
+    req = urllib.request.Request(URL + path, method=method, data=body,
+                                 headers={"Authorization": "Bearer " + TOK, "Content-Type": "application/json",
+                                          "User-Agent": "chamber-bridge/1"})
+    try:
+        with OPENER.open(req, timeout=timeout) as x:
+            return x.status, x.read()
+    except urllib.error.HTTPError as e:
+        try:
+            return e.code, e.read()
+        except Exception:
+            return e.code, b"{}"
+    except Exception as e:
+        return 0, type(e).__name__.encode()
+
+
+def upstream_json(method, path, timeout=70):
+    s, raw = upstream(method, path, timeout=timeout)
+    try:
+        d = json.loads(raw) if s else {}
+    except ValueError:
+        d = {}
+    return s, d if isinstance(d, dict) else {}
+
+
+def sync_path(query, own_timeout=None):
+    """The /sync path with presence forced off: a sync is what makes a Matrix
+    account show as online, and this im is online only by the alive signal."""
+    kept = [(k, v) for k, v in urllib.parse.parse_qsl(query, keep_blank_values=True) if k != "set_presence"]
+    if own_timeout is not None:
+        kept = [(k, v) for k, v in kept if k != "timeout"] + [("timeout", str(own_timeout))]
+    return P + "/sync?" + urllib.parse.urlencode(kept + [("set_presence", "offline")])
+
+
+def wait_seconds(query):
+    try:
+        ms = int(dict(urllib.parse.parse_qsl(query)).get("timeout", "0"))
+    except ValueError:
+        ms = 0
+    return min(max(ms, 0), 60000) / 1000 + 40
+
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    server_version = "chamber-bridge"
+    sys_version = ""
+
+    def answer(self, status, raw, ctype="application/json"):
+        self.send_response(status)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+
+    def refuse(self, status, code, why):
+        self.answer(status, json.dumps({"errcode": code, "error": why}).encode())
+
+    def handle_any(self):
+        method = self.command
+        path, _, query = self.path.partition("?")
+        if "#" in self.path or "//" in path or "/../" in path + "/" or "/./" in path + "/":
+            return self.refuse(404, "CHAMBER_NOT_FORWARDED", "this path is not forwarded")
+        if not any(m == method and rx.fullmatch(path) for m, rx in ALLOWED):
+            return self.refuse(404, "CHAMBER_NOT_FORWARDED", "this path is not forwarded")
+        body = None
+        if method == "PUT":
+            try:
+                n = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                n = -1
+            if n < 0 or n > MAX_BODY:
+                return self.refuse(413, "CHAMBER_TOO_LARGE", "request body too large or of unknown length")
+            body = self.rfile.read(n)
+            if MODE != "deliver":
+                return self.refuse(403, "CHAMBER_OBSERVE", "observe mode: this im does not send")
+        if ME is None:
+            # The account behind the credential has not been confirmed (yet, or it
+            # is someone else's). No answer at all reads as "cannot measure" in the
+            # client, which is what it is.
+            self.close_connection = True
+            return
+        if path == P + "/sync":
+            target, timeout = sync_path(query), wait_seconds(query)
+        else:
+            target, timeout = path + ("?" + query if query else ""), 70
+        status, raw = upstream(method, target, body, timeout)
+        if status == 0:
+            self.close_connection = True      # no answer: the client reports "cannot reach"
+            return
+        self.answer(status, raw)
+
+    do_GET = do_PUT = do_POST = do_DELETE = do_PATCH = do_HEAD = do_OPTIONS = handle_any
+
+    def address_string(self):                 # a Unix peer has no (host, port)
+        return "local"
+
+    def log_message(self, *a):                # paths carry room and event ids; nothing is logged per request
+        pass
+
+
+class Server(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
+    daemon_threads = True
+
+
+def printable(name):
+    return re.sub(r"[^\w.\-]", "_", name) or "_"
+
+
+def room_names():
+    """-> {room id: name} or None when it cannot be read."""
+    s, d = upstream_json("GET", P + "/joined_rooms")
+    if s != 200 or not isinstance(d.get("joined_rooms"), list):
+        return None
+    out = {}
+    for rid in d["joined_rooms"]:
+        s, n = upstream_json("GET", P + "/rooms/%s/state/m.room.name" % urllib.parse.quote(rid, safe=""))
+        out[rid] = n.get("name", rid) if s == 200 and isinstance(n.get("name"), str) else rid
+    return out
+
+
+def confirm_account():
+    """Ask the server who the credential is. -> 'ok' | 'unreachable' | 'refused'."""
+    global ME
+    s, d = upstream_json("GET", P + "/account/whoami")
+    if s == 0:
+        return "unreachable"
+    uid = d.get("user_id") if s == 200 else None
+    if not isinstance(uid, str) or not uid.startswith("@" + ACCOUNT + ":"):
+        if ME is not None or STATE.get("why") != (s, uid is not None):
+            log("chamber-bridge: forwarding is off — %s" % (
+                "the credential belongs to another account than CHAMBER_ACCOUNT" if uid else "the server refused the credential (http=%s)" % s))
+        STATE["why"] = (s, uid is not None)
+        ME = None
+        return "refused"
+    if ME is None:
+        log("chamber-bridge: the server confirms the account")
+    STATE.pop("why", None)
+    ME = uid
+    return "ok"
+
+
+def status_loop(beat):
+    while True:
+        server = confirm_account()
+        rooms = online = "unmeasured"
+        if server == "ok":
+            names = room_names()
+            if names is not None:
+                rooms = ",".join(sorted(printable(n) for n in names.values())) or "-"
+            s, d = upstream_json("GET", P + "/presence/%s/status" % urllib.parse.quote(ME, safe=""))
+            if s == 200 and isinstance(d.get("presence"), str):
+                online = "yes" if d["presence"] in ("online", "unavailable") else "no"
+        with LOCK:
+            STATE["server"] = server
+        log("chamber-status ts=%d interval=%g mode=%s server=%s rooms=%s online=%s" % (time.time(), beat, MODE, server, rooms, online))
+        time.sleep(beat)
+
+
+def addressed(event, me):
+    m = (event.get("content") or {}).get("m.mentions") or {}
+    return bool(m.get("room")) or me in (m.get("user_ids") or [])
+
+
+def receive_loop(state_dir, beat):
+    """Count what arrives, per room. The position is kept in a file and used
+    again after a restart: a repeated initial sync hands back a cached, stale
+    position (root reading, Synapse 1.165.0)."""
+    pos_file = os.path.join(state_dir, "sync-position")
+    try:
+        since = open(pos_file).read().strip() or None
+    except OSError:
+        since = None
+    names = {}
+    while True:
+        if ME is None:
+            time.sleep(beat)
+            continue
+        q = [("since", since)] if since else []
+        s, d = upstream_json("GET", sync_path(urllib.parse.urlencode(q), 30000 if since else 0), timeout=70)
+        if s != 200 or not isinstance(d.get("next_batch"), str):
+            if s == 400 and since:
+                log("chamber-bridge: the saved sync position was refused; starting from now")
+                since = None
+            time.sleep(beat)
+            continue
+        if since is None:
+            log("chamber-bridge: receiving from now (no saved position)")
+        else:
+            joined = (d.get("rooms") or {}).get("join") or {}
+            for rid in sorted(joined):
+                ev = ((joined[rid] or {}).get("timeline") or {}).get("events") or []
+                ev = [e for e in ev if isinstance(e, dict) and e.get("type") == "m.room.message" and e.get("sender") != ME]
+                mine = sum(1 for e in ev if addressed(e, ME))
+                if ev:
+                    if rid not in names:
+                        names = room_names() or names
+                    log("chamber-bridge: received room=%s for-me=%d other=%d" % (printable(names.get(rid, rid)), mine, len(ev) - mine))
+        since = d["next_batch"]
+        try:
+            tmp = pos_file + ".tmp"
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w") as f:
+                f.write(since)
+            os.replace(tmp, pos_file)
+        except OSError as e:
+            log("chamber-bridge: cannot save the sync position (%s)" % type(e).__name__)
+
+
+def idle(beat, line):
+    log(line)
+    while True:
+        log("chamber-status ts=%d interval=%g mode=unconfigured server=unmeasured rooms=unmeasured online=unmeasured" % (time.time(), beat))
+        time.sleep(beat)
+
+
+def main():
+    global URL, TOK, CTX, OPENER, MODE, ACCOUNT
+    # As a container's first process SIGTERM has no default action; without
+    # this the pod would wait out its whole grace period at every restart.
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+    if len(sys.argv) > 1:
+        print(__doc__)
+        sys.exit(0 if sys.argv[1] in ("-h", "--help") else 1)
+    env = os.environ.get
+    try:
+        beat = float(env("CHAMBER_BEAT") or 20)
+        if beat <= 0:
+            raise ValueError
+    except ValueError:
+        beat = 20.0
+    url = (env("CHAMBER_URL") or "").strip().rstrip("/")
+    if not url:
+        idle(beat, "chamber-bridge: not configured (CHAMBER_URL is empty) — nothing is opened")
+    missing = []
+    insecure = url.startswith("http://") and env("CHAMBER_ALLOW_INSECURE_HTTP") == "1"
+    if not (url.startswith("https://") or insecure):
+        missing.append("CHAMBER_URL must be https://")
+    ACCOUNT = (env("CHAMBER_ACCOUNT") or "").strip()
+    if not ACCOUNT:
+        missing.append("CHAMBER_ACCOUNT is not set")
+    MODE = (env("CHAMBER_MODE") or "observe").strip()
+    if MODE not in ("observe", "deliver"):
+        missing.append("CHAMBER_MODE must be observe or deliver")
+    tok_file = env("CHAMBER_TOKEN_FILE") or "/etc/chamber/token"
+    try:
+        tok = open(tok_file).read().strip()
+    except OSError:
+        tok = None
+    if tok is None:
+        missing.append("the credential file %s is absent or unreadable" % tok_file)
+    elif not tok:
+        missing.append("the credential file %s is empty" % tok_file)
+    sock = env("CHAMBER_SOCKET") or "/run/chamber/bridge.sock"
+    state_dir = env("CHAMBER_STATE_DIR") or os.path.dirname(sock)
+    for d in {os.path.dirname(sock), state_dir}:
+        if not (os.path.isdir(d) and os.access(d, os.W_OK)):
+            missing.append("the directory %s is absent or not writable" % d)
+    if os.path.lexists(sock) and not stat.S_ISSOCK(os.lstat(sock).st_mode):
+        missing.append("%s exists and is not a socket" % sock)
+    ca = env("CHAMBER_CA")
+    if ca and not os.path.isfile(ca):
+        missing.append("the CA file %s is absent" % ca)
+    if missing:
+        idle(beat, "chamber-bridge: incomplete — " + "; ".join(missing) + " — nothing is opened")
+
+    URL, TOK = url, tok
+    CTX = ssl.create_default_context(cafile=ca) if url.startswith("https://") else None
+    handlers = [NoRedirect()] + ([urllib.request.HTTPSHandler(context=CTX)] if CTX else [])
+    OPENER = urllib.request.build_opener(*handlers)
+
+    if os.path.lexists(sock):
+        os.unlink(sock)                       # a socket left by the previous run
+    old = os.umask(0o177)                     # the socket is 0600: its owner only
+    try:
+        srv = Server(sock, Handler)
+    finally:
+        os.umask(old)
+    log("chamber-bridge: started — mode=%s account=%s socket=%s — %s%s" % (
+        MODE, ACCOUNT, sock,
+        "the credential is inside app (no sidecar)" if env("CHAMBER_BRIDGE_IN_APP") == "1" else "the credential is in this container only",
+        " — insecure http accepted (test only)" if insecure else ""))
+    threading.Thread(target=status_loop, args=(beat,), daemon=True).start()
+    threading.Thread(target=receive_loop, args=(state_dir, beat), daemon=True).start()
+    try:
+        srv.serve_forever()
+    finally:
+        try:
+            os.unlink(sock)
+        except OSError:
+            pass
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        pass
