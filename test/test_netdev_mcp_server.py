@@ -1611,6 +1611,22 @@ class WriteClassA(WriteCase):
         with self.subTest(control="an AP reaches the token phase"):
             self.assertIn("token", self.token("restart_device"))
 
+    def test_gateway_port_power_cycle_refused(self):
+        # k8scc#71 FYI: the gateway check was on restart_device only, and class A's
+        # device verdict passes a gateway (it is not what the node is attached to)
+        self.read("get_devices")
+        out = self.run_tool("power_cycle_port", reason="x", switch_mac=GW, port=1)
+        self.assertIn("is the gateway", out)
+        self.assertNotIn('"token"', out)
+        self.assertEqual(self.h.fac.issues, {})
+        with self.subTest(case="a WAN address in the gateway's legacy ip: its type still refuses"):
+            next(d for d in self.h.fake.data["devices"] if d["mac"] == GW)["ip"] = "203.0.113.5"
+            out = self.run_tool("power_cycle_port", reason="x", switch_mac=GW, port=1)
+            self.assertIn("is the gateway", out)
+            self.assertNotIn('"token"', out)
+        with self.subTest(control="a port on a device that is not the gateway reaches the token phase"):
+            self.assertIn("token", self.token("power_cycle_port", switch_mac=AP, port=1))
+
     def test_attached_switch_refused_whole(self):
         self.read("get_devices")
         self.assertIn("attached", self.run_tool("restart_device", reason="x", mac=SW))
