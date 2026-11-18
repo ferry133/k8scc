@@ -115,6 +115,8 @@ jobs:
         run: test/chamber-controls.sh
       - name: Check the chamber socket and image-default controls
         run: python3 test/test_chamber_tools.py
+      - name: Check the chamber-bridge controls
+        run: python3 test/test_chamber_bridge.py
 
       # entrypoint.sh's D-Bus / GNOME Keyring startup (k8scc#19): every outcome
       # leaves its own `entrypoint:` line, and none stops the container. The

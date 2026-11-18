@@ -47,5 +47,7 @@ jobs:
         run: test/chamber-controls.sh
       - name: Check the chamber socket and image-default controls
         run: python3 test/test_chamber_tools.py
+      - name: Check the chamber-bridge controls
+        run: python3 test/test_chamber_bridge.py
       - name: Check the entrypoint secret-service controls
         run: test/entrypoint-controls.sh

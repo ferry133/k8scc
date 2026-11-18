@@ -306,6 +306,10 @@ COPY inbox-watch /usr/local/bin/inbox-watch
 # operator's Mac carries installed copies. Nothing in the image calls them yet.
 COPY chamber/chamber /usr/local/bin/chamber
 COPY chamber/directive-verify /usr/local/bin/directive-verify
+# The bridge: the one process that holds the chamber login credential. It is
+# meant to run as its own container (`command: ["chamber-bridge"]`), like the
+# MCP sidecars; entrypoint.sh does not start it.
+COPY chamber/chamber-bridge /usr/local/bin/chamber-bridge
 # The verifier's defaults in the image (tasks 2.3): the signer list and the
 # revoked list come from a mounted directory, and a `transcript:` pointer is
 # never looked up -- the person's transcripts are on another host.
@@ -323,7 +327,8 @@ RUN chmod +x /usr/local/bin/memory_mcp_server.py \
              /usr/local/bin/claude-session \
              /usr/local/bin/inbox-watch \
              /usr/local/bin/chamber \
-             /usr/local/bin/directive-verify
+             /usr/local/bin/directive-verify \
+             /usr/local/bin/chamber-bridge
 
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh

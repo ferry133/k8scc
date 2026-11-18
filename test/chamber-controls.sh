@@ -40,7 +40,7 @@ client()   { HOME="$tmp" python3 -I chamber/chamber "$@"; }
 verifier() { HOME="$tmp" python3 -I chamber/directive-verify "$@"; }
 
 echo "shipped"
-for f in chamber directive-verify; do
+for f in chamber directive-verify chamber-bridge; do
     check "chamber/$f exists and is not empty"    test -s "chamber/$f"
     check "chamber/$f is executable in the tree"  test -x "chamber/$f"
     check "Dockerfile copies $f to /usr/local/bin" \
@@ -54,6 +54,7 @@ check_not "control: a file nobody ships" \
 echo "start"
 rc 0 "chamber --help"            client --help
 rc 0 "directive-verify --help"   verifier --help
+rc 0 "chamber-bridge --help"     env HOME="$tmp" python3 -I chamber/chamber-bridge --help
 printf 'import nothing_here\n' > "$tmp/broken"
 rc 1 "control: a file that cannot start is seen" env HOME="$tmp" python3 -I "$tmp/broken"
 
