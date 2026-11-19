@@ -33,7 +33,9 @@ Modes (CHAMBER_MODE)
   deliver            sending is forwarded. The im shows online only while the
                      session's alive signal keeps arriving (chamber-watch, in
                      `app`, sends one every beat while a session exists that
-                     can act). No signal for three beats = not online. A
+                     can act). No signal for three beats, plus one round of
+                     the presence loop, = not online (at most 80 s at the
+                     default beat; 62 s measured on a bench server). A
                      running bridge, container or watcher is never enough.
 
 Local paths (answered here, never forwarded; used by chamber-watch)

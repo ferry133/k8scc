@@ -301,6 +301,7 @@ COPY netdev_mcp_server.py /usr/local/bin/netdev_mcp_server.py
 COPY auth0_login.py /usr/local/bin/auth0_login.py
 COPY claude-session /usr/local/bin/claude-session
 COPY inbox-watch /usr/local/bin/inbox-watch
+COPY session-keep /usr/local/bin/session-keep
 # The pane gate inbox-watch sources. It must sit next to it: without the file
 # the watcher refuses to start (and says so).
 COPY pane-gate /usr/local/bin/pane-gate
@@ -332,6 +333,7 @@ RUN chmod +x /usr/local/bin/memory_mcp_server.py \
              /usr/local/bin/auth0_login.py \
              /usr/local/bin/claude-session \
              /usr/local/bin/inbox-watch \
+             /usr/local/bin/session-keep \
              /usr/local/bin/chamber \
              /usr/local/bin/directive-verify \
              /usr/local/bin/chamber-bridge \

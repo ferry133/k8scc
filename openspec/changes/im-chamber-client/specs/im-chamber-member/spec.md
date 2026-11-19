@@ -46,11 +46,11 @@ With `CHAMBER_MODE=observe` (the default) the bridge SHALL connect and count wha
 
 ### Requirement: Online means a session that can act
 
-In `deliver` mode the im SHALL show as online only while `chamber-watch` reports that the tmux session `claude` exists, its foreground process is `claude`, and its pane reads as one of exactly two things: the idle, empty prompt (the shared pane gate), or a turn in progress (`esc to interrupt`). Every other pane — a login screen, a trust dialog, a one-time feature dialog, a permission prompt nobody answers, a capture that fails — SHALL NOT count: a detached `claude` was read stopped at a one-time dialog with its process alive (2026-11-19, tasks 1.2). When that report stops for three beat intervals, or cannot be made, the bridge SHALL show the im as not online. A running container, bridge or watcher SHALL NOT by itself count as online.
+In `deliver` mode the im SHALL show as online only while `chamber-watch` reports that the tmux session `claude` exists, its foreground process is `claude`, and its pane reads as one of exactly two things: the idle, empty prompt (the shared pane gate), or a turn in progress (`esc to interrupt`). Every other pane — a login screen, a trust dialog, a one-time feature dialog, a permission prompt nobody answers, a capture that fails — SHALL NOT count: a detached `claude` was read stopped at a one-time dialog with its process alive (2026-11-19, tasks 1.2). When that report stops, or cannot be made, the bridge SHALL show the im as not online no later than three beat intervals plus one round of its presence loop (a round is one beat, capped at 20 s): 80 s at the default beat of 20 s. Measured on a bench server at that beat: 62 s (k8scc#79). A running container, bridge or watcher SHALL NOT by itself count as online.
 
 #### Scenario: The session ends
 - **WHEN** the `claude` process exits while the pod keeps running
-- **THEN** within three beat intervals the im shows as not online, and a sender's `chamber send` to it reports "left in the room, recipient not online"
+- **THEN** within three beat intervals plus one presence round the im shows as not online, and a sender's `chamber send` to it reports "left in the room, recipient not online"
 
 #### Scenario: The session is back
 - **WHEN** a session exists again and reaches its prompt
