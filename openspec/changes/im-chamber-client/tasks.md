@@ -46,6 +46,7 @@
   - **做了（同上）**：`test/test_chamber_bridge.py` 71 格（含 `CHAMBER_URL_FILE` 的 8 格、驗收四件的 8 格）：bridge 以出貨的樣子當行程跑，對一台手寫的假伺服器，真的 `chamber` 用戶端經 socket 走。16 條白名單外的路徑全是 404 且伺服器一條都沒看到；沒有 TCP listener（`lsof`／`ss`，兩者都沒有 ⇒ 量不到 ⇒ 不算綠；正對照是同一份列表看得到假伺服器的 port）；憑證不在任何回應與 log；`observe` 下 `chamber send` 回 1；伺服器連不上 ⇒ 用戶端回 2（兩格：從沒連上、確認過之後才斷）。十五個變異各自轉紅。**第一輪變異抓到兩個對照的毛病**：「每個 sync 都要求不在線」那格在 bridge 自己還沒 sync 時只讀到測試自己送的那一個（時序，乾淨的 run 剛好都過）；「連不上 ⇒ 2」那格被「帳號還沒確認」的路徑遮住，變異存活——兩格都改了
   - **假伺服器是照用戶端用到的路徑手寫的，不是 Matrix**：這些格量的是 bridge，不是協定
 - [ ] 3.3 在沒有 sidecar 的 pod 上由 `entrypoint.sh` 起（只給拋棄式叢集），啟動行說「憑證在 app 內」
+  - **2026-11-19 08:53 的狀態（`k8scc-0f [7c5b85]`）：可能不需要了，沒做**。當初寫這一項是因為 jg-base 還沒有 sidecar；jg-base#251 已合併，component 以 `command: ["chamber-bridge"]` 起一個 container。bridge 本身認得 `CHAMBER_BRIDGE_IN_APP=1`（啟動行會說憑證在 app 內，有格），但 `entrypoint.sh` 沒有起它的路徑。第一次走通若直接用 jg-base 的 component，這一項就劃掉；要不要留由第一次走通的人定
 
 ## 4. 在線與常駐（root 6.3 的另一半、6.4）
 
@@ -74,6 +75,7 @@
   - **這條規則對房間命名有要求**：root 的房間名若含空白或非 ASCII，im 收到的就是那句固定的話而不是房間名。請 root 確認命名規則落在這個字元集裡
   - **待處理的已知缺口**：「還沒宣告」的數目在 bridge 的記憶體裡，bridge 重啟就歸零；而 sync 位置檔在 emptyDir，pod 重啟後會從舊位置重算——兩者合起來，pod 重啟後可能重複宣告或漏宣告。訊息本身都還在房間裡（`chamber read` 讀得到），所以是多一行或少一行提醒，不是掉訊息。拋棄式叢集走通之前要定：位置檔放 PVC，或重啟後一律「從現在開始」
 - [ ] 5.3 回程（design D-f）：四個詞、`--reply-to`、並存期間「從哪裡來回哪裡」；`observe` 下不送
+  - **2026-11-19 08:53 的狀態：各部分都在了，這一項留到 pod 上走一次才勾**。`--reply-to` 是用戶端原有的；四個詞與「從哪裡來回哪裡」寫在 `im-policy.md`「chamber」一節（6.1，有逐句的對照）；`observe` 下 bridge 拒絕 `send`（3.2 的格，bench 上也量過）、政策寫明那時不依房間裡的訊息動作。**沒有的**是一次真的來回：FAC 送、im 讀、回 `ack`、做、回 `report`
 
 ## 6. policy 與文件（root 6.6）
 
@@ -85,7 +87,8 @@
     - **第二輪冷讀（2026-11-19 08:49，改完的版本，七則訊息）**：七則的做與不做都與預期一致，包括新加的三格——沒簽章的人的一般類請求照做、`--to all` 算點名、點名別人的訊息不動；房間來的重啟請求這次讀成「唯讀查看後回 `blocked`」（第一輪讀成依自己的診斷去做）。它再列的缺口裡改了三處小的（「職責」含查看與診斷；先看再回的順序；一則請求部分能做時第一個字用哪一個），其餘都是 k8scc#82 那一題的內容，已貼到那張單
     - **冷讀的限制**：只跑一次、一個模型、五則訊息；它回答的是「讀得懂嗎」，不是「im 真的會這樣做」
   - **多寫的一句**（初稿沒列）：chamber 的登入憑證不是 im 的，不要去讀，**包括用 `kubectl` 讀那個 Secret**——sidecar 擋不住 cluster-admin（design D-b 的更正），所以這一格只能靠政策
-- [ ] 6.2 `CLAUDE.md`：新節與 Runtime Configuration 表的 env；`operator-inbox` 的 delta 對應的文字
+- [x] 6.2 `CLAUDE.md`：新節與 Runtime Configuration 表的 env；`operator-inbox` 的 delta 對應的文字
+  - **做了（隨 #74–#81 各自的 PR）**：「Chamber tools」一節（正本、bridge、`chamber-watch`、`session-keep`、政策、映像預設）與 Runtime Configuration 表的 `CHAMBER_*`、`SESSION_KEEP*`；inbox 那一節補了 `pane-gate`。`operator-inbox` 的 delta 是 #72 起草時就有的，沒有再動
 - [x] 6.3 （兩輪，見 6.1）冷讀：一個沒讀過 root 的 session 只憑 `im-policy.md`，回答四則訊息（一般／保留有指令／保留而推導超出／人沒簽章的破壞性請求）做還是不做
 
 ## 7. 整體 controls（root 6.7；拋棄式叢集）
