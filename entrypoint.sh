@@ -110,4 +110,10 @@ if command -v chamber-watch >/dev/null 2>&1; then
     chamber-watch &
 fi
 
+# Keep a session running with nobody at the terminal (openspec
+# im-chamber-client 4.3). Off unless SESSION_KEEP=1; then it says so and exits.
+if command -v session-keep >/dev/null 2>&1; then
+    session-keep &
+fi
+
 exec ttyd "${TTYD_ARGS[@]}" /usr/local/bin/claude-session

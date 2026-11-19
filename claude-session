@@ -10,7 +10,7 @@
 # 5. Configure im's apps repo (if IM_APPS_REPO and its write key are both here):
 #    ssh alias + git identity, and git/sops into the permission profile
 # 6. Announce ~/workspace/inbox/ if it holds anything unread
-# 7. exec tmux → claude
+# 7. exec tmux → claude (detached, without 6, when session-keep runs it)
 # CLAUDE_USER_ID is set by the pod environment (oauth2-proxy handles auth externally)
 
 # HOME is /home/claude in the image (Dockerfile pins it); the fallback only
@@ -350,6 +350,16 @@ if configure_apps_repo "${CLAUDE_HOME}"; then
     if ! merge_permissions "${CLAUDE_HOME}/.claude/settings.json" "${APPS_ALLOW[@]}"; then
         echo "⚠ settings.json 的 git/sops permission 設定沒有寫入（見上一行）" >&2
     fi
+fi
+
+# session-keep starts the session with nobody at a terminal (openspec
+# im-chamber-client 4.3): the same set-up as above, then a detached session
+# and no greeting, no inbox pause. -x/-y because a detached session has no
+# client to take its size from. If a session appeared in the meantime, leave
+# it alone.
+if [ "${CLAUDE_SESSION_DETACHED:-}" = 1 ]; then
+    tmux has-session -t "=claude" 2>/dev/null && exit 0
+    exec tmux -u new-session -d -s claude -x 200 -y 50 -- claude
 fi
 
 echo ""

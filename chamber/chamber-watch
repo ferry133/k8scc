@@ -15,7 +15,8 @@
 #        a turn in progress (`turn running`).
 #    Anything else -- a login screen, a trust dialog, a one-time feature
 #    dialog, a permission prompt nobody answers, a capture that fails -- sends
-#    nothing, and the bridge shows the im as not online after three beats.
+#    nothing, and the bridge shows the im as not online after three beats
+#    plus one of its own rounds (80 s at the default beat; 62 s was measured).
 #    A detached `claude` was read stopped at a one-time dialog with its
 #    process alive (2026-11-19, tasks 1.2): the process alone proves nothing.
 #

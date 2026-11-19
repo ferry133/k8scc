@@ -1,0 +1,84 @@
+#!/usr/bin/env bash
+#
+# session-keep -- keep the tmux session `claude` running without anyone at
+# the ttyd (openspec im-chamber-client, design D-d; tasks 4.3). Off unless
+# SESSION_KEEP=1.
+#
+# Why: an im is meant to be online whenever its pod is up (root R20), and
+# "online" means a session that can act (chamber-watch). Until now a session
+# existed only after someone opened the ttyd.
+#
+# Every SESSION_KEEP_INTERVAL seconds (default 30): when the tmux session
+# `claude` does not exist, it is started the way the ttyd starts it -- through
+# claude-session, so the MCP servers and the permission profile are set up the
+# same -- but detached. A ttyd connection afterwards attaches to that same
+# session (claude-session uses `new-session -A`).
+#
+# - It reads no message and is started by none. A session is kept because the
+#   pod is up, never because something arrived (ferry133, 2026-11-15: no
+#   message starts a session). With SESSION_KEEP off nothing here runs.
+# - It does not judge whether the session reached its prompt. A detached
+#   `claude` was read stopped at a one-time dialog with its process alive
+#   (2026-11-19, tasks 1.2). That shows up where it should: chamber-watch
+#   sends no alive signal and logs the pane gate's reason, and the im is not
+#   online.
+# - It never kills or replaces a session that exists.
+# - ⚠ It also changes the inbox channel: with a session always there,
+#   inbox-watch announces an assignment with nobody at the ttyd.
+#
+# SESSION_KEEP_TICKS=N runs N rounds and exits (the controls use it, with a
+# fake `sleep`). Started by entrypoint.sh in the background; writes to stderr.
+
+set -u
+
+keep="${SESSION_KEEP:-}"
+interval="${SESSION_KEEP_INTERVAL:-30}"
+ticks="${SESSION_KEEP_TICKS:-}"
+session=claude
+
+if [ "$keep" != 1 ]; then
+    echo "session-keep: SESSION_KEEP is not 1, off — a session exists only after someone opens the terminal" >&2
+    exit 0
+fi
+case "$interval" in ''|*[!0-9]*|0) echo "session-keep: SESSION_KEEP_INTERVAL '$interval' is not a positive whole number, not started" >&2; exit 0 ;; esac
+case "$ticks" in *[!0-9]*) echo "session-keep: SESSION_KEEP_TICKS '$ticks' is not a whole number, not started" >&2; exit 0 ;; esac
+if ! command -v claude-session >/dev/null 2>&1; then
+    echo "session-keep: claude-session is not on PATH, not started" >&2
+    exit 0
+fi
+
+failed=""   # the last failure written to the log, so a pod that cannot start a session says so once, not every round
+
+tick() {
+    tmux has-session -t "=$session" 2>/dev/null && { failed=""; return 0; }
+    local out rc
+    out=$(CLAUDE_SESSION_DETACHED=1 claude-session </dev/null 2>&1); rc=$?
+    if [ "$rc" -eq 0 ] && tmux has-session -t "=$session" 2>/dev/null; then
+        echo "session-keep: no session, started one (detached)" >&2
+        failed=""
+    else
+        local why="claude-session ended rc=${rc} and there is still no session"
+        if [ "$why" != "$failed" ]; then
+            echo "session-keep: could not start a session: ${why}" >&2
+            # its own words, minus anything that looks like it came from a prompt
+            printf '%s\n' "$out" | tail -n 5 | LC_ALL=C tr -c '[:print:]\n\200-\377' '?' | sed 's/^/session-keep:   | /' >&2
+            failed="$why"
+        fi
+    fi
+}
+
+if [ -n "$ticks" ]; then
+    i=0
+    while [ "$i" -lt "$ticks" ]; do
+        tick
+        i=$((i + 1))
+        [ "$i" -lt "$ticks" ] && sleep "$interval"
+    done
+    exit 0
+fi
+
+echo "session-keep: keeping the session '${session}' running, checked every ${interval}s" >&2
+while :; do
+    tick
+    sleep "$interval"
+done

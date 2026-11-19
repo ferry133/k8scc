@@ -55,5 +55,7 @@ jobs:
         run: python3 test/test_chamber_bridge.py
       - name: Check the chamber-watch controls
         run: test/chamber-watch-controls.sh
+      - name: Check the session-keep controls
+        run: test/session-keep-controls.sh
       - name: Check the entrypoint secret-service controls
         run: test/entrypoint-controls.sh
