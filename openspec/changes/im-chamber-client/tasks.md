@@ -65,7 +65,9 @@
   - **沒量**：新映像裡 `inbox-watch` 真的找得到 `/usr/local/bin/pane-gate`（讀的：`BASH_SOURCE` 在經 PATH 執行時是完整路徑）。**這是生產 im 現在就在跑的元件**，所以 bump 到含這一顆的映像之後，要在拋棄式叢集的 pod log 確認啟動行是 `watching …` 而不是 `the pane gate is missing`
 - [x] 5.2 `chamber-watch` 的宣告（design D-e）與 controls（閒置時宣告一次、permission prompt 時不打字、點名別人的不宣告、送失敗不標記）
   - **做了（同上）**：bridge 在 `deliver` 下按房間記「點名我或 all、還沒宣告」的數目（`GET /bridge/pending`，一行一間 `<數目> <房間>`，沒有內文與寄件人；`observe` 下永遠是空的）。`chamber-watch` 在 pane 閒置時一間打一行，**每打一行之前重驗一次閘門**（上一行會開始一個回合），打成功才 `POST /bridge/announced`，以數目扣而不是清空（讀清單之後才到的訊息不會被吃掉）。session 太新（`CHAMBER_WATCH_SETTLE`，預設 30 s）不打
-  - controls：`test/chamber-watch-controls.sh` 71 格（假 tmux／sleep／curl，pane 樣本是從 `inbox-watch` 的對照裡抽出來的同一批）；`test/test_chamber_bridge.py` 71 → 95 格，其中 5 格是**真的 `chamber-watch` 對真的 bridge**。變異：`chamber-watch` 十一個、bridge 新增的部分八個，各自轉紅。**有一個第一輪存活**：拿掉「閒置才宣告」的外層判斷仍全綠，因為每一行前的重驗擋住了同一件事——兩道是同一個前提；補了一格讓外層有自己的對照（跑回合時連清單都不問）
+  - controls：`test/chamber-watch-controls.sh` 84 格（假 tmux／sleep／curl，pane 樣本是從 `inbox-watch` 的對照裡抽出來的同一批）；`test/test_chamber_bridge.py` 71 → 100 格，其中 7 格是**真的 `chamber-watch` 對真的 bridge**。變異：`chamber-watch` 十一個、bridge 新增的部分八個，各自轉紅。**有一個第一輪存活**：拿掉「閒置才宣告」的外層判斷仍全綠，因為每一行前的重驗擋住了同一件事——兩道是同一個前提；補了一格讓外層有自己的對照（跑回合時連清單都不問）
+  - **房間名不能帶話（2026-11-19 08:15；提交後的自動安全檢查指出，成立）**：宣告那一行會被 agent 當成輸入讀，而房間名是伺服器上設的。第一版只把非文字字元換成底線——沒限長度、Unicode 字母照過、`chamber-watch` 完全信 bridge 給的名字，而且換過的名字 `chamber read` 也用不了。現在：**名字本身是 1–64 個 `A-Z a-z 0-9 . _ -` 才印名字**，bridge 與 `chamber-watch` 各驗一次；其餘的房間合併成一行固定的句子（不含任何來自伺服器的字），請 agent 自己跑 `chamber rooms`。pod log 與狀態行裡的房間名也改成 ASCII、最多 64 個字元（log 也有 agent 在讀）。格：`chamber-watch` 71 → 84、bridge 95 → 100；五個變異，四個轉紅，**一個存活並照實留著**：`typeable` 裡的 `LC_ALL=C` 拿掉後在 bash 5.3 上仍全綠（那裡範圍預設就是 ASCII），它是給舊 shell 的保險，沒有能鑑別它的格
+  - **這條規則對房間命名有要求**：root 的房間名若含空白或非 ASCII，im 收到的就是那句固定的話而不是房間名。請 root 確認命名規則落在這個字元集裡
   - **待處理的已知缺口**：「還沒宣告」的數目在 bridge 的記憶體裡，bridge 重啟就歸零；而 sync 位置檔在 emptyDir，pod 重啟後會從舊位置重算——兩者合起來，pod 重啟後可能重複宣告或漏宣告。訊息本身都還在房間裡（`chamber read` 讀得到），所以是多一行或少一行提醒，不是掉訊息。拋棄式叢集走通之前要定：位置檔放 PVC，或重啟後一律「從現在開始」
 - [ ] 5.3 回程（design D-f）：四個詞、`--reply-to`、並存期間「從哪裡來回哪裡」；`observe` 下不送
 

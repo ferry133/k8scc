@@ -41,6 +41,11 @@ Local paths (answered here, never forwarded; used by chamber-watch)
   GET  /bridge/pending     one line per room, "<count> <room>": messages naming
                            this im or all that the session was not yet told about.
                            Empty in observe mode. No text, no sender.
+                           The room's name is given only when the name itself is
+                           1-64 of A-Z a-z 0-9 . _ - ; any other room is counted
+                           under "-". That line gets typed into the agent's
+                           session, and a room name is set at the server, so it
+                           is not allowed to carry words.
   POST /bridge/announced   body in the same lines: these were announced
 
 Pod log
@@ -212,9 +217,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 BEAT_AT[0] = time.monotonic()
             return self.answer(200, (MODE + "\n").encode(), "text/plain")
         if (method, path) == ("GET", "/bridge/pending"):
+            rows = {}
             with LOCK:
-                rows = sorted((printable(NAMES.get(rid, rid)), n) for rid, n in PENDING.items() if n > 0)
-            return self.answer(200, "".join("%d %s\n" % (n, name) for name, n in rows).encode(), "text/plain")
+                for rid, n in PENDING.items():
+                    if n > 0:
+                        rows[label(rid)] = rows.get(label(rid), 0) + n
+            return self.answer(200, "".join("%d %s\n" % (rows[k], k) for k in sorted(rows)).encode(), "text/plain")
         if (method, path) == ("POST", "/bridge/announced"):
             try:
                 n = int(self.headers.get("Content-Length") or 0)
@@ -230,10 +238,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             with LOCK:
                 # by count, not "clear the room": a message that arrived after
                 # the watcher read the list stays pending
-                for rid in list(PENDING):
-                    name = printable(NAMES.get(rid, rid))
-                    if name in done:
-                        PENDING[rid] = max(0, PENDING[rid] - done[name])
+                for rid in sorted(PENDING):
+                    took = min(PENDING[rid], done.get(label(rid), 0))
+                    PENDING[rid] -= took
+                    if took:
+                        done[label(rid)] -= took
             return self.answer(200, b"ok\n", "text/plain")
         return self.refuse(404, "CHAMBER_NOT_FORWARDED", "this path is not forwarded")
 
@@ -250,8 +259,20 @@ class Server(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
     daemon_threads = True
 
 
+TYPEABLE = re.compile(r"[A-Za-z0-9._-]{1,64}", re.ASCII)
+
+
+def label(rid):
+    """What may stand for this room in a line typed into the session."""
+    name = NAMES.get(rid, "")
+    return name if TYPEABLE.fullmatch(name) else "-"
+
+
 def printable(name):
-    return re.sub(r"[^\w.\-]", "_", name) or "_"
+    """A room name for the pod log and the status line: ASCII, no spaces, at
+    most 64. The log is read by agents too, so a name may not carry a sentence
+    there either."""
+    return re.sub(r"[^A-Za-z0-9._-]", "_", name)[:64] or "_"
 
 
 def room_names():

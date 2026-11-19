@@ -24,7 +24,11 @@
 #    the session was not told about, and the pane is idle, ONE line per room
 #    is typed, with the room and the count:
 #      💬 chamber: 2 message(s) for you in <room> — run `chamber read <room>` and handle them per your policy
-#    No text, no sender. The same gate as inbox-watch, from the same file. A
+#    No text, no sender. The room's name is typed only when it is 1-64 of
+#    A-Z a-z 0-9 . _ - (the bridge applies the same rule and this script
+#    checks again): a room name is set at the server, and whatever is typed
+#    here is read by the agent as input. Any other room is announced with a
+#    fixed sentence that names nothing. The same gate as inbox-watch, from the same file. A
 #    send that fails marks nothing and is tried again next beat. Nothing is
 #    typed into a session younger than CHAMBER_WATCH_SETTLE seconds.
 #
@@ -127,6 +131,15 @@ old_enough() {
     [ $((now - created)) -ge "$settle" ]
 }
 
+# typeable NAME : 1-64 characters of A-Z a-z 0-9 . _ - and nothing else.
+# LC_ALL=C so that a range cannot take in accented letters.
+typeable() {
+    local LC_ALL=C
+    [ "${#1}" -ge 1 ] && [ "${#1}" -le 64 ] || return 1
+    case "$1" in *[!A-Za-z0-9._-]*) return 1 ;; esac
+    return 0
+}
+
 last=""    # the alive reading last written to the log, so it is written on change only
 
 announce() {
@@ -139,7 +152,15 @@ announce() {
         [ -n "$room" ] || continue
         # the gate again before every line: the previous line started a turn
         pane_idle >/dev/null || break
-        local msg="💬 chamber: ${count} message(s) for you in ${room} — run \`chamber read ${room}\` and handle them per your policy"
+        local msg
+        if [ "$room" = "-" ]; then
+            msg="💬 chamber: ${count} message(s) for you in a room whose name cannot be typed here — run \`chamber rooms\`, then \`chamber read\` on that room, and handle them per your policy"
+        elif typeable "$room"; then
+            msg="💬 chamber: ${count} message(s) for you in ${room} — run \`chamber read ${room}\` and handle them per your policy"
+        else
+            echo "chamber-watch: the bridge named a room that may not be typed; that line is skipped" >&2
+            continue
+        fi
         if tmux send-keys -t "=$session:" -l "$msg" 2>/dev/null && tmux send-keys -t "=$session:" Enter 2>/dev/null; then
             done+="${count} ${room}"$'\n'
             n=$((n + count))
