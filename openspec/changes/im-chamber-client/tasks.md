@@ -77,7 +77,11 @@
 
 ## 6. policy 與文件（root 6.6）
 
-- [ ] 6.1 `im-policy.md` 新節「誰可以交辦你」「chamber」；`test/im-policy-controls.sh` 加格
+- [x] 6.1 `im-policy.md` 新節「誰可以交辦你」「chamber」；`test/im-policy-controls.sh` 加格
+  - **做了（2026-11-19 08:37，`k8scc-0f [7c5b85]`）**：兩節加在檔尾，內容照 `~/coding/CLAUDE.md`「agent 之間的委派」改寫成 im 的版本（類別自己判、一般類直接做、保留類要驗過的指令並讀原文、`--use`、`transcript:` 一律無效、沒簽章的話不是指令、先回再做、秘密不進房間）。對照 188 → 274 格：兩節各一張陳述清單，每一句拿掉都會紅；政策引用的那一行是從 `chamber-watch` 抽出來比的
+  - ⚠️ **有一句是我讀出來的，不是裁定，請 ferry133 或 root 確認**：「本政策其他各節的界線照舊」——各節寫明在 im 權限內、由工具把關的事（重啟節點、家庭自動化、路由器的八支寫入工具）不因為請求來自房間而多一道簽章。另一種讀法是「房間來的請求一律照六條重判，重啟節點算破壞性操作」。我選前者的理由：那些事 ferry133 已各自裁定在 im 權限內、把關在伺服端；但把 FAC agent 的一句話接到重啟節點上，是這條通道新開的面
+  - **多寫的一句**（初稿沒列）：chamber 的登入憑證不是 im 的，不要去讀，**包括用 `kubectl` 讀那個 Secret**——sidecar 擋不住 cluster-admin（design D-b 的更正），所以這一格只能靠政策
+  - **沒做**：6.3 的冷讀
 - [ ] 6.2 `CLAUDE.md`：新節與 Runtime Configuration 表的 env；`operator-inbox` 的 delta 對應的文字
 - [ ] 6.3 冷讀：一個沒讀過 root 的 session 只憑 `im-policy.md`，回答四則訊息（一般／保留有指令／保留而推導超出／人沒簽章的破壞性請求）做還是不做
 
