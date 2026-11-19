@@ -56,6 +56,12 @@ Pod log
                                     one line every CHAMBER_BEAT seconds. Every
                                     field is always present; a reading that
                                     could not be taken is `unmeasured`.
+                                    `rooms` is all or nothing: one name that
+                                    could not be read makes it `unmeasured`.
+  chamber-bridge: <reading> (<why>) one line when a reading starts to fail or
+                                    fails in another way: the exception's type
+                                    (URLError/gaierror = the name did not
+                                    resolve) or http=<status>. Never its text.
                                     `online` is what the server answers when
                                     this account asks for its own presence,
                                     not this program's opinion of itself.
@@ -133,16 +139,46 @@ def upstream(method, path, body=None, timeout=70):
         except Exception:
             return e.code, b"{}"
     except Exception as e:
-        return 0, type(e).__name__.encode()
+        return 0, kind(e).encode()
+
+
+def kind(e):
+    """An exception's type name, never its text. urllib wraps what went wrong
+    while connecting in URLError, and that name alone does not tell a name that
+    does not resolve from a refused connection or a certificate that fails, so
+    the wrapped type is named too: URLError/gaierror."""
+    name = type(e).__name__
+    inner = getattr(e, "reason", None)
+    if isinstance(e, urllib.error.URLError) and isinstance(inner, BaseException):
+        name += "/" + type(inner).__name__
+    return re.sub(r"[^A-Za-z0-9_/]", "_", name)[:80]
 
 
 def upstream_json(method, path, timeout=70):
+    """-> (status, dict, why). why is for the log when the answer is not the
+    one wanted: the exception's type when nothing answered, else the status."""
     s, raw = upstream(method, path, timeout=timeout)
     try:
         d = json.loads(raw) if s else {}
     except ValueError:
         d = {}
-    return s, d if isinstance(d, dict) else {}
+    why = "http=%d" % s if s else raw.decode("ascii", "replace")
+    return s, d if isinstance(d, dict) else {}, why
+
+
+SAID = {}                     # reading -> the fault last written to the log for it
+
+
+def note(what, why, back=None):
+    """One line when a reading starts to fail or fails in another way, none
+    while it keeps failing the same way. why=None: it was read."""
+    if SAID.get(what) == why:
+        return
+    SAID[what] = why
+    if why is not None:
+        log("chamber-bridge: %s (%s)" % (what, why))
+    elif back:
+        log("chamber-bridge: %s" % back)
 
 
 def sync_path(query, own_timeout=None):
@@ -278,23 +314,36 @@ def printable(name):
 
 
 def room_names():
-    """-> {room id: name} or None when it cannot be read."""
-    s, d = upstream_json("GET", P + "/joined_rooms")
+    """-> ({room id: name}, None), or (None, why) when any part of it could not
+    be read. A room that has no name (the server answers 404 M_NOT_FOUND for
+    its name) stands under its id. A name request that failed is not that: the
+    first version put the id there as well, so one lost request printed
+    `rooms=<an id>` and read as "this im is in a room it should not be in"
+    (measured in a pod whose DNS failed now and then, k8scc#84). One name that
+    cannot be read makes the whole list unread."""
+    s, d, why = upstream_json("GET", P + "/joined_rooms")
     if s != 200 or not isinstance(d.get("joined_rooms"), list):
-        return None
+        return None, why
     out = {}
     for rid in d["joined_rooms"]:
-        s, n = upstream_json("GET", P + "/rooms/%s/state/m.room.name" % urllib.parse.quote(rid, safe=""))
-        out[rid] = n.get("name", rid) if s == 200 and isinstance(n.get("name"), str) else rid
-    return out
+        s, n, why = upstream_json("GET", P + "/rooms/%s/state/m.room.name" % urllib.parse.quote(rid, safe=""))
+        if s == 200 and isinstance(n.get("name"), str):
+            out[rid] = n["name"]
+        elif s == 404 and n.get("errcode") == "M_NOT_FOUND":
+            out[rid] = rid
+        else:
+            return None, why
+    return out, None
 
 
 def confirm_account():
     """Ask the server who the credential is. -> 'ok' | 'unreachable' | 'refused'."""
     global ME
-    s, d = upstream_json("GET", P + "/account/whoami")
+    s, d, why = upstream_json("GET", P + "/account/whoami")
     if s == 0:
+        note("the server cannot be reached", why)
         return "unreachable"
+    note("the server cannot be reached", None, "the server answers again")
     uid = d.get("user_id") if s == 200 else None
     if not isinstance(uid, str) or not uid.startswith("@" + ACCOUNT + ":"):
         if ME is not None or STATE.get("why") != (s, uid is not None):
@@ -315,12 +364,15 @@ def status_loop(beat):
         server = confirm_account()
         rooms = online = "unmeasured"
         if server == "ok":
-            names = room_names()
+            names, why = room_names()
             if names is not None:
                 rooms = ",".join(sorted(printable(n) for n in names.values())) or "-"
-            s, d = upstream_json("GET", P + "/presence/%s/status" % urllib.parse.quote(ME, safe=""))
+            note("the rooms could not be read", why)
+            s, d, why = upstream_json("GET", P + "/presence/%s/status" % urllib.parse.quote(ME, safe=""))
             if s == 200 and isinstance(d.get("presence"), str):
                 online = "yes" if d["presence"] in ("online", "unavailable") else "no"
+                why = None
+            note("this account's presence could not be read", why)
         with LOCK:
             STATE["server"] = server
         log("chamber-status ts=%d interval=%g mode=%s server=%s rooms=%s online=%s" % (time.time(), beat, MODE, server, rooms, online))
@@ -379,7 +431,7 @@ def receive_loop(state_dir, beat):
             time.sleep(beat)
             continue
         q = [("since", since)] if since else []
-        s, d = upstream_json("GET", sync_path(urllib.parse.urlencode(q), 30000 if since else 0), timeout=70)
+        s, d, _ = upstream_json("GET", sync_path(urllib.parse.urlencode(q), 30000 if since else 0), timeout=70)
         if s != 200 or not isinstance(d.get("next_batch"), str):
             if s == 400 and since:
                 log("chamber-bridge: the saved sync position was refused; starting from now")
@@ -396,7 +448,7 @@ def receive_loop(state_dir, beat):
                 mine = sum(1 for e in ev if addressed(e, ME))
                 if ev:
                     if rid not in names:
-                        names = room_names() or names
+                        names = room_names()[0] or names
                     log("chamber-bridge: received room=%s for-me=%d other=%d" % (printable(names.get(rid, rid)), mine, len(ev) - mine))
                     if MODE == "deliver" and mine:
                         with LOCK:
