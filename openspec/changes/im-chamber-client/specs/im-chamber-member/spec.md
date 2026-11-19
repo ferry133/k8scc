@@ -74,11 +74,15 @@ With `SESSION_KEEP=1` the image SHALL start the tmux session `claude` at pod sta
 
 ### Requirement: A running, idle session is told that messages are waiting
 
-In `deliver` mode, when messages naming the im or `all` have arrived that the session has not been told about, `chamber-watch` SHALL type one line into the session naming the room and the count, under the same pane gate as `inbox-watch` (one shared implementation). The line SHALL NOT contain message text or sender. A message is announced once; a send that fails marks nothing.
+In `deliver` mode, when messages naming the im or `all` have arrived that the session has not been told about, `chamber-watch` SHALL type one line into the session naming the room and the count, under the same pane gate as `inbox-watch` (one shared implementation). The line SHALL NOT contain message text or sender. It SHALL contain a room's name only when that name consists of 1 to 64 of the characters `A-Z a-z 0-9 . _ -`; a room with any other name SHALL be announced with a fixed sentence that carries nothing taken from the server, because the line is read by the agent as input and a room name is set at the server. Both the bridge and `chamber-watch` SHALL apply that rule. A message is announced once; a send that fails marks nothing.
 
 #### Scenario: A request arrives while the session is idle
 - **WHEN** one message naming the im is posted while the pane is at the empty prompt
 - **THEN** within one interval the session receives one line such as `💬 chamber: 1 message(s) for you in <room> — run chamber read <room> and handle them per your policy`
+
+#### Scenario: A room whose name is a sentence
+- **WHEN** a message naming the im arrives in a room whose name contains spaces, shell characters or more than 64 characters
+- **THEN** the line typed into the session contains no part of that name
 
 #### Scenario: A permission prompt is open
 - **WHEN** a message arrives while the pane shows a permission prompt

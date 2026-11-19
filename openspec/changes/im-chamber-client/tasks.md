@@ -39,7 +39,7 @@
   - **狀態行（草案，還不是契約）**：`chamber-status ts=<epoch> interval=<秒> mode=observe|deliver|unconfigured server=ok|unreachable|refused|unmeasured rooms=<排序、逗號分隔｜-｜unmeasured> online=yes|no|unmeasured`。`interval=` 是 `jg-base-56 [c30591]` 的輸入。`online` 是向伺服器讀回來的，不是 bridge 自己的說法。`chamber-verify-status`（`app` 那一行）還沒有，隨 `chamber-watch` 做
   - **`CHAMBER_URL_FILE`（同日加，`fleet-ops-98 [047e9c]` 的請求）**：`CHAMBER_URL` 沒有值時從檔案讀位址（預設 `/etc/chamber/url`，去掉結尾空白）；檔不存在或 0 位元組＝未設定，不是設定不全。原因是 `jg-base-56 [c30591]` 量到的：im 的 chart 不收 env 的 `secretKeyRef.optional`，位址又不能寫進公開的 jg-base，所以只能跟憑證走同一個 optional 的 Secret volume。變數有值時照舊贏過檔案。格 F1–F4 與兩個啟動狀態；兩個變異轉紅
   - **#76 驗收的四件（2026-11-19 07:42，`fleet-ops-98 [047e9c]` 對 bench Synapse 量的）**，都做了：(1) **Secret 晚到**——以空的位址檔啟動後再寫入，16 秒後 socket 仍沒出現；現在閒置時每個 beat 重讀全部輸入，齊了就自己啟動，原因只在改變時印一次。(2) 檔頭、spec、design 的「擋的是憑證被帶走」改字（見 design D-b 的更正）。(3) socket 路徑太長原本是 traceback 後退出，現在是「設定不全」的一行、留著。(4) 不帶目錄的 `CHAMBER_SOCKET`。新增 8 格（共 71），四個變異各自轉紅
-  - **bench 上量到、還沒解的一格**：以 im 的憑證直接 `PUT presence online` 之後，**別的帳號**讀到 im 在線到 +45 s、+90 s 時不在線，而那段時間狀態行寫 `online=no`。狀態行的 `online` 是「im 自己問伺服器自己的 presence」得到的答案（`GET presence/<自己>/status`），不是 bridge 的主張——所以這是「自己問」與「別人看」的落差，成因沒查。**daily-check 在意的是別人看到的**，4.1 做在線維持時要用第二個帳號當對照，並決定狀態行印哪一個。另一個讀數：`set_presence=offline` 是「不碰」不是「設成離線」，所以 4.1 用 `PUT presence` 可行，續的間隔要比 45–90 s 之間的某個點密（只量了三個點）
+  - ~~bench 上量到、還沒解的一格（`online` 自己問與別人看的落差）~~ **撤回**：`fleet-ops-98 [047e9c]` 在 #77 的驗收更正——那是只讀了 log 最後一行造成的；同一瞬間讀三個來源（別人看、im 經 socket 自己問、狀態行），+10 s／+45 s／+90 s 三者一致。留下的讀數只有：`set_presence=offline` 是「不碰」不是「設成離線」；直接 `PUT presence online` 後不續，+45 s 仍在線、+90 s 不在線（三個點，確切的界沒量）
   - **真的伺服器已量（bench，loopback http）**：啟動、`whoami`、`rooms`、收、`deliver` 送、`observe` 拒送、管理路徑 404、沒有 TCP listener、位址從檔案讀、憑證不在 log——十格事前寫的預期全部相符（#76 的驗收留言）
   - **沒做、沒量**：在線維持（4.1；所以 `deliver` 模式下 im 目前也不在線）；sync 位置檔預設放在 socket 的目錄，那是 emptyDir，pod 重啟就沒了，重啟後的第一次同步會拿到舊位置而重算一些訊息——只影響 log 裡的數字，宣告（5.2）做之前要回來處理；憑證輪替要重啟 bridge；**真的伺服器、真的 pod、兩個 container 之間的 socket 都沒跑過**
 - [x] 3.2 controls：白名單外的路徑被拒；bridge 沒有任何 TCP listener（正對照：同一份列表看得到 ttyd 的 port）；憑證不出現在 log 與任何回應；`observe` 下 `send` 被拒、在線讀數不變；伺服器連不上時用戶端得到「量不到」不是「不在線」
@@ -49,7 +49,10 @@
 
 ## 4. 在線與常駐（root 6.3 的另一半、6.4）
 
-- [ ] 4.1 `chamber-watch` 的活著訊號（design D-c）與橋接程式的在線維持
+- [x] 4.1 `chamber-watch` 的活著訊號（design D-c）與橋接程式的在線維持
+  - **做了（2026-11-19 08:06，`k8scc-0f [7c5b85]`）**：`chamber/chamber-watch`（bash，在 `app` 裡，`entrypoint.sh` 起；`CHAMBER_URL` 空就印一行結束，所以現有的 pod 只多一行 log）。每個 beat：session 存在、pane 的前景行程是 `claude`、而且 pane 是閒置的空 prompt 或正在跑回合，才經 socket 送 `POST /bridge/beat`。bridge 在 `deliver` 下：訊號在 3 個 beat 內 ⇒ 每一輪（上限 20 s，比 bench 量到的 45–90 s 密）對伺服器 `PUT presence online`；訊號停 ⇒ 設 `offline` 一次；bridge 結束時也設 `offline`。`observe` 下訊號收了但什麼都不設。狀態行的 `online` 仍是向伺服器讀回來的
+  - `chamber-verify-status ts= interval= signers= revoked= sshkeygen=` 由 `chamber-watch` 每個 beat 印到 `app` 的 log（`signers`／`revoked` 是金鑰數，清單不在就是 `unmeasured`）。**它只說清單讀得到，不說驗過一份簽章**
+  - **沒量**：真的 tmux 與 Claude Code（`pane_current_command` 是 `claude` 這一點是 tasks 1.2 在 pod 上讀過一次的）；真的 Synapse 上 20 s 一輪夠不夠密；pod 裡 `app` 的 uid 開不開得了 bridge 建的 0600 socket（兩個 container 都是 uid 0 是 jg-base 側說的，沒量）
 - [ ] 4.2 controls（拋棄式叢集）：殺掉 `claude` ⇒ 三個間隔內顯示不在線、FAC 側 `chamber send` 回 3；session 回來 ⇒ 在線（正對照）；卡在登入畫面 ⇒ 不在線；只有橋接程式活著 ⇒ 不在線
 - [ ] 4.3 `session-keep`（`SESSION_KEEP=1`）：pod 啟動時起、掉了重起、ttyd 接上同一個；起不來時 log 與在線讀數看得見。依 1.2 的讀數
 - [ ] 4.4 不喚起的負對照（root 6.4）：`SESSION_KEEP` 關、沒有 session、送一份驗得過的直接指令 ⇒ 沒有任何行程被起、發送方得到「不在線」。正對照：同一份指令在 session 存在時被宣告
@@ -60,7 +63,12 @@
   - **做了（2026-11-19 07:27，`k8scc-0f [7c5b85]`）**：`pane-gate`（被 source 的 shell 檔），樣式與 `pane_idle` 原封搬過去，`inbox-watch` 從自己旁邊讀它；映像 COPY 到 `/usr/local/bin/pane-gate`。**閘門檔不在 ⇒ `inbox-watch` 不啟動、說出來、什麼都不打**（不是「沒有閘門照打」）。原有 57 格照過，新增 7 格（共 64）。五個變異各自轉紅：閘門永遠回閒置（14 紅）、看不到跑中的回合（2）、忽略下方選單（1）、拿掉 dim 規則（1）、容忍閘門檔不在（2）
   - **順手補的一個洞**：`test/inbox-watch-controls.sh` 原本只在 `build.yaml`（推到 main 之後）跑，不在 PR 的 `controls.yaml`——動到 `inbox-watch` 的 PR，它的對照是合併之後才第一次在 Linux 上跑。已加進 `controls.yaml`
   - **沒量**：新映像裡 `inbox-watch` 真的找得到 `/usr/local/bin/pane-gate`（讀的：`BASH_SOURCE` 在經 PATH 執行時是完整路徑）。**這是生產 im 現在就在跑的元件**，所以 bump 到含這一顆的映像之後，要在拋棄式叢集的 pod log 確認啟動行是 `watching …` 而不是 `the pane gate is missing`
-- [ ] 5.2 `chamber-watch` 的宣告（design D-e）與 controls（閒置時宣告一次、permission prompt 時不打字、點名別人的不宣告、送失敗不標記）
+- [x] 5.2 `chamber-watch` 的宣告（design D-e）與 controls（閒置時宣告一次、permission prompt 時不打字、點名別人的不宣告、送失敗不標記）
+  - **做了（同上）**：bridge 在 `deliver` 下按房間記「點名我或 all、還沒宣告」的數目（`GET /bridge/pending`，一行一間 `<數目> <房間>`，沒有內文與寄件人；`observe` 下永遠是空的）。`chamber-watch` 在 pane 閒置時一間打一行，**每打一行之前重驗一次閘門**（上一行會開始一個回合），打成功才 `POST /bridge/announced`，以數目扣而不是清空（讀清單之後才到的訊息不會被吃掉）。session 太新（`CHAMBER_WATCH_SETTLE`，預設 30 s）不打
+  - controls：`test/chamber-watch-controls.sh` 84 格（假 tmux／sleep／curl，pane 樣本是從 `inbox-watch` 的對照裡抽出來的同一批）；`test/test_chamber_bridge.py` 71 → 100 格，其中 7 格是**真的 `chamber-watch` 對真的 bridge**。變異：`chamber-watch` 十一個、bridge 新增的部分八個，各自轉紅。**有一個第一輪存活**：拿掉「閒置才宣告」的外層判斷仍全綠，因為每一行前的重驗擋住了同一件事——兩道是同一個前提；補了一格讓外層有自己的對照（跑回合時連清單都不問）
+  - **房間名不能帶話（2026-11-19 08:15；提交後的自動安全檢查指出，成立）**：宣告那一行會被 agent 當成輸入讀，而房間名是伺服器上設的。第一版只把非文字字元換成底線——沒限長度、Unicode 字母照過、`chamber-watch` 完全信 bridge 給的名字，而且換過的名字 `chamber read` 也用不了。現在：**名字本身是 1–64 個 `A-Z a-z 0-9 . _ -` 才印名字**，bridge 與 `chamber-watch` 各驗一次；其餘的房間合併成一行固定的句子（不含任何來自伺服器的字），請 agent 自己跑 `chamber rooms`。pod log 與狀態行裡的房間名也改成 ASCII、最多 64 個字元（log 也有 agent 在讀）。格：`chamber-watch` 71 → 84、bridge 95 → 100；五個變異，四個轉紅，**一個存活並照實留著**：`typeable` 裡的 `LC_ALL=C` 拿掉後在 bash 5.3 上仍全綠（那裡範圍預設就是 ASCII），它是給舊 shell 的保險，沒有能鑑別它的格
+  - **這條規則對房間命名有要求**：root 的房間名若含空白或非 ASCII，im 收到的就是那句固定的話而不是房間名。請 root 確認命名規則落在這個字元集裡
+  - **待處理的已知缺口**：「還沒宣告」的數目在 bridge 的記憶體裡，bridge 重啟就歸零；而 sync 位置檔在 emptyDir，pod 重啟後會從舊位置重算——兩者合起來，pod 重啟後可能重複宣告或漏宣告。訊息本身都還在房間裡（`chamber read` 讀得到），所以是多一行或少一行提醒，不是掉訊息。拋棄式叢集走通之前要定：位置檔放 PVC，或重啟後一律「從現在開始」
 - [ ] 5.3 回程（design D-f）：四個詞、`--reply-to`、並存期間「從哪裡來回哪裡」；`observe` 下不送
 
 ## 6. policy 與文件（root 6.6）

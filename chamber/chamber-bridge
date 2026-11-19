@@ -30,9 +30,23 @@ restart.
 
 Modes (CHAMBER_MODE)
   observe (default)  receives and counts; refuses to send; never shows online
-  deliver            sending is forwarded. Showing online needs the session's
-                     alive signal, which this version does not have yet, so
-                     the im stays not online in both modes.
+  deliver            sending is forwarded. The im shows online only while the
+                     session's alive signal keeps arriving (chamber-watch, in
+                     `app`, sends one every beat while a session exists that
+                     can act). No signal for three beats = not online. A
+                     running bridge, container or watcher is never enough.
+
+Local paths (answered here, never forwarded; used by chamber-watch)
+  POST /bridge/beat        the alive signal
+  GET  /bridge/pending     one line per room, "<count> <room>": messages naming
+                           this im or all that the session was not yet told about.
+                           Empty in observe mode. No text, no sender.
+                           The room's name is given only when the name itself is
+                           1-64 of A-Z a-z 0-9 . _ - ; any other room is counted
+                           under "-". That line gets typed into the agent's
+                           session, and a room name is set at the server, so it
+                           is not allowed to carry words.
+  POST /bridge/announced   body in the same lines: these were announced
 
 Pod log
   chamber-bridge: …                 start line, counts per room, faults
@@ -41,10 +55,8 @@ Pod log
                                     field is always present; a reading that
                                     could not be taken is `unmeasured`.
                                     `online` is what the server answers when
-                                    this account asks for its own presence.
-                                    It is not this program's opinion, and it
-                                    was read to differ from what another
-                                    member saw for up to 90 s (bench, #76).
+                                    this account asks for its own presence,
+                                    not this program's opinion of itself.
 No line carries the credential, a message's text or a sender.
 
 Configuration (environment)
@@ -87,6 +99,9 @@ MODE = "observe"
 ACCOUNT = ""
 ME = None                     # the server's answer to "who am I", once it matched ACCOUNT
 STATE = {"server": "unmeasured"}
+BEAT_AT = [None]              # time.monotonic() of the last alive signal
+PENDING = {}                  # room id -> messages for this im not yet announced (deliver only)
+NAMES = {}                    # room id -> name, as last read
 LOCK = threading.Lock()
 
 
@@ -164,6 +179,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         path, _, query = self.path.partition("?")
         if "#" in self.path or "//" in path or "/../" in path + "/" or "/./" in path + "/":
             return self.refuse(404, "CHAMBER_NOT_FORWARDED", "this path is not forwarded")
+        if path.startswith("/bridge/"):
+            return self.local(method, path)
         if not any(m == method and rx.fullmatch(path) for m, rx in ALLOWED):
             return self.refuse(404, "CHAMBER_NOT_FORWARDED", "this path is not forwarded")
         body = None
@@ -193,6 +210,42 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
         self.answer(status, raw)
 
+    def local(self, method, path):
+        """The three paths chamber-watch uses. Nothing here reaches the server."""
+        if (method, path) == ("POST", "/bridge/beat"):
+            with LOCK:
+                BEAT_AT[0] = time.monotonic()
+            return self.answer(200, (MODE + "\n").encode(), "text/plain")
+        if (method, path) == ("GET", "/bridge/pending"):
+            rows = {}
+            with LOCK:
+                for rid, n in PENDING.items():
+                    if n > 0:
+                        rows[label(rid)] = rows.get(label(rid), 0) + n
+            return self.answer(200, "".join("%d %s\n" % (rows[k], k) for k in sorted(rows)).encode(), "text/plain")
+        if (method, path) == ("POST", "/bridge/announced"):
+            try:
+                n = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                n = -1
+            if n < 0 or n > 65536:
+                return self.refuse(413, "CHAMBER_TOO_LARGE", "request body too large or of unknown length")
+            done = {}
+            for line in self.rfile.read(n).decode("utf-8", "replace").splitlines():
+                count, _, name = line.strip().partition(" ")
+                if count.isdigit() and name:
+                    done[name] = done.get(name, 0) + int(count)
+            with LOCK:
+                # by count, not "clear the room": a message that arrived after
+                # the watcher read the list stays pending
+                for rid in sorted(PENDING):
+                    took = min(PENDING[rid], done.get(label(rid), 0))
+                    PENDING[rid] -= took
+                    if took:
+                        done[label(rid)] -= took
+            return self.answer(200, b"ok\n", "text/plain")
+        return self.refuse(404, "CHAMBER_NOT_FORWARDED", "this path is not forwarded")
+
     do_GET = do_PUT = do_POST = do_DELETE = do_PATCH = do_HEAD = do_OPTIONS = handle_any
 
     def address_string(self):                 # a Unix peer has no (host, port)
@@ -206,8 +259,20 @@ class Server(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
     daemon_threads = True
 
 
+TYPEABLE = re.compile(r"[A-Za-z0-9._-]{1,64}", re.ASCII)
+
+
+def label(rid):
+    """What may stand for this room in a line typed into the session."""
+    name = NAMES.get(rid, "")
+    return name if TYPEABLE.fullmatch(name) else "-"
+
+
 def printable(name):
-    return re.sub(r"[^\w.\-]", "_", name) or "_"
+    """A room name for the pod log and the status line: ASCII, no spaces, at
+    most 64. The log is read by agents too, so a name may not carry a sentence
+    there either."""
+    return re.sub(r"[^A-Za-z0-9._-]", "_", name)[:64] or "_"
 
 
 def room_names():
@@ -260,6 +325,38 @@ def status_loop(beat):
         time.sleep(beat)
 
 
+def set_presence(state):
+    """-> True when the server took it."""
+    s, _ = upstream("PUT", P + "/presence/%s/status" % urllib.parse.quote(ME, safe=""),
+                    json.dumps({"presence": state}).encode(), timeout=20)
+    return s == 200
+
+
+def alive(beat):
+    with LOCK:
+        at = BEAT_AT[0]
+    return at is not None and time.monotonic() - at <= 3 * beat
+
+
+def presence_loop(beat):
+    """deliver only. Online is said again every round while the alive signal is
+    fresh: on a bench Synapse an account set online and left alone was read
+    online at +45 s and offline at +90 s (k8scc#76), so the round is capped at
+    20 s. Not online is said once, when the signal stops."""
+    shown = None
+    while True:
+        if ME is not None:
+            if alive(beat):
+                if set_presence("online") and shown != "online":
+                    log("chamber-bridge: online — the session's alive signal is arriving")
+                    shown = "online"
+            elif shown != "offline":
+                if set_presence("offline"):
+                    log("chamber-bridge: not online — %s" % ("no alive signal yet" if BEAT_AT[0] is None else "no alive signal for three beats"))
+                    shown = "offline"
+        time.sleep(min(beat, 20))
+
+
 def addressed(event, me):
     m = (event.get("content") or {}).get("m.mentions") or {}
     return bool(m.get("room")) or me in (m.get("user_ids") or [])
@@ -299,6 +396,10 @@ def receive_loop(state_dir, beat):
                     if rid not in names:
                         names = room_names() or names
                     log("chamber-bridge: received room=%s for-me=%d other=%d" % (printable(names.get(rid, rid)), mine, len(ev) - mine))
+                    if MODE == "deliver" and mine:
+                        with LOCK:
+                            NAMES.update(names)
+                            PENDING[rid] = PENDING.get(rid, 0) + mine
         since = d["next_batch"]
         try:
             tmp = pos_file + ".tmp"
@@ -425,9 +526,13 @@ def main():
         " — insecure http accepted (test only)" if insecure else ""))
     threading.Thread(target=status_loop, args=(beat,), daemon=True).start()
     threading.Thread(target=receive_loop, args=(state_dir, beat), daemon=True).start()
+    if MODE == "deliver":
+        threading.Thread(target=presence_loop, args=(beat,), daemon=True).start()
     try:
         srv.serve_forever()
     finally:
+        if MODE == "deliver" and ME is not None:
+            set_presence("offline")           # leaving: do not stay shown as online until the server times out
         try:
             os.unlink(sock)
         except OSError:

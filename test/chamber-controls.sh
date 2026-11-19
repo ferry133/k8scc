@@ -40,7 +40,7 @@ client()   { HOME="$tmp" python3 -I chamber/chamber "$@"; }
 verifier() { HOME="$tmp" python3 -I chamber/directive-verify "$@"; }
 
 echo "shipped"
-for f in chamber directive-verify chamber-bridge; do
+for f in chamber directive-verify chamber-bridge chamber-watch; do
     check "chamber/$f exists and is not empty"    test -s "chamber/$f"
     check "chamber/$f is executable in the tree"  test -x "chamber/$f"
     check "Dockerfile copies $f to /usr/local/bin" \

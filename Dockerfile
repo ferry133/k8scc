@@ -313,6 +313,9 @@ COPY chamber/directive-verify /usr/local/bin/directive-verify
 # meant to run as its own container (`command: ["chamber-bridge"]`), like the
 # MCP sidecars; entrypoint.sh does not start it.
 COPY chamber/chamber-bridge /usr/local/bin/chamber-bridge
+# The half that lives in app: the alive signal and the one-line announcement.
+# entrypoint.sh starts it; with CHAMBER_URL empty it says so and exits.
+COPY chamber/chamber-watch /usr/local/bin/chamber-watch
 # The verifier's defaults in the image (tasks 2.3): the signer list and the
 # revoked list come from a mounted directory, and a `transcript:` pointer is
 # never looked up -- the person's transcripts are on another host.
@@ -331,7 +334,8 @@ RUN chmod +x /usr/local/bin/memory_mcp_server.py \
              /usr/local/bin/inbox-watch \
              /usr/local/bin/chamber \
              /usr/local/bin/directive-verify \
-             /usr/local/bin/chamber-bridge
+             /usr/local/bin/chamber-bridge \
+             /usr/local/bin/chamber-watch
 
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
