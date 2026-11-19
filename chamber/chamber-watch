@@ -1,0 +1,188 @@
+#!/usr/bin/env bash
+#
+# chamber-watch -- the half of the chamber that has to live in `app`, because
+# it reads and types into the tmux session (openspec im-chamber-client, design
+# D-c and D-e; tasks 4.1 and 5.2). It holds no credential: it talks to
+# chamber-bridge over the Unix socket named by CHAMBER_URL=unix:<path>.
+#
+# Every CHAMBER_BEAT seconds it does three things.
+#
+# 1. The alive signal. "Online" must mean a session that can act, so the
+#    signal is sent only when ALL of these hold:
+#      - the tmux session `claude` exists,
+#      - its pane's foreground process is `claude`,
+#      - the pane reads as the idle, empty prompt (the shared pane gate), or as
+#        a turn in progress (`turn running`).
+#    Anything else -- a login screen, a trust dialog, a one-time feature
+#    dialog, a permission prompt nobody answers, a capture that fails -- sends
+#    nothing, and the bridge shows the im as not online after three beats.
+#    A detached `claude` was read stopped at a one-time dialog with its
+#    process alive (2026-11-19, tasks 1.2): the process alone proves nothing.
+#
+# 2. The announcement (deliver mode only; the bridge's list is empty in
+#    observe mode). When the bridge holds messages naming this im or all that
+#    the session was not told about, and the pane is idle, ONE line per room
+#    is typed, with the room and the count:
+#      💬 chamber: 2 message(s) for you in <room> — run `chamber read <room>` and handle them per your policy
+#    No text, no sender. The same gate as inbox-watch, from the same file. A
+#    send that fails marks nothing and is tried again next beat. Nothing is
+#    typed into a session younger than CHAMBER_WATCH_SETTLE seconds.
+#
+# 3. One line about the verifier, for the pod log:
+#      chamber-verify-status ts=… interval=… signers=… revoked=… sshkeygen=ok|missing
+#    `signers` and `revoked` are the number of keys in the two lists, or
+#    `unmeasured` when the file is not there. It says the lists can be read;
+#    it does not say a signature was checked.
+#
+# No session => nothing is typed and NOTHING IS STARTED. No message, signed or
+# not, starts a session (ferry133, 2026-11-15).
+#
+# CHAMBER_URL empty => off, one line. CHAMBER_WATCH_TICKS=N runs N beats and
+# exits (the controls use it, with a fake `sleep`).
+#
+# Started by entrypoint.sh in the background. It writes to stderr (the pod
+# log): one line at start, one per change of the alive signal with the gate's
+# reason, one per announcement with counts.
+
+set -u
+
+url="${CHAMBER_URL:-}"
+beat="${CHAMBER_BEAT:-20}"
+settle="${CHAMBER_WATCH_SETTLE:-30}"
+ticks="${CHAMBER_WATCH_TICKS:-}"
+signers_dir="${CHAMBER_SIGNERS_DIR:-/etc/chamber/signers}"
+session=claude
+
+if [ -z "$url" ]; then
+    echo "chamber-watch: not configured (CHAMBER_URL is empty), off" >&2
+    exit 0
+fi
+case "$url" in
+    unix:?*) sock="${url#unix:}" ;;
+    *) echo "chamber-watch: CHAMBER_URL must be unix:<path> in app (the bridge holds the credential), not started" >&2; exit 0 ;;
+esac
+case "$beat" in ''|*[!0-9]*|0) echo "chamber-watch: CHAMBER_BEAT '$beat' is not a positive whole number, not started" >&2; exit 0 ;; esac
+case "$settle" in ''|*[!0-9]*) echo "chamber-watch: CHAMBER_WATCH_SETTLE '$settle' is not a whole number, not started" >&2; exit 0 ;; esac
+case "$ticks" in *[!0-9]*) echo "chamber-watch: CHAMBER_WATCH_TICKS '$ticks' is not a whole number, not started" >&2; exit 0 ;; esac
+if ! command -v curl >/dev/null 2>&1; then
+    echo "chamber-watch: curl is missing, not started" >&2
+    exit 0
+fi
+
+# The pane gate is the one inbox-watch uses. It sits next to this script in the
+# image; in the repo it is one directory up. Without it nothing may be typed
+# and no pane can be judged, so the watcher does not start.
+here="$(dirname "${BASH_SOURCE[0]}")"
+gate=""
+for g in "$here/pane-gate" "$here/../pane-gate"; do
+    [ -r "$g" ] && { gate="$g"; break; }
+done
+if [ -z "$gate" ]; then
+    echo "chamber-watch: the pane gate is missing next to $here, not started" >&2
+    exit 0
+fi
+# shellcheck source=../pane-gate
+. "$gate"
+
+# bridge METHOD PATH [BODY] : one request over the socket. Prints the answer's
+# body; fails on any HTTP error or when the socket cannot be reached.
+bridge() {
+    if [ $# -ge 3 ]; then
+        curl -fsS --max-time 10 --unix-socket "$sock" -X "$1" --data-binary "$3" "http://bridge$2" 2>/dev/null
+    else
+        curl -fsS --max-time 10 --unix-socket "$sock" -X "$1" "http://bridge$2" 2>/dev/null
+    fi
+}
+
+# count_keys FILE : lines that are neither blank nor comments, or `unmeasured`
+count_keys() {
+    if [ -r "$1" ]; then grep -cvE '^[[:space:]]*(#|$)' "$1"; else echo unmeasured; fi
+}
+
+verify_status() {
+    local kg=missing
+    command -v ssh-keygen >/dev/null 2>&1 && kg=ok
+    echo "chamber-verify-status ts=$(date +%s) interval=${beat} signers=$(count_keys "$signers_dir/allowed_signers") revoked=$(count_keys "$signers_dir/revoked_signers") sshkeygen=${kg}" >&2
+}
+
+# session_state : prints `idle`, `turn running`, or the reason it is neither.
+# Succeeds only for the first two.
+session_state() {
+    tmux has-session -t "=$session" 2>/dev/null || { echo "no session"; return 1; }
+    local cmd why
+    # `=claude:` and not `=claude`: tmux 3.3a answers the bare form with an
+    # empty line and rc 0 (measured for inbox-watch, k8scc#60)
+    cmd=$(tmux display-message -p -t "=$session:" '#{pane_current_command}' 2>/dev/null)
+    [ "$cmd" = claude ] || { echo "the pane's process is '${cmd}', not claude"; return 1; }
+    if why=$(pane_idle); then echo idle; return 0; fi
+    [ "$why" = "turn running" ] && { echo "turn running"; return 0; }
+    echo "$why"; return 1
+}
+
+old_enough() {
+    local created now
+    created=$(tmux display-message -p -t "=$session:" '#{session_created}' 2>/dev/null)
+    case "$created" in ''|*[!0-9]*) return 1 ;; esac
+    now=$(date +%s)
+    [ $((now - created)) -ge "$settle" ]
+}
+
+last=""    # the alive reading last written to the log, so it is written on change only
+
+announce() {
+    local list count room done="" n=0
+    list=$(bridge GET /bridge/pending) || return 0
+    [ -n "$list" ] || return 0
+    old_enough || { echo "chamber-watch: messages waiting, skipped (the session is younger than ${settle}s or its age cannot be read)" >&2; return 0; }
+    while read -r count room; do
+        case "$count" in ''|*[!0-9]*|0) continue ;; esac
+        [ -n "$room" ] || continue
+        # the gate again before every line: the previous line started a turn
+        pane_idle >/dev/null || break
+        local msg="💬 chamber: ${count} message(s) for you in ${room} — run \`chamber read ${room}\` and handle them per your policy"
+        if tmux send-keys -t "=$session:" -l "$msg" 2>/dev/null && tmux send-keys -t "=$session:" Enter 2>/dev/null; then
+            done+="${count} ${room}"$'\n'
+            n=$((n + count))
+        else
+            echo "chamber-watch: send-keys failed, will retry" >&2
+            break
+        fi
+    done <<<"$list"
+    [ -n "$done" ] || return 0
+    if bridge POST /bridge/announced "$done" >/dev/null; then
+        echo "chamber-watch: announced ${n} message(s) to the running session" >&2
+    else
+        echo "chamber-watch: announced ${n} message(s), but the bridge could not be told; they will be announced again" >&2
+    fi
+}
+
+tick() {
+    verify_status
+    local state now
+    if state=$(session_state); then
+        if bridge POST /bridge/beat >/dev/null; then now="alive signal sent (${state})"; else now="the bridge cannot be reached at ${sock}"; fi
+    else
+        now="no alive signal: ${state}"
+    fi
+    # `idle` and `turn running` alternate all day; that is not a change worth a line
+    case "$now" in "alive signal sent"*) key="alive" ;; *) key="$now" ;; esac
+    if [ "$key" != "$last" ]; then echo "chamber-watch: ${now}" >&2; last="$key"; fi
+    [ "$state" = idle ] && announce
+    return 0
+}
+
+if [ -n "$ticks" ]; then
+    i=0
+    while [ "$i" -lt "$ticks" ]; do
+        tick
+        i=$((i + 1))
+        [ "$i" -lt "$ticks" ] && sleep "$beat"
+    done
+    exit 0
+fi
+
+echo "chamber-watch: watching the session every ${beat}s, bridge at ${sock}" >&2
+while :; do
+    tick
+    sleep "$beat"
+done

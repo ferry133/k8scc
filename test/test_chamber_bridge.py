@@ -41,6 +41,7 @@ class Fake:
         self.n = 0
         self.redirect_to = None
         self.presence = "offline"
+        self.presence_puts = []        # what the bridge itself asked the server to show
         self.lock = threading.Lock()
 
 
@@ -85,6 +86,16 @@ class H(http.server.BaseHTTPRequestHandler):
                     time.sleep(0.15)        # an idle long poll, shortened
                 return self.reply(200, {"next_batch": "s%d" % n_})
             return self.reply(200, {"next_batch": "s%d" % n_, "rooms": {"join": {"!r1:fake": {"timeline": {"events": batch}}}}})
+        if self.command == "PUT" and "/presence/" in path and path.endswith("/status"):
+            try:
+                want = json.loads(body).get("presence")
+            except ValueError:
+                want = None
+            with f.lock:
+                f.presence_puts.append(want)
+                if want in ("online", "offline"):
+                    f.presence = want
+            return self.reply(200, {})
         if self.command == "PUT" and "/send/m.room.message/" in path:
             return self.reply(200, {"event_id": "$sent"})
         return self.reply(418, {"errcode": "FAKE_REACHED", "error": "the fake was reached on a path it does not serve"})
@@ -98,6 +109,11 @@ class H(http.server.BaseHTTPRequestHandler):
 class S(socketserver.ThreadingMixIn, http.server.HTTPServer):
     daemon_threads = True
     allow_reuse_address = True
+
+    def handle_error(self, request, client_address):
+        # a bridge stopped in the middle of a long poll hangs up on the fake; anything else is a fault of the fake and is shown
+        if not isinstance(sys.exc_info()[1], (BrokenPipeError, ConnectionResetError)):
+            super().handle_error(request, client_address)
 
     def server_bind(self):               # no reverse lookup (slow on some laptops)
         socketserver.TCPServer.server_bind(self)
@@ -267,6 +283,11 @@ with fake.lock:
                          ev({"room": True}, sender="@im-test:fake")])
 check("O3 counts per room: two for the im, one for someone else, its own not counted", True,
       until(lambda: "received room=room_one for-me=2 other=1" in logged(LOG)))
+check("O3b observe: the list for the session stays empty, and nothing is ever set at the server", ((200, b""), []),
+      (raw(SOCK, "GET", "/bridge/pending")[:2], list(fake.presence_puts)))
+raw(SOCK, "POST", "/bridge/beat")
+time.sleep(1.2)
+check("O3c observe: an alive signal changes nothing — the im is not shown online", [], list(fake.presence_puts))
 check("O4 the pod log has neither the message text nor the sender", (False, False), (SECRET_TEXT in logged(LOG), SENDER in logged(LOG)))
 line = [l for l in logged(LOG).splitlines() if l.startswith("chamber-status ")][-1]
 check("O5 the status line: every field, in order", True,
@@ -406,7 +427,7 @@ rc, o, e = client(SOCK, "send", "room one", "--to", "fac-agent", "hello")
 check("D2 chamber send goes through (3: left in the room, the fake says the recipient is offline)", (3, 1), (rc, count("PUT") - before_put))
 with fake.lock:
     syncs = [pth for m, pth, a in fake.seen if pth.startswith(P + "/sync")]
-check("D3 deliver without an alive signal still asks for presence offline", True, all("set_presence=offline" in s for s in syncs))
+check("D3 every sync still asks for presence offline (presence is set by the bridge itself, not by syncing)", True, all("set_presence=offline" in s for s in syncs))
 def announce_only(sock, length):
     """Send the request line and a Content-Length, no body. -> the status line's code."""
     c = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -428,9 +449,103 @@ before_put = count("PUT")
 check("D5 control: a send within the limit reaches the server", (200, 1),
       (raw(SOCK, "PUT", P + "/rooms/!r1:fake/send/m.room.message/3", body=b"{}")[0], count("PUT") - before_put))
 
+print("deliver: online only while the alive signal arrives (tasks 4.1)")
+with fake.lock:
+    fake.presence_puts.clear()
+check("A-1 no signal yet: the bridge says not online, once", (True, ["offline"]),
+      (until(lambda: "not online — no alive signal yet" in logged(LOG)), (time.sleep(1.0), list(fake.presence_puts))[1]))
+check("A-2 the status line reads the server: online=no", True, until(lambda: logged(LOG).splitlines()[-1].endswith("online=no")))
+check("A-3 the alive signal is accepted on the socket and answers the mode", (200, b"deliver\n"), raw(SOCK, "POST", "/bridge/beat")[:2])
+check("A-4 the bridge then asks the server to show it online", True, until(lambda: "online" in fake.presence_puts))
+check("A-5 … and the status line follows the server: online=yes", True,
+      until(lambda: any(l.endswith("online=yes") for l in logged(LOG).splitlines()[-2:])))
+stop_beating = threading.Event()
+def beating():
+    while not stop_beating.is_set():
+        raw(SOCK, "POST", "/bridge/beat")
+        time.sleep(0.2)
+bt = threading.Thread(target=beating, daemon=True)
+bt.start()
+time.sleep(2.0)                      # more than three beats (0.3 s each) of steady signal
+with fake.lock:
+    n_off = fake.presence_puts.count("offline")
+check("A-6 while the signal keeps arriving it is never set offline, and online is said again", (1, True),
+      (n_off, fake.presence_puts.count("online") >= 3))
+stop_beating.set()
+bt.join()
+check("A-7 the signal stops: within three beats (plus one round) the bridge sets it offline and says why", True,
+      until(lambda: fake.presence_puts[-1] == "offline" and "no alive signal for three beats" in logged(LOG), 4))
+check("A-8 … and the status line: online=no", True, until(lambda: logged(LOG).splitlines()[-1].endswith("online=no")))
+check("A-9 the local paths never reach the server", 0, count(None, "/bridge/"))
+
+print("deliver: what waits for the session (tasks 5.2)")
+check("Q1 nothing has arrived: the list is empty", (200, b""), raw(SOCK, "GET", "/bridge/pending")[:2])
+with fake.lock:
+    fake.batches.append([ev({"user_ids": ["@im-test:fake"]}), ev({"room": True}), ev({"user_ids": ["@someone:fake"]})])
+check("Q2 two for the im, one for someone else: the list says 2 for the room", True,
+      until(lambda: raw(SOCK, "GET", "/bridge/pending")[1] == b"2 room_one\n"))
+check("Q3 the list has no message text and no sender", (False, False),
+      (SECRET_TEXT.encode() in raw(SOCK, "GET", "/bridge/pending")[1], SENDER.encode() in raw(SOCK, "GET", "/bridge/pending")[1]))
+check("Q4 one of the two was announced: one stays", (200, b"1 room_one\n"),
+      (raw(SOCK, "POST", "/bridge/announced", body=b"1 room_one\n")[0], raw(SOCK, "GET", "/bridge/pending")[1]))
+with fake.lock:
+    fake.batches.append([ev({"room": True})])
+check("Q5 another arrives: it is added to what stays", True, until(lambda: raw(SOCK, "GET", "/bridge/pending")[1] == b"2 room_one\n"))
+raw(SOCK, "POST", "/bridge/announced", body=b"2 room_one\njunk\n9 nowhere\n")
+check("Q6 all announced (with junk lines beside): the list is empty again", b"", raw(SOCK, "GET", "/bridge/pending")[1])
+check("Q7 an unknown local path is 404, a wrong method too", [404, 404, 404],
+      [raw(SOCK, "GET", "/bridge/nothing")[0], raw(SOCK, "GET", "/bridge/beat")[0], raw(SOCK, "POST", "/bridge/pending")[0]])
+
+print("the real chamber-watch against the real bridge")
+if not shutil.which("curl"):
+    res.append(False)
+    print("FAIL CANNOT MEASURE: no curl on this machine; chamber-watch was not run against the bridge")
+else:
+    fk = os.path.join(T, "faketmux")
+    os.makedirs(os.path.join(fk, "bin"))
+    open(os.path.join(fk, "bin", "tmux"), "w").write("""#!/usr/bin/env bash
+printf '%s\\n' "$*" >> "$FAKE_DIR/tmux.log"
+case "$1" in
+  has-session) [ -f "$FAKE_DIR/session" ] ;;
+  display-message) if [ "$4" != "=claude:" ]; then echo; exit 0; fi
+    case "$5" in *pane_current_command*) echo claude ;; *session_created*) cat "$FAKE_DIR/session" ;; esac ;;
+  capture-pane) cat "$FAKE_DIR/pane" ;;
+  send-keys) exit 0 ;;
+esac
+""")
+    os.chmod(os.path.join(fk, "bin", "tmux"), 0o755)
+    open(os.path.join(fk, "session"), "w").write(str(int(time.time()) - 3600))
+    # the idle prompt as the pane gate's own controls draw it: a lone prompt character
+    open(os.path.join(fk, "pane"), "w").write("some output\n\n> \n")
+    open(os.path.join(fk, "tmux.log"), "w").close()
+    with fake.lock:
+        fake.presence_puts.clear()
+        fake.batches.append([ev({"user_ids": ["@im-test:fake"]})])
+    until(lambda: raw(SOCK, "GET", "/bridge/pending")[1] == b"1 room_one\n")
+    wenv = {"PATH": os.path.join(fk, "bin") + os.pathsep + os.environ["PATH"], "HOME": T, "FAKE_DIR": fk,
+            "CHAMBER_URL": "unix:" + SOCK, "CHAMBER_BEAT": "1", "CHAMBER_WATCH_TICKS": "2", "CHAMBER_SIGNERS_DIR": os.path.join(T, "none")}
+    w = subprocess.run(["bash", os.path.join(ROOT, "chamber", "chamber-watch")], env=wenv, capture_output=True, timeout=60, cwd=T)
+    werr = w.stderr.decode()
+    typed = open(os.path.join(fk, "tmux.log")).read()
+    check("I1 chamber-watch reaches the bridge and sends the signal", (0, True), (w.returncode, "alive signal sent (idle)" in werr))
+    check("I2 the bridge shows the im online because of it", True, until(lambda: "online" in fake.presence_puts))
+    check("I3 the waiting message is typed as one line naming the room and the count", 1,
+          typed.count("send-keys -t =claude: -l 💬 chamber: 1 message(s) for you in room_one"))
+    check("I4 … and it is announced once: the bridge's list is empty afterwards", (b"", 1),
+          (raw(SOCK, "GET", "/bridge/pending")[1], werr.count("announced 1 message(s)")))
+    os.remove(os.path.join(fk, "session"))
+    w = subprocess.run(["bash", os.path.join(ROOT, "chamber", "chamber-watch")], env=dict(wenv, CHAMBER_WATCH_TICKS="1"), capture_output=True, timeout=60, cwd=T)
+    check("I5 control: with no session chamber-watch sends nothing, and the bridge goes not online", (True, True),
+          ("no alive signal: no session" in w.stderr.decode(),
+           until(lambda: fake.presence_puts and fake.presence_puts[-1] == "offline", 4)))
+
 print("server unreachable: the client says cannot measure, not refused")
 check("U1 control: reachable ⇒ 0", 0, client(SOCK, "whoami")[0])
+raw(SOCK, "POST", "/bridge/beat")
+until(lambda: fake.presence_puts and fake.presence_puts[-1] == "online")
+was = fake.presence_puts[-1]
 stop(p)
+check("E1 a bridge that ends while online sets the im offline on its way out", ("online", "offline"), (was, fake.presence_puts[-1]))
 dead = socket.socket()
 dead.bind(("127.0.0.1", 0))                 # a port with nothing listening
 dead_url = "http://127.0.0.1:%d" % dead.getsockname()[1]

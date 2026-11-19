@@ -102,4 +102,12 @@ else
     echo "entrypoint: inbox-watch not installed, running sessions are not told about new inbox files" >&2
 fi
 
+# The chamber's half in this container (openspec im-chamber-client): the alive
+# signal and the one-line announcement. With CHAMBER_URL empty -- every pod
+# until the chamber is wired -- it writes one line and exits. It starts no
+# session and holds no credential.
+if command -v chamber-watch >/dev/null 2>&1; then
+    chamber-watch &
+fi
+
 exec ttyd "${TTYD_ARGS[@]}" /usr/local/bin/claude-session
