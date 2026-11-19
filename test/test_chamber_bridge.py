@@ -43,6 +43,10 @@ class Fake:
         self.presence = "offline"
         self.room_name = "room one"
         self.presence_puts = []        # what the bridge itself asked the server to show
+        self.rooms = ["!r1:fake"]
+        self.name_fault = {}           # room id -> a status to answer for its name; 404 = "has no name" as the server says it, "bare404" = a 404 from something else, "hangup" = no answer
+        self.presence_fault = 0        # a status to answer when the account's presence is read
+        self.whoami_hangup = False     # take the connection and answer nothing
         self.lock = threading.Lock()
 
 
@@ -67,13 +71,29 @@ class H(http.server.BaseHTTPRequestHandler):
         if f.redirect_to and path == P + "/joined_rooms":
             return self.reply(302, {}, [("Location", f.redirect_to + path)])
         if self.command == "GET" and path == P + "/account/whoami":
+            if f.whoami_hangup:
+                self.close_connection = True
+                return
             return self.reply(200, {"user_id": f.user})
         if self.command == "GET" and path == P + "/joined_rooms":
-            return self.reply(200, {"joined_rooms": ["!r1:fake"]})
+            return self.reply(200, {"joined_rooms": list(f.rooms)})
         if self.command == "GET" and path.endswith("/state/m.room.name"):
-            return self.reply(200, {"name": f.room_name})
+            rid = urllib.parse.unquote(path.split("/")[-3])
+            fault = f.name_fault.get(rid)
+            if fault == "hangup":
+                self.close_connection = True
+                return
+            if fault == "bare404":
+                return self.reply(404, {})
+            if fault == 404:
+                return self.reply(404, {"errcode": "M_NOT_FOUND", "error": "Event not found."})
+            if fault:
+                return self.reply(fault, {"errcode": "M_UNKNOWN", "error": "fault"})
+            return self.reply(200, {"name": f.room_name if rid == "!r1:fake" else "room-" + rid[1:3]})
         if self.command == "GET" and path.endswith("/joined_members"):
             return self.reply(200, {"joined": {f.user: {}, SENDER: {}}})
+        if self.command == "GET" and "/presence/" in path and f.presence_fault:
+            return self.reply(f.presence_fault, {"errcode": "M_UNKNOWN", "error": "fault"})
         if self.command == "GET" and "/presence/" in path:
             return self.reply(200, {"presence": f.presence})
         if self.command == "GET" and path == P + "/sync":
@@ -596,6 +616,87 @@ gone.shutdown()
 gone.server_close()
 rc, o, e = client(SOCK, "whoami")
 check("U5 the server goes away after the account was confirmed ⇒ 2, not 1", (2, True), (rc, "cannot reach the server" in e))
+stop(p)
+
+print("a room name that could not be read is not a room (k8scc#84)")
+nm, nm_fake, NM_URL = fake_server()
+nm_fake.rooms = ["!r1:fake", "!r2:fake"]
+nm_fake.room_name = "cust-a"
+p, SOCK, LOG = start("names", CHAMBER_URL=NM_URL)
+
+
+def status_after(logp, mark):
+    """The status lines written after the line count `mark`."""
+    return [l for l in logged(logp).splitlines()[mark:] if l.startswith("chamber-status ")]
+
+
+def settled(logp, want, secs=8):
+    """Wait for two status lines in a row, both written from now on, that end in `want`. -> those lines' ending or what was last seen."""
+    mark = len(logged(logp).splitlines()) + 1        # the line being written now may predate the change
+    seen = []
+
+    def two():
+        seen[:] = [l.split(" server=", 1)[1] for l in status_after(logp, mark)]
+        return len(seen) >= 2 and seen[-1] == seen[-2] == want
+    until(two, secs)
+    return seen[-1] if seen else None
+
+
+check("N1 control: both names read ⇒ both in the line", "ok rooms=cust-a,room-r2 online=no", settled(LOG, "ok rooms=cust-a,room-r2 online=no"))
+check("N1b control: nothing was said about a fault", False, "could not be read" in logged(LOG))
+nm_fake.name_fault = {"!r2:fake": 404}
+check("N2 a room that has no name (404 M_NOT_FOUND) stands under its id", "ok rooms=_r2_fake,cust-a online=no", settled(LOG, "ok rooms=_r2_fake,cust-a online=no"))
+check("N2b that is not a fault and no line says so", False, "could not be read" in logged(LOG))
+nm_fake.name_fault = {"!r2:fake": 500}
+check("N3 one name request fails (500) ⇒ the whole field is unmeasured, no id", "ok rooms=unmeasured online=no", settled(LOG, "ok rooms=unmeasured online=no"))
+time.sleep(1.2)                                       # several more beats of the same fault
+check("N4 the reason is in the log, once", 1, logged(LOG).count("chamber-bridge: the rooms could not be read (http=500)"))
+nm_fake.name_fault = {"!r2:fake": "hangup"}
+check("N5 the request gets no answer ⇒ unmeasured as well", "ok rooms=unmeasured online=no", settled(LOG, "ok rooms=unmeasured online=no"))
+check("N6 a fault of another kind gets its own line, by type name", True,
+      until(lambda: "chamber-bridge: the rooms could not be read (RemoteDisconnected)" in logged(LOG)))
+nm_fake.name_fault = {"!r2:fake": "bare404"}
+check("N7 a 404 that is not the server's \"no such state\" is a fault, not a nameless room", (True, "ok rooms=unmeasured online=no"),
+      (until(lambda: "the rooms could not be read (http=404)" in logged(LOG)), settled(LOG, "ok rooms=unmeasured online=no")))
+nm_fake.name_fault = {}
+check("N8 read again ⇒ the names are back", "ok rooms=cust-a,room-r2 online=no", settled(LOG, "ok rooms=cust-a,room-r2 online=no"))
+nm_fake.presence_fault = 503
+check("N9 presence not read ⇒ online=unmeasured, the rooms still read", "ok rooms=cust-a,room-r2 online=unmeasured", settled(LOG, "ok rooms=cust-a,room-r2 online=unmeasured"))
+time.sleep(1.2)
+check("N10 and one line says why", 1, logged(LOG).count("chamber-bridge: this account's presence could not be read (http=503)"))
+nm_fake.presence_fault = 0
+settled(LOG, "ok rooms=cust-a,room-r2 online=no")
+
+print("unreachable says which kind, once per kind (k8scc#84)")
+check("K1 control: reachable so far, nothing said", False, "cannot be reached" in logged(LOG))
+nm_fake.whoami_hangup = True
+check("K2 the server hangs up ⇒ unreachable", "unreachable rooms=unmeasured online=unmeasured", settled(LOG, "unreachable rooms=unmeasured online=unmeasured"))
+time.sleep(1.2)
+check("K3 one line names the kind, and only one while it stays the same", 1,
+      logged(LOG).count("chamber-bridge: the server cannot be reached (RemoteDisconnected)"))
+nm.shutdown()
+nm.server_close()
+check("K4 the kind changes (nothing listens now) ⇒ a second line, with the wrapped type", True,
+      until(lambda: "chamber-bridge: the server cannot be reached (URLError/ConnectionRefusedError)" in logged(LOG)))
+time.sleep(1.2)
+check("K5 that one once too", 1, logged(LOG).count("(URLError/ConnectionRefusedError)"))
+stop(p)
+nm, nm_fake, NM_URL = fake_server()
+nm_fake.whoami_hangup = True
+p, SOCK, LOG = start("back", CHAMBER_URL=NM_URL)
+until(lambda: "cannot be reached (RemoteDisconnected)" in logged(LOG))
+nm_fake.whoami_hangup = False
+check("K6 reachable again ⇒ one line says so", True, until(lambda: "chamber-bridge: the server answers again" in logged(LOG)))
+nm_fake.whoami_hangup = True
+until(lambda: logged(LOG).count("cannot be reached (RemoteDisconnected)") == 2)
+check("K7 the same kind after a recovery is said again", 2, logged(LOG).count("cannot be reached (RemoteDisconnected)"))
+stop(p)
+nm.shutdown()
+p, SOCK, LOG = start("noname", CHAMBER_URL="http://chamber-no-such-host.invalid:9")
+check("K8 a name that does not resolve is told apart from a refused connection", (True, False),
+      (until(lambda: "chamber-bridge: the server cannot be reached (URLError/gaierror)" in logged(LOG), 20),
+       "ConnectionRefusedError" in logged(LOG)))
+check("K9 no line carries the exception's text or the host", False, any(w in logged(LOG) for w in ("invalid", "Errno", "nodename", "Name or service", "resolution")))
 stop(p)
 
 print("the credential is someone else's")
