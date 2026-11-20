@@ -6,6 +6,7 @@
   chamber read  ROOM [N] [--everything]
   chamber wait  ROOM [SECONDS] [--everything]
   chamber send  ROOM --to NAME|all [--ref REF] [--reply-to EVENT_ID] TEXT|-
+  chamber members ROOM               (who is in the room, and which account is a person's)
   chamber presence NAME
   chamber get   ROOM EVENT_ID        (the message text only, byte for byte — pipe it to directive-verify)
 
@@ -18,6 +19,16 @@ room, never by who is named.
 `send` leaves the message in the room whether or not the recipient is online,
 then reports which it was. TEXT is sent byte-for-byte (use `-` to read stdin),
 so a signed directive survives.
+
+`members` prints one line per member: the account, online|offline|unknown,
+`(you)` for the caller, and `person` when the account's name is a principal on
+the signer list directive-verify uses ($CHAMBER_SIGNERS_DIR/allowed_signers, or
+~/.claude/chamber/allowed_signers). That is a convention, not something the
+server knows: the two names are filled in by hand and nothing checks that they
+are equal (k8scc#86). It matters because `all` did not notify a person on the
+bench server and a name did, so a question for a person is sent --to the person.
+  0  the list was read (stderr says so when nobody in the room is on it)
+  2  the list is absent, unreadable or empty: who is a person is not known
 
 Exit codes
   0  ok / sent and every recipient is online
@@ -38,7 +49,7 @@ Configuration
   CHAMBER_CA           CA bundle for a privately signed server
 The credential is never printed.
 """
-import http.client, json, os, socket, ssl, subprocess, sys, time, urllib.error, urllib.parse, urllib.request
+import http.client, json, os, re, socket, ssl, subprocess, sys, time, urllib.error, urllib.parse, urllib.request
 
 OK, FAILED, UNMEASURED, LEFT_OFFLINE, NOTHING = 0, 1, 2, 3, 4
 
@@ -163,7 +174,16 @@ def rooms():
     out = {}
     for rid in must(*call("GET", "/_matrix/client/v3/joined_rooms"), "listing rooms")["joined_rooms"]:
         s, n = call("GET", "/_matrix/client/v3/rooms/%s/state/m.room.name" % q(rid))
-        out[n.get("name", rid) if s == 200 else rid] = rid
+        if s == 200 and isinstance(n.get("name"), str):
+            out[n["name"]] = rid
+        elif s == 404 and n.get("errcode") == "M_NOT_FOUND":
+            out[rid] = rid          # the server says this room has no name: it goes by its id
+        else:
+            # A name that could not be read is not a room without a name. The first
+            # version listed the id here too, and `read <name>` then said "you are
+            # not in a room named ..." about a room the caller was in (k8scc#86).
+            must(s, n, "reading a room's name")
+            fail("cannot read a room's name (the answer carried none)", UNMEASURED)
     return out
 
 
@@ -177,6 +197,26 @@ def room_id(name):
 def members(rid):
     d = must(*call("GET", "/_matrix/client/v3/rooms/%s/joined_members" % q(rid)), "listing members")
     return set(d.get("joined", {}))
+
+
+def signers_file():
+    d = os.environ.get("CHAMBER_SIGNERS_DIR", "")
+    return os.path.join(d, "allowed_signers") if d else os.path.expanduser("~/.claude/chamber/allowed_signers")
+
+
+def persons():
+    """-> the principals on the signer list (a set, maybe empty), or None when
+    the file cannot be read. Same file and same default as directive-verify."""
+    try:
+        lines = open(signers_file(), encoding="utf-8", errors="replace").read().splitlines()
+    except OSError:
+        return None
+    out = set()
+    for line in lines:
+        line = line.strip()
+        if line and not line.startswith("#"):
+            out.update(x for x in line.split()[0].split(",") if x)
+    return out
 
 
 def user_id(name, me):
@@ -241,6 +281,18 @@ def main():
         print(whoami())
     elif cmd == "rooms":
         print("\n".join(sorted(rooms())))
+    elif cmd == "members":
+        if len(a) != 1:
+            fail("usage: chamber members ROOM")
+        me, mem, people = whoami(), sorted(members(room_id(a[0]))), persons()
+        here = [t for t in mem if people and t[1:].split(":", 1)[0] in people]
+        for t in mem:
+            print("%s %s%s%s" % (t, presence_of(t) or "unknown", " (you)" if t == me else "", " person" if t in here else ""))
+        if not people:
+            fail("who is a person here is not known: the signer list is %s (%s)" % (
+                "empty" if people is not None else "absent or unreadable", signers_file()), UNMEASURED)
+        if not here:
+            print("chamber: no account in this room is on the signer list", file=sys.stderr)
     elif cmd == "presence":
         if len(a) != 1:
             fail("usage: chamber presence NAME")
@@ -301,6 +353,11 @@ def main():
         mem = members(rid)
         if to == "all":
             targets, mentions = sorted(mem - {me}), {"room": True}
+            if re.match(r"blocked\b", text):
+                # sent all the same: the caller may have no name to give
+                print("chamber: `blocked` to all names nobody. A person is not notified by `all` (read on the bench "
+                      "server); when the question is for a person, send it --to that person's account "
+                      "(`chamber members ROOM` marks it).", file=sys.stderr)
         else:
             t = user_id(to, me)
             if t not in mem:
