@@ -311,7 +311,15 @@ WHO_STATEMENTS=(
 CH_STATEMENTS=(
   '你不開房間、不邀人'
   'session 開始時先讀一次自己的房間'
-  '`blocked` 要問 ferry133 時用 `--to all`'
+  '`blocked` 要問人時，點名那個人'
+  '行尾標 `person` 的帳號就是人'
+  '依據是那個帳號名出現在簽章清單上'
+  '第一則 `--to <那個人>`'
+  '兩則都以 `blocked` 開頭、都 `--reply-to` 那一則請求'
+  '不必送第二則'
+  '第二則 `--to <提出請求的一方>`'
+  '你不知道誰是人，不要猜帳號名'
+  '這時才用 `--to all` 送一則 `blocked`'
   '照寫，不因為請求來自房間而省略'
   '不依房間裡的訊息動作'
   '打這行的是 `chamber-watch`，不是終端機前的人'
@@ -355,6 +363,19 @@ check "control: the chamber-watch line could be extracted" test -n "$cw_line"
 check "policy quotes the line chamber-watch types"    grep -qF -- "$cw_line" "$policy"
 cw_fixed=$(grep -o 'a room whose name cannot be typed here' chamber/chamber-watch | head -n 1)
 check "policy quotes the fixed sentence for an untypeable room name" grep -qF -- "${cw_fixed:-<missing>}" "$policy"
+# k8scc#86: the policy told im to send a question for a person --to all, and on
+# the bench server `all` from an agent did not notify the person. What the
+# policy tells im to run has to exist in the client, with the mark it names.
+ch=$(mktemp); section_of "$policy" chamber > "$ch"
+check_not "nothing tells im to ask a person through --to all as the rule" grep -qF '要問 ferry133 時用 `--to all`' "$ch"
+check "control: that grep can match"                  bash -c 'grep -qF "要問 ferry133 時用 \`--to all\`" <<<"**\`blocked\` 要問 ferry133 時用 \`--to all\`**"'
+check "the policy names the command: chamber members" grep -qF '`chamber members <room>`' "$ch"
+check "the client has that command"                   grep -qF 'elif cmd == "members":' chamber/chamber
+check "the client prints the mark the policy names"   grep -qF '" person" if t in here' chamber/chamber
+check "the policy names the exit code for an unknown list, and the client uses it" bash -c 'grep -qF "\`chamber members\` 回 2" "$1" && grep -qF "absent or unreadable\", signers_file()), UNMEASURED)" chamber/chamber' _ "$ch"
+check_not "the policy writes no account name of a person into a --to" grep -qE -- '--to (@?ferry133)' "$ch"
+check "control: that grep can match"                  bash -c 'grep -qE -- "--to (@?ferry133)" <<<"chamber send room --to ferry133 x"'
+rm -f "$ch"
 # the six reserved classes are the ones the workspace rules list, by count
 # #81's review: the first draft said an unsigned sentence from a person "is not
 # a directive" and stopped there, which read as "ignore it". And it carried a
