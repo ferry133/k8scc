@@ -16,6 +16,10 @@ This is a FILTER, NOT ISOLATION: any member of the room can read everything in
 it with `--everything`. What may be said in a room is decided by who is in the
 room, never by who is named.
 
+--reply-to puts the message into a thread under that event. A stock client
+shows a thread in the room as "N replies" with the last message only, so a
+question a person has to see is sent without it (k8scc#91).
+
 `send` leaves the message in the room whether or not the recipient is online,
 then reports which it was. TEXT is sent byte-for-byte (use `-` to read stdin),
 so a signed directive survives.
@@ -25,8 +29,9 @@ so a signed directive survives.
 the signer list directive-verify uses ($CHAMBER_SIGNERS_DIR/allowed_signers, or
 ~/.claude/chamber/allowed_signers). That is a convention, not something the
 server knows: the two names are filled in by hand and nothing checks that they
-are equal (k8scc#86). It matters because `all` did not notify a person on the
-bench server and a name did, so a question for a person is sent --to the person.
+are equal (k8scc#86). It matters because a message to `all` notifies a person
+but is not marked as mentioning them, and a message that names them is (read
+in a stock client, k8scc#91), so a question for a person is sent --to the person.
   0  the list was read (stderr says so when nobody in the room is on it)
   2  the list is absent, unreadable or empty: who is a person is not known
 
@@ -355,8 +360,8 @@ def main():
             targets, mentions = sorted(mem - {me}), {"room": True}
             if re.match(r"blocked\b", text):
                 # sent all the same: the caller may have no name to give
-                print("chamber: `blocked` to all names nobody. A person is not notified by `all` (read on the bench "
-                      "server); when the question is for a person, send it --to that person's account "
+                print("chamber: `blocked` to all names nobody. A person is notified of it but it is not marked as "
+                      "mentioning them; when the question is for a person, send it --to that person's account "
                       "(`chamber members ROOM` marks it).", file=sys.stderr)
         else:
             t = user_id(to, me)
