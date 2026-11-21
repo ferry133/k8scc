@@ -550,6 +550,26 @@ check("Z7 announced after the restart, then restarted again: nothing comes back"
       until(lambda: os.path.exists(SOCK) and logged(LOG).count("continuing from the saved position") == 2
             and "0 message(s) kept" in logged(LOG).rsplit("continuing from", 1)[-1] and raw(SOCK, "GET", "/bridge/pending")[1] == b""))
 until(lambda: "the server confirms the account" in logged(LOG))
+# the race the runner found (run 44913510970): announced after a restart and
+# before the first sync round. With whoami unanswered no round ever happens.
+with fake.lock:
+    fake.batches.append([ev({"user_ids": ["@im-test:fake"]})])
+until(lambda: raw(SOCK, "GET", "/bridge/pending")[1] == b"1 cust-a\n")
+stop(p)
+with fake.lock:
+    fake.whoami_hangup = True
+p, SOCK, LOG = start("deliver", CHAMBER_MODE="deliver", CHAMBER_BRIDGE_IN_APP="1")
+until(lambda: os.path.exists(SOCK) and raw(SOCK, "GET", "/bridge/pending")[1] == b"1 cust-a\n")
+raw(SOCK, "POST", "/bridge/announced", body=b"1 cust-a\n")
+nosync = "the server confirms the account" not in logged(LOG).rsplit("continuing from", 1)[-1]
+stop(p)
+with fake.lock:
+    fake.whoami_hangup = False
+p, SOCK, LOG = start("deliver", CHAMBER_MODE="deliver", CHAMBER_BRIDGE_IN_APP="1")
+check("Z9 announced before the first sync round after a restart, restarted again: nothing comes back", (True, True),
+      (nosync, until(lambda: os.path.exists(SOCK) and logged(LOG).count("continuing from the saved position") == 4
+                     and raw(SOCK, "GET", "/bridge/pending")[1] == b"")))
+until(lambda: "the server confirms the account" in logged(LOG).rsplit("continuing from", 1)[-1])
 with fake.lock:
     fake.batches.append([ev({"user_ids": ["@im-test:fake"]})])
 until(lambda: raw(SOCK, "GET", "/bridge/pending")[1] == b"1 cust-a\n")

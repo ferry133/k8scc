@@ -461,6 +461,11 @@ def load_state(state_dir):
                     NAMES[r] = n
             kept = sum(PENDING.values())
         if since:
+            with LOCK:
+                # set here, not only after the first sync round: an `announced`
+                # that comes before that round must be saved too (it was not,
+                # and the next restart announced it again; run 44913510970)
+                STATE["since"] = since
             log("chamber-bridge: continuing from the saved position; %d message(s) kept for the session" % kept)
         return since
     except FileNotFoundError:
@@ -469,9 +474,12 @@ def load_state(state_dir):
         log("chamber-bridge: the saved sync state cannot be read (%s); starting from now" % type(e).__name__)
         return None
     try:
-        return open(os.path.join(state_dir, "sync-position")).read().strip() or None
+        since = open(os.path.join(state_dir, "sync-position")).read().strip() or None
     except OSError:
         return None
+    with LOCK:
+        STATE["since"] = since
+    return since
 
 
 def receive_loop(since, beat):
