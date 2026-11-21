@@ -72,16 +72,22 @@ start_server() {
 }
 # attach a client on a pty, as ttyd does; it types nothing
 attach() {
+    # TERM is set here, not inherited: a CI runner has none (or dumb), and tmux
+    # then refuses the client ("open terminal failed: terminal does not support
+    # clear"; reproduced with TERM=dumb on macOS, 2026-11-21; run 44910120765)
     if script --version 2>/dev/null | grep -q util-linux; then
-        { sleep 120 | script -q -c "tmux attach -t claude" /dev/null; } >/dev/null 2>&1 &
+        { sleep 120 | env TERM=xterm-256color script -q -c "tmux attach -t claude" /dev/null; } >"$work/attach.log" 2>&1 &
     else
-        { sleep 120 | script -q /dev/null tmux attach -t claude; } >/dev/null 2>&1 &
+        { sleep 120 | env TERM=xterm-256color script -q /dev/null tmux attach -t claude; } >"$work/attach.log" 2>&1 &
     fi
     cpid=$!
     local i; for i in 1 2 3 4 5 6 7 8 9 10; do
         [ "$(tmux display -p -t =claude: '#{session_attached}' 2>/dev/null)" = 1 ] && return 0; sleep 0.3
     done
-    return 1
+    # every cell after this one needs the client, so this is "cannot measure",
+    # not one FAIL among passes
+    echo "FAIL CANNOT MEASURE: no client attached ($(tr -d '\r' < "$work/attach.log" | LC_ALL=C tr -c '[:print:]' ' ' | head -c 300))"
+    exit 1
 }
 detach() { [ -n "$cpid" ] && kill "$cpid" 2>/dev/null; cpid=""; tmux detach-client -s claude 2>/dev/null; sleep 0.3; }
 
@@ -94,7 +100,7 @@ gate() { WATCH_TMUX_TIMEOUT=2 bash -c 'session=claude; . "$1/pane-gate"; shift; 
 for keys in emacs vi; do
     echo "the gate on a real tmux ($keys copy-mode keys)"
     start_server "$keys"
-    check "$keys: a client is attached" attach
+    attach
     check "$keys: positive control: the real capture of the idle prompt passes the gate" [ "$(gate pane_idle)" = "rc=0" ]
     tmux copy-mode -t =claude:
     check "$keys: in copy-mode the gate says so" [ "$(gate pane_idle | tr '\n' ' ')" = "pane in a mode rc=1 " ]
@@ -134,7 +140,7 @@ watch() {
 }
 typed() { tmux capture-pane -p -t =claude: -S - | grep -c 'chamber read cust-a'; }
 start_server emacs
-check "a client is attached" attach
+attach
 tmux copy-mode -t =claude:
 t0=$(date +%s); watch 3; t1=$(date +%s)
 check "copy-mode, a message waiting: three beats in $((t1 - t0))s, none of them stuck" [ $((t1 - t0)) -lt 8 ]
