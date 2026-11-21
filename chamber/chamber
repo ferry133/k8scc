@@ -21,9 +21,16 @@ room, never by who is named.
 answered when one of your own messages in the same read is a reply to it
 (`--reply-to`), or names its event id in the text, as the question for a
 person does (k8scc#101). A reply is always newer than what it answers, so a
-request inside the read has its reply inside it too. `--unanswered` lists only
-the messages from others that you have not answered: what a new session has
-still to handle.
+request inside the read has its reply inside it too. Your own messages carry
+no mark.
+
+`--unanswered` lists what a new session has still to handle: messages from
+others that are newer than your own last message in the room (none of those
+can have been answered). Older ones are not listed even when they carry no
+mark: you were active after them, and many were answered the old way (no
+thread, no id), needed no answer, or were cancelled by a later request, as a
+real room showed (k8scc#102). Their number goes to stderr; a plain `read`
+shows them.
 
 --reply-to puts the message into a thread under that event. A stock client
 shows a thread in the room as "N replies" with the last message only, so a
@@ -347,9 +354,14 @@ def main():
         mine = msgs if everything else [e for e in msgs if addressed_to(e, me)]
         answers = answered_by(msgs, me)
         if unanswered:
-            mine = [e for e in mine if e.get("sender") != me and e["event_id"] not in answers]
+            last_own = next((e["origin_server_ts"] for e in msgs if e.get("sender") == me), None)
+            others = [e for e in mine if e.get("sender") != me and e["event_id"] not in answers]
+            mine = [e for e in others if last_own is None or e["origin_server_ts"] > last_own]
+            if len(others) > len(mine):
+                print("(%d older message(s) with no mark, from before your last message here, were left out; a plain read shows them)"
+                      % (len(others) - len(mine)), file=sys.stderr)
         for e in reversed(mine[:n]):
-            show(e, answers.get(e["event_id"]))
+            show(e, answers.get(e["event_id"]) if e.get("sender") != me else None)
         if not everything and len(msgs) != len(mine):
             print("(%d message(s) not addressed to you were left out; --everything shows them)" % (len(msgs) - len(mine)), file=sys.stderr)
     elif cmd == "wait":

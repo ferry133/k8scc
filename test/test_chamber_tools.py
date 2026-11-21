@@ -255,16 +255,21 @@ def m(eid, sender, to, body, ts, rel=None):
     if rel:
         c["m.relates_to"] = {"rel_type": "m.thread", "event_id": rel}
     return {"type": "m.room.message", "event_id": eid, "sender": sender, "origin_server_ts": 1763700000000 + ts, "content": c}
-R1, R2, R3, R4 = "$req1aaaaaaaaa", "$req2bbbbbbbbb", "$req3ccccccccc", "$req4ddddddddd"
+R0, R1, R2, R3, R4 = "$req0zzzzzzzzz", "$req1aaaaaaaaa", "$req2bbbbbbbbb", "$req3ccccccccc", "$req4ddddddddd"
 Room.chunk = list(reversed([
+    m(R0, "@fac:fake", "@t:fake", "T0: answered the old way, no thread, no id", 500),
+    m("$old0hhhhhhhhh", "@t:fake", "@fac:fake", "done", 600),
     m(R1, "@fac:fake", "@t:fake", "T1: delete the route", 1000),
     m("$ack1eeeeeeeee", "@t:fake", "@fac:fake", "ack", 2000, rel=R1),                      # a reply in the thread
+    m("$mid1jjjjjjjjj", "@fac:fake", "@t:fake", "T1b: cancelled by a later request", 2500),  # between my messages, no mark
     m(R2, "@fac:fake", "@t:fake", "T2: may I change the bridge", 3000),
     m("$ask2fffffffff", "@t:fake", "@person:fake", "blocked: about %s, may I?" % R2, 4000),  # the question for a person names it
+    m("$see2iiiiiiiii", "@t:fake", "@fac:fake", "see $ack1eeeeeeeee", 4500),                # my own message naming my own
     m(R3, "@fac:fake", "@t:fake", "T3: check the backups", 5000),
     m("$oth3ggggggggg", "@fac:fake", "@t:fake", "a reminder about T3", 6000, rel=R3),    # someone else's reply in its thread
     m(R4, "@fac:fake", "all", "T4: everyone, report", 7000),
 ]))
+Room.chunk_full = list(Room.chunk)
 rc, o, e = client(ROOM_URL, "read", "room-a")
 line = lambda eid: next((l for l in o.splitlines() if " %s " % eid in l), "")
 check("A1 a request with my reply in its thread is marked, naming the reply", (0, True), (rc, line(R1).endswith("(answered by you: $ack1eeeeeeeee)")))
@@ -275,6 +280,16 @@ check("A4 control: a request to all that nobody answered is not marked", (True, 
 rc, o, e = client(ROOM_URL, "read", "room-a", "--unanswered")
 ids = [l.split()[2] for l in o.splitlines() if l[:2] == "20"]
 check("A5 --unanswered: only what others asked and I have not answered, oldest first", (0, [R3, "$oth3ggggggggg", R4]), (rc, ids))
+check("A5b … older messages with no mark (also one between my messages) are not listed; stderr counts them", (False, False, True),
+      (R0 in ids, "$mid1jjjjjjjjj" in ids, "(2 older message(s) with no mark" in e))
+rc, o, e = client(ROOM_URL, "read", "room-a", "20", "--everything")
+check("A5c control: a plain read still shows it, unmarked; and my own messages carry no mark", (True, False, False),
+      (" %s " % R0 in o, "answered" in line(R0), "answered" in next((l for l in o.splitlines() if " $ack1eeeeeeeee " in l), "x answered")))
+Room.chunk = [e_ for e_ in Room.chunk if e_["sender"] != "@t:fake"]
+rc, o, e = client(ROOM_URL, "read", "room-a", "--unanswered")
+ids = [l.split()[2] for l in o.splitlines() if l[:2] == "20"]
+check("A5d with no message of mine in the window, everything addressed to me is listed", (0, [R0, R1, "$mid1jjjjjjjjj", R2, R3, "$oth3ggggggggg", R4]), (rc, ids))
+Room.chunk = Room.chunk_full
 rc, o, e = client(ROOM_URL, "read", "room-a", "--unanswered", "--everything")
 ids = [l.split()[2] for l in o.splitlines() if l[:2] == "20"]
 check("A6 --unanswered --everything: my own messages are never listed (and the others are)", (0, False, False, True),
