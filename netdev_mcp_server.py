@@ -839,6 +839,9 @@ def attachment(pod_ip: str, clients, devices) -> "list[str] | None":
     return out
 
 
+GATEWAY_TYPES = ("ugw", "udm", "uxg")   # UniFi's gateway device types
+
+
 def _device_names(d: dict) -> set:
     return {str(d.get(k)).lower() for k in ("_id", "id", "mac", "macAddress") if d.get(k)}
 
@@ -846,11 +849,11 @@ def _device_names(d: dict) -> set:
 def uplink_path(attached: list, devices) -> "tuple[list[dict], str]":
     """Every device between this node and the root of the UniFi tree: what the
     node is attached to, then each `uplink.uplink_mac` in turn, up to the device
-    that has none (the gateway, on FAC1). Read on FAC1's console (UCG Ultra,
+    that has none, which must be a gateway (ugw/udm/uxg). Read on FAC1's console (UCG Ultra,
     Network 11.0.99, k8scc#104): every legacy stat/device row carries `uplink`,
     and only the gateway's has no `uplink_mac`. Returns (path, "") or ([], why
     the walk could not finish): an attachment or an uplink that names no device
-    in the list, or a loop. The caller refuses on the second (fail closed): a
+    in the list, a device other than a gateway with no uplink, or a loop. The caller refuses on the second (fail closed): a
     device the walk could not reach may be the one that carries im's path."""
     by_name = {}
     for d in devices or []:
@@ -872,7 +875,11 @@ def uplink_path(attached: list, devices) -> "tuple[list[dict], str]":
             up = d.get("uplink") if isinstance(d.get("uplink"), dict) else {}
             nxt = str(up.get("uplink_mac") or "").lower()
             if not nxt:
-                break
+                # only a gateway may be the root: any other device with no uplink
+                # is a chain cut short, not the top (fleet-ops-d5 on #106)
+                if str(d.get("type") or "").lower() in GATEWAY_TYPES:
+                    break
+                return [], f"{d.get('name') or d.get('mac')} names no uplink and is not a gateway"
             parent = by_name.get(nxt)
             if parent is None:
                 return [], f"{d.get('name') or d.get('mac')}'s uplink {nxt} is not in the device list"
@@ -1361,7 +1368,7 @@ def _class_a_refusal(plan: Plan, ctx: dict) -> str:
             # legacy stat/device's `ip` for a gateway may be its WAN address, so
             # its type counts on its own (ugw/udm/uxg: UniFi's gateway types)
             if mac == plan.gateway_mac and ((d.get("ipAddress") or d.get("ip")) in _gateway_ips(ctx["networks"], ctx["controller_ip"])
-                                            or str(d.get("type") or "").lower() in ("ugw", "udm", "uxg")):
+                                            or str(d.get("type") or "").lower() in GATEWAY_TYPES):
                 if plan.tool == "power_cycle_port":
                     # what hangs off a gateway port is not read (a downstream switch,
                     # the WAN modem), so every port is refused, like the node's switch

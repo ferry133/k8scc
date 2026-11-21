@@ -1080,6 +1080,9 @@ class ClassA(Case):
         for case, devs in {
             "an uplink naming no device": devices(uplink_mac="aa:aa:aa:00:00:99"),
             "a loop": devices(uplink_mac=AP),
+            # fleet-ops-d5's mutation on FAC1's data (#106): the switch's uplink
+            # removed; the walk stopped there and the gateway left the path
+            "a switch with no uplink (only a gateway may be the root)": devices(),
         }.items():
             with self.subTest(case=case):
                 # the AP itself is off the path; a broken walk refuses it anyway
@@ -1090,6 +1093,11 @@ class ClassA(Case):
             f = json.loads(json.dumps(FIXTURES))
             next(c for c in f["clients"] if c["ip"] == self.POD)["sw_mac"] = "aa:aa:aa:00:00:98"
             self.assertIn("cannot be read", self.m.class_a("devices", "dev-ap", **self.args(clients=f["clients"])))
+        with self.subTest(case="node on Wi-Fi, the switch's uplink gone: the gateway is not silently dropped"):
+            out = self.m.class_a("devices", "dev-gw", **self.args(clients=self.on_wifi(), devices=devices()))
+            self.assertIn("names no uplink and is not a gateway", out)
+        with self.subTest(control="the gateway as root with no uplink_mac is not broken"):
+            self.assertIn("on the path", self.m.class_a("devices", "dev-gw", **self.args(clients=self.on_wifi())))
         with self.subTest(control="the same switch, uplink to the gateway: the AP passes"):
             self.assertIsNone(self.m.class_a("devices", "dev-ap", **self.args(devices=devices(uplink_mac=GW))))
         with self.subTest(control="a broken chain does not touch other collections"):
