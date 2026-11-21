@@ -98,6 +98,20 @@ NETDEV_ALLOW=(mcp__netdev)   # server-level: the write tools arrive in a later i
 # pipe from printf, `2>&1`, and a full MXID; it does NOT cover a trailing
 # `; echo "exit=$?"` (that echo is not read-only), nor `&& kubectl …`.
 CHAMBER_ALLOW=('Bash(chamber send *)')
+# k8scc#98 (ferry133, 2026-11-21, asked whether im's kubectl gets an allow
+# rule: 「yes.」): under R21 an instruction in im's own room weighs as words at
+# the ttyd, and the auto mode classifier still refused the kubectl that carried
+# it out (T1b, `delete httproute echo-ext`). Written with CHAMBER_ALLOW, only
+# while CHAMBER_URL is set: the rule exists so room instructions can land, and
+# an im without a room does not need it.
+# ⚠️ The cost: a command this rule matches is not judged by the classifier,
+# whoever caused it, an injection in a tool's output included. What is left is
+# im's RBAC and im-policy.
+# Measured with a headless claude (2.1.330, dontAsk, a fake kubectl; the image
+# pins 2.1.261), each against a control without the rule (refused): it covers
+# a bare call, `2>&1`, `| grep`, `&& kubectl …`, and `; echo done`; it does NOT
+# cover `; echo "--- exit=$?"`, `&& rm …`, or an env prefix `KUBECONFIG=… kubectl`.
+KUBECTL_ALLOW=('Bash(kubectl *)')
 
 # configure_ha_mcp: register Home Assistant's MCP server as `ha` (openspec
 # im-ha-mcp). Both inputs must be here -- HA_MCP_URL non-empty and the token
@@ -363,8 +377,8 @@ fi
 # The chamber (openspec im-chamber-client): CHAMBER_URL is set in `app` only
 # when the bridge sidecar exists. Empty or unset -> nothing written.
 if [ -n "${CHAMBER_URL:-}" ]; then
-    if ! merge_permissions "${CLAUDE_HOME}/.claude/settings.json" "${CHAMBER_ALLOW[@]}"; then
-        echo "⚠ settings.json 的 chamber send permission 設定沒有寫入（見上一行）——回覆房間時可能被擋" >&2
+    if ! merge_permissions "${CLAUDE_HOME}/.claude/settings.json" "${CHAMBER_ALLOW[@]}" "${KUBECTL_ALLOW[@]}"; then
+        echo "⚠ settings.json 的 chamber send／kubectl permission 設定沒有寫入（見上一行）——回覆房間或照房間指令動作時可能被擋" >&2
     fi
 fi
 
