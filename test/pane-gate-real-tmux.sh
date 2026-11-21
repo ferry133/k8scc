@@ -37,11 +37,28 @@ cpid=""
 cleanup() { [ -n "$cpid" ] && kill "$cpid" 2>/dev/null; tmux kill-server 2>/dev/null; rm -rf "$work"; }
 trap cleanup EXIT
 mkdir -p "$work/bin"
-cp "$(command -v cat)" "$work/bin/claude"
-# macOS kills a copied system binary (its signature no longer matches the
-# path; measured 2026-11-21: rc 137), so re-sign it ad hoc there
-if [ "$(uname)" = Darwin ]; then codesign --force -s - "$work/bin/claude" 2>/dev/null; fi
-echo | "$work/bin/claude" >/dev/null 2>&1 || { echo "FAIL CANNOT MEASURE: the pane's stand-in for claude does not run"; exit 1; }
+# The pane's process must be one tmux names `claude`, because chamber-watch
+# checks #{pane_current_command}. Two candidates, and the one tmux really names
+# claude is used (tmux reads the name differently per OS):
+#  (a) a copy of cat called claude. macOS kills a copied system binary until it
+#      is re-signed (measured 2026-11-21: rc 137); on a runner it did not run
+#      at all (run 44909733610, tmux 3.6; a multi-call coreutils is a guess).
+#  (b) bash reading stdin, started as `exec -a claude`; on macOS tmux names it
+#      bash (measured), on Linux it reads argv[0] (read, not measured).
+cp "$(command -v cat)" "$work/bin/claude-a"
+if [ "$(uname)" = Darwin ]; then codesign --force -s - "$work/bin/claude-a" 2>/dev/null; fi
+mv "$work/bin/claude-a" "$work/bin/claude"
+printf '%s\n' '#!/usr/bin/env bash' "exec -a claude bash -c 'while IFS= read -r _; do :; done'" > "$work/bin/claude-b"
+chmod +x "$work/bin/claude-b"
+standin=""; readings=""
+for c in claude claude-b; do
+    tmux -f /dev/null new-session -d -s probe "exec '$work/bin/$c'" 2>/dev/null; sleep 0.5
+    r=$(tmux display -p -t =probe: '#{pane_current_command}' 2>&1); tmux kill-server 2>/dev/null; sleep 0.3
+    readings+=" $c:'${r}'"
+    [ "$r" = claude ] && { standin="$work/bin/$c"; break; }
+done
+[ -n "$standin" ] || { echo "FAIL CANNOT MEASURE: no stand-in that tmux names claude (read:${readings}; cat run: $(echo | "$work/bin/claude" 2>&1 | head -c 200))"; exit 1; }
+echo "stand-in: ${standin##*/} (tmux read:${readings})"
 
 # the rule-drawn idle prompt, as in the inbox-watch fixtures
 printf '%s\n' '● Restart applied.' '────────────────────────────────────────────' '❯ ' \
@@ -49,7 +66,7 @@ printf '%s\n' '● Restart applied.' '──────────────
 
 start_server() {
     tmux kill-server 2>/dev/null; sleep 0.3
-    tmux -f /dev/null new-session -d -s claude -x 200 -y 50 "cat '$work/idle'; exec '$work/bin/claude'"
+    tmux -f /dev/null new-session -d -s claude -x 200 -y 50 "cat '$work/idle'; exec '$standin'"
     tmux set -g mode-keys "$1"
     sleep 0.5
 }
