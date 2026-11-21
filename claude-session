@@ -90,6 +90,14 @@ TALOS_UNASK=(mcp__talos__reboot_node)   # where this profile put it before 2026-
 APPS_ALLOW=('Bash(git *)' 'Bash(sops *)')
 HA_ALLOW=(mcp__ha)   # server-level: HA's tool names follow its expose settings
 NETDEV_ALLOW=(mcp__netdev)   # server-level: the write tools arrive in a later image, under the same rule
+# k8scc#93 (ferry133, 2026-11-21: 「好，加 chamber send 的 allow 規則」): the
+# session's auto mode classifier refused an `ack` whose text said what im was
+# about to do, and im stopped without a word. Only `send`; nothing else.
+# Measured with a headless claude (2.1.327, dontAsk; the image pins 2.1.261):
+# the rule matches a one-line or multi-line single-quoted text, a heredoc, a
+# pipe from printf, `2>&1`, and a full MXID; it does NOT cover a trailing
+# `; echo "exit=$?"` (that echo is not read-only), nor `&& kubectl …`.
+CHAMBER_ALLOW=('Bash(chamber send *)')
 
 # configure_ha_mcp: register Home Assistant's MCP server as `ha` (openspec
 # im-ha-mcp). Both inputs must be here -- HA_MCP_URL non-empty and the token
@@ -349,6 +357,14 @@ fi
 if configure_apps_repo "${CLAUDE_HOME}"; then
     if ! merge_permissions "${CLAUDE_HOME}/.claude/settings.json" "${APPS_ALLOW[@]}"; then
         echo "⚠ settings.json 的 git/sops permission 設定沒有寫入（見上一行）" >&2
+    fi
+fi
+
+# The chamber (openspec im-chamber-client): CHAMBER_URL is set in `app` only
+# when the bridge sidecar exists. Empty or unset -> nothing written.
+if [ -n "${CHAMBER_URL:-}" ]; then
+    if ! merge_permissions "${CLAUDE_HOME}/.claude/settings.json" "${CHAMBER_ALLOW[@]}"; then
+        echo "⚠ settings.json 的 chamber send permission 設定沒有寫入（見上一行）——回覆房間時可能被擋" >&2
     fi
 fi
 
