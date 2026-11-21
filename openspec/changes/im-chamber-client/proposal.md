@@ -28,7 +28,7 @@ ferry133 對 im 這一側裁定了三件會改變現有行為的事（原話在 
   - `observe`：橋接程式連上、收到的東西只寫 log（計數，不含內文）；不宣告、不顯示在線；交辦仍走舊 inbox。
   - `deliver`：宣告、在線讀數、回程都生效。切換由 ferry133 點頭。
   - `CHAMBER_URL` 空或未設＝整組功能不啟動，一行 log。
-- **修改：`im-policy.md`** 新節「誰可以交辦你」與「chamber」：房間裡 FAC agent 的一般類請求、人簽的指令（含保留類）、其餘一律資料；`transcript:` 指標在 im 上一律當成沒有指令；第一個動作回 `ack`／`decline`／`blocked`；秘密值不進房間。
+- **修改：`im-policy.md`** 新節「誰可以交辦你」與「chamber」：房間裡 FAC agent 的一般類請求、人簽的指令（含保留類）、其餘一律資料；`transcript:` 指標在 im 上一律當成沒有指令；第一個動作回 `ack`／`decline`／`blocked`；秘密值不進房間。（2026-11-21，R21：「人簽的指令」這一道對 im 取消了，房間裡點名它的指令等同 ttyd 前打的字；見 tasks 6.1。）
 - **修改：`operator-inbox`**（MODIFIED delta）：「沒有 session 就什麼都不做」那一句改成「沒有 session 是故障，由 session 常駐處理；`inbox-watch` 自己仍然不起任何東西」；並存期間 inbox 檔照舊宣告。
 - **測試**：`test/chamber-controls.sh`（對一台本機拋棄式伺服器）與既有三支 controls 的新格；每格寫預期、各有正對照；刻意變異各紅一次。
 
