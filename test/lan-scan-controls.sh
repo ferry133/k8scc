@@ -36,6 +36,20 @@ check "three networks: six runs" [ "$(grep -c '^--- ' "$work/log")" = 6 ]
 check "… each network once per tool" [ "$(grep -cx '10.9.8.0/24' "$work/log")" = 2 ]
 scan 10.9.0.0/16; check "/16 is the widest accepted" [ $? = 0 ]
 
+echo "private networks only, passed on as decimal (fleet-ops-d5 on #107)"
+for net in 172.16.0.0/16 172.31.5.0/24 192.168.1.0/24 10.255.0.0/16; do
+  scan "$net"; check "accepted: $net" [ $? = 0 ]
+done
+for net in 8.8.8.0/24 1.34.181.0/24 172.15.0.0/16 172.32.0.0/16 192.169.0.0/16 11.0.0.0/16 100.64.0.0/16; do
+  scan "$net"; rc=$?
+  check "refused, not private: $net" [ "$rc" = 2 ]
+  check "… neither tool ran: $net" [ ! -s "$work/log" ]
+done
+scan 010.009.009.000/24
+check "leading zeros: passed on as decimal, not as typed (010 is octal 8 to inet_aton)" \
+  [ "$(cat "$work/log")" = "$(printf '%s\n' '--- nmap' -sn -n 10.9.9.0/24 '--- arp-scan' 10.9.9.0/24)" ]
+scan 10.9.9.0/024; check "a three-digit prefix is refused" [ $? = 2 ]
+
 echo "a tool that fails"
 touch "$work/nmap.fail"; scan 10.9.9.0/24; rc=$?; rm -f "$work/nmap.fail"
 check "rc 1" [ "$rc" = 1 ]
@@ -45,7 +59,7 @@ echo "refused before either tool runs"
 for args in \
     "10.9.9.0/24 --script=x" "--script=x 10.9.9.0/24" "-oN /tmp/x" "10.9.9.0/24 -oN /tmp/x" \
     "-iL /etc/passwd" "--pcapsavefile=/tmp/x 10.9.9.0/24" "-sS 10.9.9.0/24" "10.9.9.1" \
-    "10.0.0.0/8" "10.9.9.0/33" "10.9.9.256/24" "999.9.9.0/24" "10.9.9.0/24;id" '10.9.9.0/24$(id)' \
+    "10.0.0.0/8" "10.9.9.0/33" "8.8.8.0/24" "10.9.9.256/24" "999.9.9.0/24" "10.9.9.0/24;id" '10.9.9.0/24$(id)' \
     "10.9.9.0/24
 10.9.8.0/24" "fe80::/64" "localhost" ""; do
     # word-split on purpose: each case is the argv im would type

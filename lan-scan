@@ -11,7 +11,8 @@
 # `-oN <path>` (writes any file) and `-iL <file>` (reads one), and arp-scan has
 # `--pcapsavefile` (found by the commit security review, 2026-11-22). So the
 # arguments here are networks only: dotted IPv4, each octet 0-255, prefix
-# 16-32 (a /8 is 16 million addresses), at most 8 of them. Anything else is
+# 16-32 (a /8 is 16 million addresses), private (RFC 1918), at most 8 of
+# them, passed on rebuilt from their decimal values. Anything else is
 # refused before either tool runs, and nothing from the arguments is passed
 # that a tool could read as an option.
 #
@@ -23,19 +24,32 @@ set -uo pipefail
 usage() { echo "usage: lan-scan <IPv4 network/prefix 16-32> [...] (at most 8)" >&2; exit 2; }
 
 [ $# -ge 1 ] && [ $# -le 8 ] || usage
+nets=()
 for net in "$@"; do
     if ! [[ "$net" =~ ^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})/([0-9]{1,2})$ ]]; then
         echo "lan-scan: refused $(printf %q "$net"): not an IPv4 network/prefix" >&2; exit 2
     fi
+    o=()
     for i in 1 2 3 4; do
-        [ "$((10#${BASH_REMATCH[$i]}))" -le 255 ] || { echo "lan-scan: refused $(printf %q "$net"): octet over 255" >&2; exit 2; }
+        o+=("$((10#${BASH_REMATCH[$i]}))")
+        [ "${o[$((i - 1))]}" -le 255 ] || { echo "lan-scan: refused $(printf %q "$net"): octet over 255" >&2; exit 2; }
     done
     p=$((10#${BASH_REMATCH[5]}))
     [ "$p" -ge 16 ] && [ "$p" -le 32 ] || { echo "lan-scan: refused $(printf %q "$net"): prefix must be 16-32" >&2; exit 2; }
+    # private networks only (RFC 1918): this command needs nobody's nod, so it
+    # must not reach past the LAN. With a prefix of 16 or more, the first two
+    # octets decide (fleet-ops-d5 on #107).
+    if ! { [ "${o[0]}" = 10 ] || { [ "${o[0]}" = 172 ] && [ "${o[1]}" -ge 16 ] && [ "${o[1]}" -le 31 ]; } \
+           || { [ "${o[0]}" = 192 ] && [ "${o[1]}" = 168 ]; }; }; then
+        echo "lan-scan: refused $(printf %q "$net"): not a private network (10/8, 172.16/12, 192.168/16)" >&2; exit 2
+    fi
+    # what the tools get is rebuilt from the decimal values: `010` would be
+    # octal 8 to inet_aton, which nmap may use (fleet-ops-d5 on #107)
+    nets+=("${o[0]}.${o[1]}.${o[2]}.${o[3]}/$p")
 done
 
 rc=0
-for net in "$@"; do
+for net in "${nets[@]}"; do
     echo "## nmap -sn -n $net"
     nmap -sn -n "$net" || rc=1
     echo "## arp-scan $net"
