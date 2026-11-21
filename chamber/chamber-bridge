@@ -76,7 +76,10 @@ Configuration (environment)
   CHAMBER_TOKEN_FILE   file holding the login credential (default /etc/chamber/token)
   CHAMBER_MODE         observe | deliver (default observe)
   CHAMBER_SOCKET       where to listen (default /run/chamber/bridge.sock)
-  CHAMBER_STATE_DIR    where the sync position is kept (default: the socket's directory)
+  CHAMBER_STATE_DIR    where the sync position and the counts not yet announced
+                       are kept, file `sync-state` (default: the socket's
+                       directory). Only a directory that outlives the pod keeps
+                       them across a pod's replacement (k8scc#97)
   CHAMBER_BEAT         seconds between status lines (default 20)
   CHAMBER_CA           CA bundle for a privately signed server
   CHAMBER_BRIDGE_IN_APP=1          say in the start line that the credential is inside app
@@ -281,6 +284,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     PENDING[rid] -= took
                     if took:
                         done[label(rid)] -= took
+                save_state()
             return self.answer(200, b"ok\n", "text/plain")
         return self.refuse(404, "CHAMBER_NOT_FORWARDED", "this path is not forwarded")
 
@@ -416,15 +420,76 @@ def addressed(event, me):
     return bool(m.get("room")) or me in (m.get("user_ids") or [])
 
 
-def receive_loop(state_dir, beat):
-    """Count what arrives, per room. The position is kept in a file and used
-    again after a restart: a repeated initial sync hands back a cached, stale
-    position (root reading, Synapse 1.165.0)."""
-    pos_file = os.path.join(state_dir, "sync-position")
+STATE = {"file": None, "since": None}   # where the sync state is kept, and the position in it
+
+
+def save_state():
+    """Write the position, the counts not yet announced and the room names in
+    one file, replaced whole (k8scc#97). One file, so a restart can never find
+    a position past messages whose count was not kept, and a count already
+    announced is never found again. Call with LOCK held."""
+    f = STATE["file"]
+    if not f or STATE["since"] is None:
+        return
+    body = json.dumps({"since": STATE["since"], "pending": {r: n for r, n in PENDING.items() if n > 0},
+                       "names": {r: NAMES[r] for r in PENDING if r in NAMES and PENDING[r] > 0}})
     try:
-        since = open(pos_file).read().strip() or None
+        tmp = f + ".tmp"
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as fh:
+            fh.write(body)
+        os.replace(tmp, f)
+    except OSError as e:
+        log("chamber-bridge: cannot save the sync state (%s)" % type(e).__name__)
+
+
+def load_state(state_dir):
+    """-> the saved position or None; fills PENDING and NAMES from the file.
+    A position file of the earlier format (`sync-position`) is read too."""
+    STATE["file"] = os.path.join(state_dir, "sync-state")
+    try:
+        d = json.load(open(STATE["file"]))
+        since = d.get("since") if isinstance(d.get("since"), str) and d["since"] else None
+        pend = d.get("pending") if isinstance(d.get("pending"), dict) else {}
+        names = d.get("names") if isinstance(d.get("names"), dict) else {}
+        with LOCK:
+            for r, n in pend.items():
+                if isinstance(r, str) and isinstance(n, int) and n > 0 and MODE == "deliver":
+                    PENDING[r] = n
+            for r, n in names.items():
+                if isinstance(r, str) and isinstance(n, str):
+                    NAMES[r] = n
+            kept = sum(PENDING.values())
+        if since:
+            with LOCK:
+                # set here, not only after the first sync round: an `announced`
+                # that comes before that round must be saved too (it was not,
+                # and the next restart announced it again; run 44913510970)
+                STATE["since"] = since
+            log("chamber-bridge: continuing from the saved position; %d message(s) kept for the session" % kept)
+        return since
+    except FileNotFoundError:
+        pass
+    except (OSError, ValueError, AttributeError) as e:
+        log("chamber-bridge: the saved sync state cannot be read (%s); starting from now" % type(e).__name__)
+        return None
+    try:
+        since = open(os.path.join(state_dir, "sync-position")).read().strip() or None
     except OSError:
-        since = None
+        return None
+    with LOCK:
+        STATE["since"] = since
+    return since
+
+
+def receive_loop(since, beat):
+    """Count what arrives, per room. The position and the counts not yet
+    announced are kept in a file and used again after a restart: a repeated
+    initial sync hands back a cached, stale position (root reading, Synapse
+    1.165.0), and a count kept only in memory is lost with the process
+    (k8scc#97). The file survives only where CHAMBER_STATE_DIR does. The
+    state is loaded by the caller, before the socket is served, so that no
+    reading of the list comes before the kept counts."""
     names = {}
     while True:
         if ME is None:
@@ -440,7 +505,8 @@ def receive_loop(state_dir, beat):
             continue
         if since is None:
             log("chamber-bridge: receiving from now (no saved position)")
-        else:
+        added = {}
+        if since is not None:
             joined = (d.get("rooms") or {}).get("join") or {}
             for rid in sorted(joined):
                 ev = ((joined[rid] or {}).get("timeline") or {}).get("events") or []
@@ -451,18 +517,14 @@ def receive_loop(state_dir, beat):
                         names = room_names()[0] or names
                     log("chamber-bridge: received room=%s for-me=%d other=%d" % (printable(names.get(rid, rid)), mine, len(ev) - mine))
                     if MODE == "deliver" and mine:
-                        with LOCK:
-                            NAMES.update(names)
-                            PENDING[rid] = PENDING.get(rid, 0) + mine
+                        added[rid] = mine
         since = d["next_batch"]
-        try:
-            tmp = pos_file + ".tmp"
-            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-            with os.fdopen(fd, "w") as f:
-                f.write(since)
-            os.replace(tmp, pos_file)
-        except OSError as e:
-            log("chamber-bridge: cannot save the sync position (%s)" % type(e).__name__)
+        with LOCK:
+            NAMES.update(names)
+            for rid, n in added.items():
+                PENDING[rid] = PENDING.get(rid, 0) + n
+            STATE["since"] = since
+            save_state()
 
 
 def settings():
@@ -579,7 +641,8 @@ def main():
         "the credential is inside app (no sidecar)" if env("CHAMBER_BRIDGE_IN_APP") == "1" else "the credential is in this container only",
         " — insecure http accepted (test only)" if insecure else ""))
     threading.Thread(target=status_loop, args=(beat,), daemon=True).start()
-    threading.Thread(target=receive_loop, args=(state_dir, beat), daemon=True).start()
+    since = load_state(state_dir)   # before serve_forever: connections wait in the backlog until then
+    threading.Thread(target=receive_loop, args=(since, beat), daemon=True).start()
     if MODE == "deliver":
         threading.Thread(target=presence_loop, args=(beat,), daemon=True).start()
     try:

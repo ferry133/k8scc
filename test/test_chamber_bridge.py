@@ -358,9 +358,12 @@ check("R1 the redirect comes back as it is, and the other server was asked nothi
 check("R2 control: the other server answers when asked directly", 200, direct(other, "GET", P + "/account/whoami"))
 
 print("the sync position survives a restart")
-pos = os.path.join(os.path.dirname(SOCK), "sync-position")
+pos = os.path.join(os.path.dirname(SOCK), "sync-state")
 until(lambda: os.path.exists(pos), 3)
-saved = open(pos).read() if os.path.exists(pos) else ""
+try:
+    saved = json.load(open(pos)).get("since") or ""
+except (OSError, ValueError):
+    saved = ""
 check("N1 a position is saved, mode 0600", (True, 0o600), (saved.startswith("s"), stat.S_IMODE(os.stat(pos).st_mode) if os.path.exists(pos) else None))
 stop(p)
 check("N2 the socket is gone after the bridge ends", False, os.path.exists(SOCK))
@@ -518,6 +521,64 @@ raw(SOCK, "POST", "/bridge/announced", body=b"2 cust-a\njunk\n9 nowhere\n")
 check("Q6 all announced (with junk lines beside): the list is empty again", b"", raw(SOCK, "GET", "/bridge/pending")[1])
 check("Q7 an unknown local path is 404, a wrong method too", [404, 404, 404],
       [raw(SOCK, "GET", "/bridge/nothing")[0], raw(SOCK, "GET", "/bridge/beat")[0], raw(SOCK, "POST", "/bridge/pending")[0]])
+
+print("deliver: what waits for the session survives a restart (k8scc#97)")
+with fake.lock:
+    fake.batches.append([ev({"user_ids": ["@im-test:fake"]}), ev({"room": True})])
+until(lambda: raw(SOCK, "GET", "/bridge/pending")[1] == b"2 cust-a\n")
+raw(SOCK, "POST", "/bridge/announced", body=b"1 cust-a\n")
+check("Z1 two for the im, one announced before the restart: one waits", b"1 cust-a\n", raw(SOCK, "GET", "/bridge/pending")[1])
+stf = os.path.join(os.path.dirname(SOCK), "sync-state")
+body = open(stf).read() if os.path.exists(stf) else ""
+check("Z2 the state file: 0600, the count kept, no message text, no sender", (0o600, True, False, False),
+      (stat.S_IMODE(os.stat(stf).st_mode) if body else None, '"pending": {"!r1:fake": 1}' in body, SECRET_TEXT in body, SENDER in body))
+stop(p)
+p, SOCK, LOG = start("deliver", CHAMBER_MODE="deliver", CHAMBER_BRIDGE_IN_APP="1")
+check("Z3 after the restart the one not announced waits again, and the announced one does not come back", True,
+      until(lambda: os.path.exists(SOCK) and raw(SOCK, "GET", "/bridge/pending")[1] == b"1 cust-a\n"))
+check("Z4 … the log says the position and the count were kept", True,
+      until(lambda: "continuing from the saved position; 1 message(s) kept for the session" in logged(LOG)))
+check("Z5 … the room's name came back with it (typeable, not '-')", True, raw(SOCK, "GET", "/bridge/pending")[1].endswith(b" cust-a\n"))
+p4, sock4, log4 = start("deliver-fresh", CHAMBER_MODE="deliver", CHAMBER_BRIDGE_IN_APP="1")
+check("Z6 control: a bridge with no saved state starts from now with nothing waiting", (True, b""),
+      (until(lambda: "receiving from now" in logged(log4)), raw(sock4, "GET", "/bridge/pending")[1] if os.path.exists(sock4) else None))
+stop(p4)
+raw(SOCK, "POST", "/bridge/announced", body=b"1 cust-a\n")
+stop(p)
+p, SOCK, LOG = start("deliver", CHAMBER_MODE="deliver", CHAMBER_BRIDGE_IN_APP="1")
+check("Z7 announced after the restart, then restarted again: nothing comes back", True,
+      until(lambda: os.path.exists(SOCK) and logged(LOG).count("continuing from the saved position") == 2
+            and "0 message(s) kept" in logged(LOG).rsplit("continuing from", 1)[-1] and raw(SOCK, "GET", "/bridge/pending")[1] == b""))
+until(lambda: "the server confirms the account" in logged(LOG))
+# the race the runner found (run 44913510970): announced after a restart and
+# before the first sync round. With whoami unanswered no round ever happens.
+with fake.lock:
+    fake.batches.append([ev({"user_ids": ["@im-test:fake"]})])
+until(lambda: raw(SOCK, "GET", "/bridge/pending")[1] == b"1 cust-a\n")
+stop(p)
+with fake.lock:
+    fake.whoami_hangup = True
+p, SOCK, LOG = start("deliver", CHAMBER_MODE="deliver", CHAMBER_BRIDGE_IN_APP="1")
+until(lambda: os.path.exists(SOCK) and raw(SOCK, "GET", "/bridge/pending")[1] == b"1 cust-a\n")
+raw(SOCK, "POST", "/bridge/announced", body=b"1 cust-a\n")
+nosync = "the server confirms the account" not in logged(LOG).rsplit("continuing from", 1)[-1]
+stop(p)
+with fake.lock:
+    fake.whoami_hangup = False
+p, SOCK, LOG = start("deliver", CHAMBER_MODE="deliver", CHAMBER_BRIDGE_IN_APP="1")
+check("Z9 announced before the first sync round after a restart, restarted again: nothing comes back", (True, True),
+      (nosync, until(lambda: os.path.exists(SOCK) and logged(LOG).count("continuing from the saved position") == 4
+                     and raw(SOCK, "GET", "/bridge/pending")[1] == b"")))
+until(lambda: "the server confirms the account" in logged(LOG).rsplit("continuing from", 1)[-1])
+with fake.lock:
+    fake.batches.append([ev({"user_ids": ["@im-test:fake"]})])
+until(lambda: raw(SOCK, "GET", "/bridge/pending")[1] == b"1 cust-a\n")
+stop(p)
+p, SOCK, LOG = start("deliver", CHAMBER_MODE="deliver", CHAMBER_BRIDGE_IN_APP="1")
+check("Z8 #97 itself: received, never announced, restarted: it waits", True,
+      until(lambda: os.path.exists(SOCK) and raw(SOCK, "GET", "/bridge/pending")[1] == b"1 cust-a\n"))
+raw(SOCK, "POST", "/bridge/announced", body=b"1 cust-a\n")
+until(lambda: "the server confirms the account" in logged(LOG))
 
 print("the real chamber-watch against the real bridge")
 if not shutil.which("curl"):
