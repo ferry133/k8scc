@@ -121,6 +121,14 @@ jobs:
         run: test/chamber-watch-controls.sh
       - name: Check the session-keep controls
         run: test/session-keep-controls.sh
+      # the pane gate and chamber-watch against a REAL tmux (k8scc#95): what
+      # send-keys does in copy-mode is the one thing a fake tmux cannot show.
+      # No tmux on the runner is a failure of the step, never a skip.
+      - name: Check the pane gate on a real tmux
+        run: |
+          command -v tmux >/dev/null || { sudo apt-get update -q && sudo apt-get install -y -q tmux; }
+          tmux -V
+          test/pane-gate-real-tmux.sh
 
       # entrypoint.sh's D-Bus / GNOME Keyring startup (k8scc#19): every outcome
       # leaves its own `entrypoint:` line, and none stops the container. The
