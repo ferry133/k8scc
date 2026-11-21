@@ -49,7 +49,10 @@
 # The prompt line and the trust dialog were measured on the image (jg-jcc2,
 # 2026-11-10); the other patterns are hand-written; a pattern that never matches shows up as a
 # steady `skipped (pane not idle: …)` in the pod log, not as silence.
-# Residual: a dialog that opens between the capture and the keys (ms).
+# The pane must also be in no tmux mode (copy-mode), and every tmux call has a
+# time limit (WATCH_TMUX_TIMEOUT, default 10 s): k8scc#95, see pane-gate.
+# Residual: a dialog or mode that opens between the check and the keys (ms);
+# the time limit is what bounds that case.
 #
 # Started by entrypoint.sh in the background; it writes one line to stderr
 # (the pod log) at start and one per announcement, with counts, not names.
@@ -82,6 +85,11 @@ if [ ! -r "$gate" ]; then
 fi
 # shellcheck source=pane-gate
 . "$gate"
+# every tmux call runs under `timeout` (k8scc#95), so without it nothing may run
+if ! command -v timeout >/dev/null 2>&1; then
+    echo "inbox-watch: timeout is missing, not started" >&2
+    exit 0
+fi
 
 declare -A told=()
 
@@ -91,12 +99,12 @@ printable() { printf '%s' "${1:0:120}" | LC_ALL=C tr -c '[:print:]\200-\377' '?'
 
 tick() {
     [ -d "$dir" ] || return 0
-    tmux has-session -t "=$session" 2>/dev/null || return 0
+    tmux_t has-session -t "=$session" 2>/dev/null || return 0
     local created now
     # `=claude:` (session, then its current window), not `=claude`: tmux 3.3a
     # answers `display-message -t =claude` with an EMPTY line and rc 0, which
     # made every tick return silently (measured on jg-jcc2, 2026-11-10, #60).
-    created=$(tmux display-message -p -t "=$session:" '#{session_created}' 2>/dev/null)
+    created=$(tmux_t display-message -p -t "=$session:" '#{session_created}' 2>/dev/null)
     case "$created" in ''|*[!0-9]*) echo "inbox-watch: cannot read the session's age ('$created'), skipped" >&2; return 0 ;; esac
     now=$(date +%s)
     [ $((now - created)) -ge "$settle" ] || return 0
@@ -126,9 +134,14 @@ tick() {
     local list="" n
     for n in "${new[@]}"; do list+="${list:+, }$(printable "$n")"; done
     local msg="📥 inbox: ${#new[@]} unread assignment(s) not yet announced to this session (${list}) — read ~/workspace/inbox/ and handle them per your policy, then rename each to <name>.read"
-    if tmux send-keys -t "=$session:" -l "$msg" 2>/dev/null && tmux send-keys -t "=$session:" Enter 2>/dev/null; then
+    local rc
+    tmux_t send-keys -t "=$session:" -l "$msg" 2>/dev/null; rc=$?
+    [ "$rc" = 0 ] && { tmux_t send-keys -t "=$session:" Enter 2>/dev/null; rc=$?; }
+    if [ "$rc" = 0 ]; then
         for n in "${new[@]}"; do told[$n]=1; done
         echo "inbox-watch: announced ${#new[@]} file(s) to the running session" >&2
+    elif [ "$rc" = 124 ]; then
+        echo "inbox-watch: send-keys did not return within ${tmux_timeout}s (the pane may be in a tmux mode or prompt), stopped it; will retry" >&2
     else
         echo "inbox-watch: send-keys failed, will retry" >&2
     fi

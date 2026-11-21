@@ -22,14 +22,23 @@ cat > "$work/bin/tmux" <<'EOF'
 # fake tmux: one log line per call. Session exists iff $FAKE_DIR/session holds
 # its creation epoch. send-keys fails once if $FAKE_DIR/sendfail exists.
 # capture-pane prints $FAKE_DIR/pane (fails if $FAKE_DIR/capfail exists).
+# #{pane_in_mode} is $FAKE_DIR/inmode (default 0). A `send-keys -l` never
+# returns once if $FAKE_DIR/sendhang exists, as in copy-mode (k8scc#95).
 printf '%s\n' "$*" >> "$FAKE_DIR/tmux.log"
 case "$1" in
   has-session) [ -f "$FAKE_DIR/session" ] ;;
   # like tmux 3.3a (measured on jg-jcc2): a bare `=claude` target prints an
   # empty line with rc 0; only `=claude:` names the session's window
-  display-message) if [ "$4" = "=claude:" ]; then cat "$FAKE_DIR/session"; else echo; fi ;;
+  display-message)
+    if [ "$4" != "=claude:" ]; then echo; exit 0; fi
+    case "$5" in
+      *pane_in_mode*) cat "$FAKE_DIR/inmode" 2>/dev/null || echo 0 ;;
+      *) cat "$FAKE_DIR/session" ;;
+    esac ;;
   capture-pane) [ ! -f "$FAKE_DIR/capfail" ] && cat "$FAKE_DIR/pane" ;;
-  send-keys) if [ -f "$FAKE_DIR/sendfail" ]; then rm -f "$FAKE_DIR/sendfail"; exit 1; fi ;;
+  send-keys)
+    if [ -f "$FAKE_DIR/sendfail" ]; then rm -f "$FAKE_DIR/sendfail"; exit 1; fi
+    if [ "$4" = -l ] && [ -f "$FAKE_DIR/sendhang" ]; then rm -f "$FAKE_DIR/sendhang"; exec /bin/sleep 30; fi ;;
 esac
 EOF
 cat > "$work/bin/sleep" <<'EOF'
@@ -251,6 +260,28 @@ printf 'printf %%s "%s" > "$FAKE_DIR/pane"\n' "$IDLE_RULE" > "$work/g-later/fake
 run g-later INBOX_WATCH_TICKS=2
 check "dialog then idle: typed once, after it closed" [ "$(sends g-later)" = 1 ]
 check "dialog then idle: the capture came first" bash -c 'grep -n "" "$1" | grep -m1 -E "capture-pane|send-keys" | grep -q capture-pane' _ "$work/g-later/fake/tmux.log"
+
+echo "tmux mode and a tmux call that never returns (k8scc#95)"
+setup m-copy; touch "$work/m-copy/home/workspace/inbox/a.md"; echo 1 > "$work/m-copy/fake/inmode"; run m-copy
+check "pane in copy-mode, idle screen underneath: nothing typed" [ "$(sends m-copy)" = 0 ]
+check "… no key at all"                       [ "$(grep -c '^send-keys' "$work/m-copy/fake/tmux.log")" = 0 ]
+check "… the pod log says why"                grep -q 'skipped (pane not idle: pane in a mode)' "$work/m-copy/stderr"
+setup m-copy0; touch "$work/m-copy0/home/workspace/inbox/a.md"; echo 0 > "$work/m-copy0/fake/inmode"; run m-copy0
+check "control: the same pane, no mode: typed" [ "$(sends m-copy0)" = 1 ]
+setup m-junk; touch "$work/m-junk/home/workspace/inbox/a.md"; echo '' > "$work/m-junk/fake/inmode"; run m-junk
+check "pane_in_mode unreadable: nothing typed" [ "$(sends m-junk)" = 0 ]
+check "… and said"                            grep -q 'pane not idle: mode unreadable' "$work/m-junk/stderr"
+setup m-left; touch "$work/m-left/home/workspace/inbox/a.md"; echo 1 > "$work/m-left/fake/inmode"
+echo 'echo 0 > "$FAKE_DIR/inmode"' > "$work/m-left/fake/hook.1"
+run m-left INBOX_WATCH_TICKS=2
+check "copy-mode, then left: typed once, after" [ "$(sends m-left)" = 1 ]
+setup hang; touch "$work/hang/home/workspace/inbox/a.md" "$work/hang/fake/sendhang"
+t0=$(date +%s); run hang INBOX_WATCH_TICKS=2 WATCH_TMUX_TIMEOUT=1; t1=$(date +%s)
+check "send-keys never returns: the watcher goes on (took $((t1 - t0))s, the hang is 30s)" [ $((t1 - t0)) -lt 10 ]
+check "… said so, with the limit"             grep -q 'send-keys did not return within 1s' "$work/hang/stderr"
+check "… no Enter after the stuck line"       [ "$(head -n "$(grep -n -m1 '^send-keys -t =claude: -l ' "$work/hang/fake/tmux.log" | cut -d: -f1)" "$work/hang/fake/tmux.log" | grep -c 'Enter$')" = 0 ]
+check "… nothing marked: tried again on the next tick, and that one went through" [ "$(sends hang)" = 2 ]
+check "… then announced"                      grep -q '^inbox-watch: announced 1 file(s)' "$work/hang/stderr"
 
 echo "off / absent"
 setup off
