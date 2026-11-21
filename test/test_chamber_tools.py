@@ -181,7 +181,7 @@ for bad in ("person,fac", "person,all", "nobody"):
     check("S6 --to %r is not one member's name ⇒ 1 and nothing is sent" % bad, (1, 0), (rc, len(Room.sent) - n))
 rc, o, e = client(ROOM_URL, "send", "room-a", "--to", "all", "blocked: who decides this?")
 check("S8 blocked to all: sent as asked, to the room", (True, {"room": True}), (rc in (0, 3), last()))
-check("S9 and one line says a person is not notified by it", 1, e.count("names nobody"))
+check("S9 and one line says it is not marked as mentioning anyone", (1, 1, 0), (e.count("names nobody"), e.count("not marked as mentioning"), e.count("not notified")))
 rc, o, e = client(ROOM_URL, "send", "room-a", "--to", "all", "report: done, nothing was blocked")
 check("S10 control: another first word to all ⇒ no hint", (True, False), (last() == {"room": True}, "names nobody" in e))
 rc, o, e = client(ROOM_URL, "send", "room-a", "--to", "all", "blockedness is a word")

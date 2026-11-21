@@ -308,10 +308,13 @@ CH_STATEMENTS=(
   '`blocked` 要問人時，點名那個人'
   '行尾標 `person` 的帳號就是人'
   '依據是那個帳號名出現在簽章清單上'
-  '第一則 `--to <那個人>`'
-  '兩則都以 `blocked` 開頭、都 `--reply-to` 那一則請求'
+  '兩則都以 `blocked` 開頭'
+  '第一則 `--to <那個人>`，**不加 `--reply-to`**'
+  '所以問人的那一則放在房間的主畫面'
+  '第二則 `--to <提出請求的一方>`，`--reply-to` 那一則請求'
+  '只有點名他的那一則會被標成「提到他」'
+  '同樣不加 `--reply-to`'
   '不必送第二則'
-  '第二則 `--to <提出請求的一方>`'
   '你不知道誰是人，不要猜帳號名'
   '這時才用 `--to all` 送一則 `blocked`'
   '照寫，不因為請求來自房間而省略'
@@ -358,11 +361,16 @@ check "policy quotes the line chamber-watch types"    grep -qF -- "$cw_line" "$p
 cw_fixed=$(grep -o 'a room whose name cannot be typed here' chamber/chamber-watch | head -n 1)
 check "policy quotes the fixed sentence for an untypeable room name" grep -qF -- "${cw_fixed:-<missing>}" "$policy"
 # k8scc#86: the policy told im to send a question for a person --to all, and on
-# the bench server `all` from an agent did not notify the person. What the
+# the bench server `all` from an agent did not mark the message as mentioning
+# the person (k8scc#91: it does notify; the first wording said it did not). What the
 # policy tells im to run has to exist in the client, with the mark it names.
 ch=$(mktemp); section_of "$policy" chamber > "$ch"
 check_not "nothing tells im to ask a person through --to all as the rule" grep -qF '要問 ferry133 時用 `--to all`' "$ch"
 check "control: that grep can match"                  bash -c 'grep -qF "要問 ferry133 時用 \`--to all\`" <<<"**\`blocked\` 要問 ferry133 時用 \`--to all\`**"'
+check_not "#91: nothing says all does not reach or notify a person" grep -qE '叫不到人|點名才會通知' "$ch"
+check "control: that grep can match"                  bash -c 'grep -qE "叫不到人|點名才會通知" <<<"\`--to all\` 叫不到人，點名才會通知他"'
+check_not "#91: the client does not say it either"    grep -qiE 'not notified by|did not notify' chamber/chamber
+check_not "#91: the question for a person is not put in a thread" grep -qE '都 `--reply-to` 那一則請求' "$ch"
 check "the policy names the command: chamber members" grep -qF '`chamber members <room>`' "$ch"
 check "the client has that command"                   grep -qF 'elif cmd == "members":' chamber/chamber
 check "the client prints the mark the policy names"   grep -qF '" person" if t in here' chamber/chamber
