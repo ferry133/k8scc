@@ -28,7 +28,11 @@ cat > "$work/bin/tmux" <<'EOF'
 # fake tmux. Session exists iff $FAKE_DIR/session holds its creation epoch.
 # The pane's process is $FAKE_DIR/cmd (default claude). send-keys fails once
 # if $FAKE_DIR/sendfail exists. capture-pane prints $FAKE_DIR/pane.
+# #{pane_in_mode} is $FAKE_DIR/inmode (default 0). A `send-keys -l` never
+# returns once if $FAKE_DIR/sendhang exists, as in copy-mode (k8scc#95), and
+# every call never returns while $FAKE_DIR/allhang exists.
 printf '%s\n' "$*" >> "$FAKE_DIR/tmux.log"
+[ -f "$FAKE_DIR/allhang" ] && exec /bin/sleep 30
 case "$1" in
   has-session) [ -f "$FAKE_DIR/session" ] ;;
   display-message)
@@ -36,11 +40,13 @@ case "$1" in
     if [ "$4" != "=claude:" ]; then echo; exit 0; fi
     case "$5" in
       *pane_current_command*) cat "$FAKE_DIR/cmd" 2>/dev/null || echo claude ;;
+      *pane_in_mode*) cat "$FAKE_DIR/inmode" 2>/dev/null || echo 0 ;;
       *session_created*) cat "$FAKE_DIR/session" ;;
     esac ;;
   capture-pane) [ ! -f "$FAKE_DIR/capfail" ] && cat "$FAKE_DIR/pane" ;;
   send-keys)
     if [ -f "$FAKE_DIR/sendfail" ]; then rm -f "$FAKE_DIR/sendfail"; exit 1; fi
+    if [ "$4" = -l ] && [ -f "$FAKE_DIR/sendhang" ]; then rm -f "$FAKE_DIR/sendhang"; exec /bin/sleep 30; fi
     # a typed line followed by Enter starts a turn: the next capture is busy
     [ "${*: -1}" = Enter ] && [ -f "$FAKE_DIR/busy-after-enter" ] && cp "$FAKE_DIR/busy-after-enter" "$FAKE_DIR/pane"
     exit 0 ;;
@@ -203,6 +209,34 @@ setup annfail; printf '1 cust-a\n' > "$work/annfail/fake/pending"; touch "$work/
 check "the bridge cannot be told: said, so a repeat is expected" grep -q 'the bridge could not be told; they will be announced again' "$work/annfail/stderr"
 setup junk; printf 'x cust-a\n0 cust-b\n\n2\n' > "$work/junk/fake/pending"; run junk
 check "lines that are not '<count> <room>' type nothing" [ "$(sends junk)" = 0 ]
+
+echo "tmux mode and a tmux call that never returns (k8scc#95)"
+setup copy; printf '1 cust-a\n' > "$work/copy/fake/pending"; echo 1 > "$work/copy/fake/inmode"; run copy CHAMBER_WATCH_TICKS=3
+check "pane in copy-mode, message waiting: no key at all" [ "$(grep -c '^send-keys' "$work/copy/fake/tmux.log")" = 0 ]
+check "… the alive signal keeps going (acceptance b)" [ "$(beats copy)" = 3 ]
+check "… the log says why, once"               [ "$(grep -c 'messages waiting, skipped (pane not idle: pane in a mode)' "$work/copy/stderr")" = 1 ]
+check "… the bridge is not told"               [ ! -s "$work/copy/fake/announced" ]
+setup copy0; printf '1 cust-a\n' > "$work/copy0/fake/pending"; echo 0 > "$work/copy0/fake/inmode"; run copy0
+check "control: the same, no mode: typed"      [ "$(sends copy0)" = 1 ]
+setup copyleft; printf '1 cust-a\n' > "$work/copyleft/fake/pending"; echo 1 > "$work/copyleft/fake/inmode"
+echo 'echo 0 > "$FAKE_DIR/inmode"' > "$work/copyleft/fake/hook.1"; run copyleft CHAMBER_WATCH_TICKS=2
+check "copy-mode, then left: announced on the next beat (acceptance c)" [ "$(sends copyleft)" = 1 ]
+check "… and reported"                         grep -qx '1 cust-a' "$work/copyleft/fake/announced"
+setup modejunk; printf '1 cust-a\n' > "$work/modejunk/fake/pending"; echo x > "$work/modejunk/fake/inmode"; run modejunk
+check "pane_in_mode unreadable: nothing typed" [ "$(sends modejunk)" = 0 ]
+setup hang; printf '1 cust-a\n' > "$work/hang/fake/pending"; touch "$work/hang/fake/sendhang"
+t0=$(date +%s); run hang CHAMBER_WATCH_TICKS=3 WATCH_TMUX_TIMEOUT=1; t1=$(date +%s)
+check "send-keys never returns: the watcher goes on (took $((t1 - t0))s, the hang is 30s)" [ $((t1 - t0)) -lt 10 ]
+check "… the alive signal is sent on every beat"  [ "$(beats hang)" = 3 ]
+check "… said so, with the limit"                 grep -q 'send-keys did not return within 1s' "$work/hang/stderr"
+# the fake bridge keeps the list, so beats 2 and 3 both type it: three lines
+# typed, and only the two that returned are reported
+check "… three lines typed, two reported: the stuck one was not marked" [ "$(sends hang)/$(grep -c . "$work/hang/fake/announced")" = 3/2 ]
+setup allhang; touch "$work/allhang/fake/allhang"
+t0=$(date +%s); run allhang CHAMBER_WATCH_TICKS=2 WATCH_TMUX_TIMEOUT=1; t1=$(date +%s)
+check "tmux answers nothing at all: the watcher goes on (took $((t1 - t0))s)" [ $((t1 - t0)) -lt 10 ]
+check "… no signal, and the reason is tmux, not 'no session'" grep -q 'no alive signal: tmux did not answer within 1s' "$work/allhang/stderr"
+check "… the verifier line still comes every beat" [ "$(grep -c '^chamber-verify-status' "$work/allhang/stderr")" = 2 ]
 
 echo "a room name is typed only when it cannot carry words"
 B='`'

@@ -10,14 +10,49 @@
 #   session   the tmux session name (default claude)
 #   tail      how many lines of the pane's tail are read (default 15)
 #
-# pane_idle succeeds only on the idle, empty prompt. Otherwise it prints one
-# reason and returns 1, and the caller types nothing. The reasons are:
-#   capture-pane failed | empty pane | turn running | dialog | history search
+#   WATCH_TMUX_TIMEOUT (env) seconds any one tmux call may take (default 10)
+#
+# pane_idle succeeds only on the idle, empty prompt of a pane that is in no
+# tmux mode. Otherwise it prints one reason and returns 1, and the caller types
+# nothing. The reasons are:
+#   pane in a mode | mode unreadable | tmux did not answer
+#   | capture-pane failed | empty pane | turn running | dialog | history search
 #   | no empty prompt | empty prompt not at the bottom | menu below the prompt
-# `turn running` is the only one that also means "a session that can act".
+# pane_screen is the same reading without the mode check: what the program in
+# the pane shows. `turn running` is the only failing reason that also means
+# "a session that can act".
+#
+# Why the mode check (k8scc#95). In copy-mode the keys of `send-keys -l` go to
+# copy-mode's key table, not to the program. Some of those keys open a tmux
+# prompt (measured on tmux 3.7b, 2026-11-21, both key tables: emacs f g t, vi
+# 1 : f t), and `send-keys` then waits for that prompt to be answered. The
+# chamber line contains them. The call stayed blocked after the pane left
+# copy-mode and after the client detached, and a pod read exactly that:
+# send-keys hung over 9 minutes with pane_in_mode=0. `capture-pane` shows the
+# pane underneath, not copy-mode's view, so the screen alone cannot tell.
+# Without a client attached the same keys fail at once ("no current client").
 
 : "${session:=claude}"
 : "${tail:=15}"
+tmux_timeout="${WATCH_TMUX_TIMEOUT:-10}"
+case "$tmux_timeout" in ''|*[!0-9]*|0) tmux_timeout=10 ;; esac
+
+# tmux_t ARGS... : tmux with a time limit, so that one call that never returns
+# cannot stop a watcher (k8scc#95). rc 124 = it did not return in time.
+tmux_t() { timeout "$tmux_timeout" tmux "$@"; }
+
+# pane_mode_ok : succeed when the pane is in no tmux mode (copy-mode, view-mode…)
+pane_mode_ok() {
+    local m rc
+    m=$(tmux_t display-message -p -t "=$session:" '#{pane_in_mode}' 2>/dev/null); rc=$?
+    [ "$rc" = 124 ] && { echo "tmux did not answer"; return 1; }
+    [ "$rc" = 0 ] || { echo "mode unreadable"; return 1; }
+    case "$m" in
+        0) return 0 ;;
+        1) echo "pane in a mode"; return 1 ;;
+        *) echo "mode unreadable"; return 1 ;;
+    esac
+}
 
 # Alternations, not bracket expressions, so multibyte characters match in any locale.
 # The prompt line is judged on `capture-pane -e` (colours kept), because the
@@ -33,11 +68,20 @@ EMPTY_PROMPT_BARE="^${SGR}( |│|┃)*${SGR}(>|❯)${SGR}( |${NBSP}|│|┃|${E}
 EMPTY_PROMPT_DIM="^${SGR}( |│|┃)*${SGR}(>|❯)( |${NBSP})*${E}\\[2m"
 MENU_OPTION='^( |│|┃)*(❯|>)?( )*[0-9]+\. '
 
-# pane_idle: succeed only when the pane's tail is the idle, empty prompt.
-# On failure prints the reason (no pane text) and returns 1. Fail closed.
+# pane_idle: succeed only when the pane is in no mode and its tail is the
+# idle, empty prompt. On failure prints the reason (no pane text) and returns
+# 1. Fail closed.
 pane_idle() {
-    local raw plain last first tail_lines tail_raw
-    if ! raw=$(tmux capture-pane -p -e -t "=$session:" 2>/dev/null); then
+    pane_mode_ok || return 1
+    pane_screen
+}
+
+# pane_screen: the screen half of pane_idle, without the mode check.
+pane_screen() {
+    local raw plain last first tail_lines tail_raw rc
+    raw=$(tmux_t capture-pane -p -e -t "=$session:" 2>/dev/null); rc=$?
+    [ "$rc" = 124 ] && { echo "tmux did not answer"; return 1; }
+    if [ "$rc" != 0 ]; then
         echo "capture-pane failed"; return 1
     fi
     # one capture, two views with the same line numbers: colours kept (raw)
