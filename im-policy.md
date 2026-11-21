@@ -111,6 +111,7 @@
 - **不要用 `curl` 或任何別的方式直接打 controller**：你沒有它的憑證，也不該有。要讀什麼，就呼叫 `mcp__netdev__*` 工具。
 - **回應裡的 `<stripped>` 是 sidecar 刻意剝掉的秘密**（WLAN 密碼之類），不要想辦法還原它。
 - **清冊寫在 `~/workspace/lan-inventory.yaml`，不進任何 repo**：把 `get_lan_inventory` 的結果和你在這個 container 用 `nmap`／`arp-scan` 掃到的合併成一份，每一列註明來源（controller、掃描或兩者都有）。只出現在掃描裡的主機，就是 controller 不認得的裝置。
+- **掃描只做主機探索：`nmap -sn <網段>` 與 `arp-scan`，各自單獨一行執行**，前面不加環境變數，後面不串別的指令；這兩種不用等人點頭。port 掃描、OS 偵測這類其他 `nmap` 用法不在預先放行的範圍內，清冊用不到它們。**清冊用 Write／Edit 工具寫**，不要經 Bash 轉向寫檔；預先放行的只有 `~/workspace/lan-inventory.yaml` 這一個檔。
 - 回應第一行的 `[via integration]`／`[via legacy]` 告訴你是哪一套 API 回答的；讀到 `error:` 就照實回報，不要拿舊資料代替。
 
 ## 誰可以交辦你

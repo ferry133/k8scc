@@ -90,6 +90,20 @@ TALOS_UNASK=(mcp__talos__reboot_node)   # where this profile put it before 2026-
 APPS_ALLOW=('Bash(git *)' 'Bash(sops *)')
 HA_ALLOW=(mcp__ha)   # server-level: HA's tool names follow its expose settings
 NETDEV_ALLOW=(mcp__netdev)   # server-level: the write tools arrive in a later image, under the same rule
+# k8scc#105: im-policy's netdev section has im scan the LAN with nmap/arp-scan
+# and merge the result with get_lan_inventory into ~/workspace/lan-inventory.yaml;
+# without these, every scan and the write stopped to ask (fleet-ops-6c on
+# jg-jcc2, 2026-11-18). Narrow on purpose: host discovery only (`nmap -sn`; a
+# port or OS scan still asks), and that one file. The path is absolute, written
+# as `//` + path, because a rule `Edit(/x)` means x relative to the settings
+# file, and `~` would be resolved by claude, not by this shell (the pod is uid 0
+# with HOME=/home/claude). An Edit rule covers the Write tool too.
+# Measured with a headless claude (2.1.330, dontAsk, fake nmap/arp-scan;
+# the image pins 2.1.261), each against a control with no rule (refused):
+# `nmap -sn <net>`, `arp-scan --localnet` and Write of the file pass;
+# `nmap -sS`, Write of another file in the same directory, and the same rule
+# with a single leading `/` are refused.
+NETDEV_ALLOW+=('Bash(nmap -sn *)' 'Bash(arp-scan *)' "Edit(/${HOME}/workspace/lan-inventory.yaml)")
 # k8scc#93 (ferry133, 2026-11-21: 「好，加 chamber send 的 allow 規則」): the
 # session's auto mode classifier refused an `ack` whose text said what im was
 # about to do, and im stopped without a word. Only `send`; nothing else.
