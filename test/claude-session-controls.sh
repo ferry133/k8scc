@@ -57,7 +57,7 @@ run_session() {
   mkdir -p "$home"
   : > "$home/fake.log"
   env -i PATH="$work/bin:$PATH" HOME="$home" FAKE_LOG="$home/fake.log" \
-      TTYD_USER="" CLAUDE_USER_ID="tester" DATABASE_URL="" TALOS_MCP_URL="" IM_APPS_REPO="" IM_APPS_KEY="" HA_MCP_URL="" HA_MCP_TOKEN_FILE="" NETDEV_MCP_URL="" "$@" \
+      TTYD_USER="" CLAUDE_USER_ID="tester" DATABASE_URL="" TALOS_MCP_URL="" IM_APPS_REPO="" IM_APPS_KEY="" HA_MCP_URL="" HA_MCP_TOKEN_FILE="" NETDEV_MCP_URL="" CHAMBER_URL="" "$@" \
       bash ./claude-session </dev/null 2>&1
 }
 
@@ -468,6 +468,41 @@ h="$work/netdev-talos"
 run_session "$h" NETDEV_MCP_URL=$NDURL TALOS_MCP_URL=http://127.0.0.1:8765/sse >/dev/null
 check "talos+netdev: talos profile then mcp__netdev" [ "$(allow_of "$h")" = "${PROFILE%]}, \"mcp__netdev\"]" ]
 check "talos+netdev: both registered"               [ "$(grep -c 'mcp add --transport sse' "$h/fake.log")" -eq 2 ]
+
+echo "chamber send (k8scc#93)"
+CH='["Bash(chamber send *)"]'
+h="$work/chamber"
+run_session "$h" CHAMBER_URL=unix:/run/chamber/bridge.sock >/dev/null
+check "chamber: allow is exactly chamber send"      [ "$(allow_of "$h")" = "$CH" ]
+check_not "chamber: no other chamber subcommand"    grep -qE 'chamber (read|get|wait|rooms|members)' "$h/.claude/settings.json"
+check_not "chamber: no kubectl rule"                grep -q 'kubectl' "$h/.claude/settings.json"
+before=$(mtime_of "$h"); before_body=$(settings_of "$h")
+run_session "$h" CHAMBER_URL=unix:/run/chamber/bridge.sock >/dev/null
+check "chamber: second run leaves settings untouched" [ "$(mtime_of "$h")" = "$before" ]
+check "chamber: second run byte-identical"          [ "$(settings_of "$h")" = "$before_body" ]
+for v in unset empty; do
+  h="$work/chamber-$v"
+  if [ "$v" = unset ]; then run_session "$h" >/dev/null; else run_session "$h" CHAMBER_URL= >/dev/null; fi
+  check_not "chamber $v: no chamber rule"           grep -q 'chamber send' "$h/.claude/settings.json"
+  check "chamber $v: session still starts"          grep -q '^tmux ' "$h/fake.log"
+done
+h="$work/chamber-existing"
+mkdir -p "$h/.claude"
+printf '%s\n' '{"permissions": {"allow": ["Bash(ls:*)"], "deny": ["Bash(rm:*)"]}, "theme": "dark"}' > "$h/.claude/settings.json"
+run_session "$h" CHAMBER_URL=unix:/run/chamber/bridge.sock NETDEV_MCP_URL=$NDURL >/dev/null
+check "chamber+netdev on an existing file: order kept, both added" [ "$(allow_of "$h")" = '["Bash(ls:*)", "mcp__netdev", "Bash(chamber send *)"]' ]
+check "chamber existing: deny untouched"            grep -q '"Bash(rm:\*)"' "$h/.claude/settings.json"
+check "chamber existing: unrelated key kept"        grep -q '"theme": "dark"' "$h/.claude/settings.json"
+h="$work/chamber-broken"
+mkdir -p "$h/.claude"; printf '{"env": {' > "$h/.claude/settings.json"
+out=$(run_session "$h" CHAMBER_URL=unix:/run/chamber/bridge.sock)
+check "chamber broken JSON: file byte-identical"    [ "$(cat "$h/.claude/settings.json")" = '{"env": {' ]
+check "chamber broken JSON: terminal told"          grep -q 'chamber send permission 設定沒有寫入' <<<"$out"
+# the rule's prefix is what the policy tells im to run (extracted, not copied)
+rule_prefix=$(sed -n "s/^CHAMBER_ALLOW=('Bash(\(.*\) \*)')$/\1/p" claude-session)
+check "control: the rule prefix could be extracted" [ "$rule_prefix" = "chamber send" ]
+check "the policy's reply form starts with the rule's prefix" grep -qF "\`${rule_prefix} <room> --to" im-policy.md
+check "the policy says not to chain anything after it" grep -qF '後面不要接 `; echo' im-policy.md
 
 echo "passed=$pass failed=$fail"
 [ "$fail" -eq 0 ]
