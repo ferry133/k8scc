@@ -531,7 +531,7 @@ printf '%s\\n' "$*" >> "$FAKE_DIR/tmux.log"
 case "$1" in
   has-session) [ -f "$FAKE_DIR/session" ] ;;
   display-message) if [ "$4" != "=claude:" ]; then echo; exit 0; fi
-    case "$5" in *pane_current_command*) echo claude ;; *session_created*) cat "$FAKE_DIR/session" ;; esac ;;
+    case "$5" in *pane_current_command*) echo claude ;; *pane_in_mode*) echo 0 ;; *session_created*) cat "$FAKE_DIR/session" ;; esac ;;
   capture-pane) cat "$FAKE_DIR/pane" ;;
   send-keys) exit 0 ;;
 esac
