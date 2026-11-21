@@ -24,6 +24,7 @@
       "type": "udm",
       "mac": "aa:aa:aa:00:00:01",
       "ip": "10.9.9.1",
+      "uplink": {"type": "wire", "up": true},
       "state": 1
     },
     {
@@ -33,6 +34,7 @@
       "type": "usw",
       "mac": "aa:aa:aa:00:00:02",
       "ip": "10.9.9.2",
+      "uplink": {"type": "wire", "up": true, "uplink_mac": "aa:aa:aa:00:00:01", "uplink_remote_port": 4},
       "state": 1
     },
     {
@@ -42,6 +44,7 @@
       "type": "uap",
       "mac": "aa:aa:aa:00:00:03",
       "ip": "10.9.9.3",
+      "uplink": {"type": "wire", "up": true, "uplink_mac": "aa:aa:aa:00:00:02", "uplink_remote_port": 6},
       "state": 1
     }
   ],
