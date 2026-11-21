@@ -839,6 +839,55 @@ def attachment(pod_ip: str, clients, devices) -> "list[str] | None":
     return out
 
 
+GATEWAY_TYPES = ("ugw", "udm", "uxg")   # UniFi's gateway device types
+
+
+def _device_names(d: dict) -> set:
+    return {str(d.get(k)).lower() for k in ("_id", "id", "mac", "macAddress") if d.get(k)}
+
+
+def uplink_path(attached: list, devices) -> "tuple[list[dict], str]":
+    """Every device between this node and the root of the UniFi tree: what the
+    node is attached to, then each `uplink.uplink_mac` in turn, up to the device
+    that has none, which must be a gateway (ugw/udm/uxg). Read on FAC1's console (UCG Ultra,
+    Network 11.0.99, k8scc#104): every legacy stat/device row carries `uplink`,
+    and only the gateway's has no `uplink_mac`. Returns (path, "") or ([], why
+    the walk could not finish): an attachment or an uplink that names no device
+    in the list, a device other than a gateway with no uplink, or a loop. The caller refuses on the second (fail closed): a
+    device the walk could not reach may be the one that carries im's path."""
+    by_name = {}
+    for d in devices or []:
+        if isinstance(d, dict):
+            for n in _device_names(d):
+                by_name[n] = d
+    path, done = [], set()      # done: devices already walked to the root from an earlier attachment
+    for a in attached:
+        start = a.split("#", 1)[0]
+        d = by_name.get(start)
+        if d is None:
+            return [], f"this node's attachment {start} is not in the device list"
+        chain = set()
+        while id(d) not in done:
+            if id(d) in chain:
+                return [], f"the uplinks loop at {d.get('name') or d.get('mac')}"
+            chain.add(id(d))
+            path.append(d)
+            up = d.get("uplink") if isinstance(d.get("uplink"), dict) else {}
+            nxt = str(up.get("uplink_mac") or "").lower()
+            if not nxt:
+                # only a gateway may be the root: any other device with no uplink
+                # is a chain cut short, not the top (fleet-ops-d5 on #106)
+                if str(d.get("type") or "").lower() in GATEWAY_TYPES:
+                    break
+                return [], f"{d.get('name') or d.get('mac')} names no uplink and is not a gateway"
+            parent = by_name.get(nxt)
+            if parent is None:
+                return [], f"{d.get('name') or d.get('mac')}'s uplink {nxt} is not in the device list"
+            d = parent
+        done |= chain
+    return path, ""
+
+
 def fw_rules_covering(addr_pairs: list, rules, groups, networks) -> "list[dict] | None":
     """Rules whose expanded source and destination cover any (a, b) pair, in
     either direction. An unresolved group or network counts as covering: a rule
@@ -898,10 +947,19 @@ def class_a(target_collection: str, target_id: str, *, pod_ip: str, controller_i
         # by MAC (sw_mac / ap_mac), so compare both forms of the device
         names = {target_id.lower()}
         for d in devices:
-            if isinstance(d, dict) and target_id.lower() in {str(d.get(k) or "").lower() for k in ("_id", "id", "mac", "macAddress")}:
-                names |= {str(d.get(k)).lower() for k in ("_id", "id", "mac", "macAddress") if d.get(k)}
+            if isinstance(d, dict) and target_id.lower() in _device_names(d):
+                names |= _device_names(d)
         if any(a in names or a.split("#", 1)[0] in names for a in attached):
             return f"device {target_id} is what this node is attached to"
+        # k8scc#104: the devices between the attachment and the gateway carry
+        # im's path too (a node on Wi-Fi: the AP's switch; a second switch tier)
+        path, broken = uplink_path(attached, devices)
+        if broken:
+            return f"the path from this node to the gateway cannot be read ({broken}), refusing every device (fail closed)"
+        for d in path:
+            if _device_names(d) & names:
+                via = " → ".join(str(p.get("name") or p.get("mac")) for p in path)
+                return f"device {target_id} is on the path from this node to the gateway ({via})"
     pairs = [p for p in [(pod_ip, controller_ip)] + [(pod_ip, ip) for ip in api_server_ips] if p[1]]
     if target_collection == "firewallrules":
         for rule in fw_rules_covering(pairs, rules, groups, networks):
@@ -1310,7 +1368,7 @@ def _class_a_refusal(plan: Plan, ctx: dict) -> str:
             # legacy stat/device's `ip` for a gateway may be its WAN address, so
             # its type counts on its own (ugw/udm/uxg: UniFi's gateway types)
             if mac == plan.gateway_mac and ((d.get("ipAddress") or d.get("ip")) in _gateway_ips(ctx["networks"], ctx["controller_ip"])
-                                            or str(d.get("type") or "").lower() in ("ugw", "udm", "uxg")):
+                                            or str(d.get("type") or "").lower() in GATEWAY_TYPES):
                 if plan.tool == "power_cycle_port":
                     # what hangs off a gateway port is not read (a downstream switch,
                     # the WAN modem), so every port is refused, like the node's switch

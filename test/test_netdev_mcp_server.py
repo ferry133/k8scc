@@ -1041,6 +1041,68 @@ class ClassA(Case):
         with self.subTest(control="the AP the node is not on passes"):
             self.assertIsNone(self.m.class_a("devices", "dev-ap", **self.args()))
 
+    # k8scc#104: the uplink chain, in the shape read on FAC1 (uplink.uplink_mac;
+    # the gateway's uplink has none). The fixture is gw ← sw ← ap.
+    def on_wifi(self):
+        f = json.loads(json.dumps(FIXTURES))
+        node = next(c for c in f["clients"] if c["ip"] == self.POD)
+        node.pop("sw_mac"); node.pop("sw_port"); node["is_wired"] = False; node["ap_mac"] = AP
+        return f["clients"]
+
+    def test_device_between_attachment_and_gateway_refused(self):
+        a = self.args(clients=self.on_wifi())
+        self.assertIn("attached", self.m.class_a("devices", "dev-ap", **a))
+        for name in ("dev-sw", SW):
+            with self.subTest(case="node on Wi-Fi: the AP's switch", target=name):
+                self.assertIn("on the path from this node to the gateway", self.m.class_a("devices", name, **a))
+        with self.subTest(case="a second switch tier: node → edge → core → gateway"):
+            f = json.loads(json.dumps(FIXTURES))
+            edge = {"_id": "dev-edge", "name": "edge switch", "type": "usw", "mac": "aa:aa:aa:00:00:04",
+                    "uplink": {"uplink_mac": SW, "uplink_remote_port": 9}}
+            node = next(c for c in f["clients"] if c["ip"] == self.POD)
+            node["sw_mac"] = edge["mac"]
+            out = self.m.class_a("devices", "dev-sw", **self.args(clients=f["clients"], devices=f["devices"] + [edge]))
+            self.assertIn("edge switch → core switch → gateway", out)
+        with self.subTest(control="a device off the path passes: a second AP on the same switch"):
+            f = json.loads(json.dumps(FIXTURES))
+            ap2 = {"_id": "dev-ap2", "name": "hall ap", "type": "uap", "mac": "aa:aa:aa:00:00:05",
+                   "uplink": {"uplink_mac": SW, "uplink_remote_port": 14}}
+            self.assertIsNone(self.m.class_a("devices", "dev-ap2", **self.args(clients=self.on_wifi(),
+                                                                               devices=f["devices"] + [ap2])))
+        with self.subTest(control="wired on the switch: the AP is a leaf below it, not on the path"):
+            self.assertIsNone(self.m.class_a("devices", "dev-ap", **self.args()))
+
+    def test_unreadable_uplink_chain_fails_closed(self):
+        def devices(**sw_uplink):
+            f = json.loads(json.dumps(FIXTURES))
+            next(d for d in f["devices"] if d["_id"] == "dev-sw")["uplink"] = sw_uplink
+            return f["devices"]
+        for case, devs in {
+            "an uplink naming no device": devices(uplink_mac="aa:aa:aa:00:00:99"),
+            "a loop": devices(uplink_mac=AP),
+            # fleet-ops-d5's mutation on FAC1's data (#106): the switch's uplink
+            # removed; the walk stopped there and the gateway left the path
+            "a switch with no uplink (only a gateway may be the root)": devices(),
+        }.items():
+            with self.subTest(case=case):
+                # the AP itself is off the path; a broken walk refuses it anyway
+                out = self.m.class_a("devices", "dev-ap", **self.args(devices=devs))
+                self.assertIn("cannot be read", out)
+                self.assertIn("fail closed", out)
+        with self.subTest(case="the attachment itself is not a device"):
+            f = json.loads(json.dumps(FIXTURES))
+            next(c for c in f["clients"] if c["ip"] == self.POD)["sw_mac"] = "aa:aa:aa:00:00:98"
+            self.assertIn("cannot be read", self.m.class_a("devices", "dev-ap", **self.args(clients=f["clients"])))
+        with self.subTest(case="node on Wi-Fi, the switch's uplink gone: the gateway is not silently dropped"):
+            out = self.m.class_a("devices", "dev-gw", **self.args(clients=self.on_wifi(), devices=devices()))
+            self.assertIn("names no uplink and is not a gateway", out)
+        with self.subTest(control="the gateway as root with no uplink_mac is not broken"):
+            self.assertIn("on the path", self.m.class_a("devices", "dev-gw", **self.args(clients=self.on_wifi())))
+        with self.subTest(control="the same switch, uplink to the gateway: the AP passes"):
+            self.assertIsNone(self.m.class_a("devices", "dev-ap", **self.args(devices=devices(uplink_mac=GW))))
+        with self.subTest(control="a broken chain does not touch other collections"):
+            self.assertIsNone(self.m.class_a("users", TV, **self.args(devices=devices(uplink_mac="aa:aa:aa:00:00:99"))))
+
     def test_zone_policies_covering_im_path(self):
         # legacy empty, as on FAC1: the policies alone must decide
         a = self.args(rules=[], groups=[])
@@ -1633,6 +1695,21 @@ class WriteClassA(WriteCase):
         self.assertIn("attached", self.run_tool("power_cycle_port", reason="x", switch_mac=SW, port=17))
         with self.subTest(control="a port on a switch the node is not on reaches the token phase"):
             self.assertIn("token", self.token("power_cycle_port", switch_mac=AP, port=1))
+
+    def test_switch_above_the_node_ap_refused(self):
+        # k8scc#104 through the tool: the node on Wi-Fi, the switch is the AP's uplink
+        node = next(c for c in self.h.fake.data["clients"] if c["mac"] == NODE)
+        node.pop("sw_mac"); node.pop("sw_port"); node["is_wired"] = False; node["ap_mac"] = AP
+        self.read("get_devices")
+        for tool, args in (("restart_device", {"mac": SW}), ("power_cycle_port", {"switch_mac": SW, "port": 12})):
+            with self.subTest(tool=tool):
+                out = self.run_tool(tool, reason="x", **args)
+                self.assertIn("on the path from this node to the gateway", out)
+                self.assertNotIn('"token"', out)
+        self.assertEqual(self.h.fac.issues, {})
+        with self.subTest(control="wired again: the switch is refused as the attachment, the AP is a leaf"):
+            node.pop("ap_mac"); node.update(is_wired=True, sw_mac=SW, sw_port=7)
+            self.assertIn("token", self.token("restart_device", mac=AP))
 
     def test_missing_reader_data_fails_closed(self):
         self.read()
