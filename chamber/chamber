@@ -3,7 +3,7 @@
 
   chamber whoami
   chamber rooms
-  chamber read  ROOM [N] [--everything]
+  chamber read  ROOM [N] [--everything] [--unanswered]
   chamber wait  ROOM [SECONDS] [--everything]
   chamber send  ROOM --to NAME|all [--ref REF] [--reply-to EVENT_ID] TEXT|-
   chamber members ROOM               (who is in the room, and which account is a person's)
@@ -15,6 +15,15 @@ or `all`. `read` and `wait` return only messages addressed to you or to all.
 This is a FILTER, NOT ISOLATION: any member of the room can read everything in
 it with `--everything`. What may be said in a room is decided by who is in the
 room, never by who is named.
+
+`read` marks a message you have already answered: its header ends with
+`(answered by you: <event id>)`, naming your reply. A message counts as
+answered when one of your own messages in the same read is a reply to it
+(`--reply-to`), or names its event id in the text, as the question for a
+person does (k8scc#101). A reply is always newer than what it answers, so a
+request inside the read has its reply inside it too. `--unanswered` lists only
+the messages from others that you have not answered: what a new session has
+still to handle.
 
 --reply-to puts the message into a thread under that event. A stock client
 shows a thread in the room as "N replies" with the last message only, so a
@@ -233,12 +242,29 @@ def addressed_to(event, me):
     return bool(m.get("room")) or me in (m.get("user_ids") or [])
 
 
-def show(e):
+EVENT_ID = re.compile(r"\$[A-Za-z0-9_+/=-]{8,}")
+
+
+def answered_by(msgs, me):
+    """-> {event id: the id of my newest message answering it}. msgs newest first."""
+    out = {}
+    for e in msgs:
+        if e.get("sender") != me:
+            continue
+        c = e.get("content") or {}
+        rel = c.get("m.relates_to") or {}
+        for tgt in [rel.get("event_id"), (rel.get("m.in_reply_to") or {}).get("event_id")] + EVENT_ID.findall(c.get("body", "")):
+            if tgt and tgt != e.get("event_id"):
+                out.setdefault(tgt, e["event_id"])
+    return out
+
+
+def show(e, answer=None):
     c = e["content"]
     to = "all" if (c.get("m.mentions") or {}).get("room") else ",".join((c.get("m.mentions") or {}).get("user_ids") or []) or "-"
     ref = (" [%s]" % c["chamber.ref"]) if c.get("chamber.ref") else ""
-    print("%s %s %s -> %s%s" % (time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(e["origin_server_ts"] / 1000)),
-                                 e["event_id"], e["sender"], to, ref))
+    print("%s %s %s -> %s%s%s" % (time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(e["origin_server_ts"] / 1000)),
+                                   e["event_id"], e["sender"], to, ref, (" (answered by you: %s)" % answer) if answer else ""))
     print(c.get("body", ""))
     print("--")
 
@@ -312,15 +338,18 @@ def main():
         d = must(*call("GET", "/_matrix/client/v3/rooms/%s/event/%s" % (q(room_id(a[0])), q(a[1]))), "fetching the message")
         sys.stdout.buffer.write(d.get("content", {}).get("body", "").encode("utf-8"))
     elif cmd == "read":
-        everything = take_flag(a, "--everything")
+        everything, unanswered = take_flag(a, "--everything"), take_flag(a, "--unanswered")
         if not a:
-            fail("usage: chamber read ROOM [N] [--everything]")
+            fail("usage: chamber read ROOM [N] [--everything] [--unanswered]")
         me, n = whoami(), int(a[1]) if len(a) > 1 else 10
         d = must(*call("GET", "/_matrix/client/v3/rooms/%s/messages?dir=b&limit=%d" % (q(room_id(a[0])), max(n * 5, 50))), "reading")
         msgs = [e for e in d["chunk"] if e["type"] == "m.room.message"]
         mine = msgs if everything else [e for e in msgs if addressed_to(e, me)]
+        answers = answered_by(msgs, me)
+        if unanswered:
+            mine = [e for e in mine if e.get("sender") != me and e["event_id"] not in answers]
         for e in reversed(mine[:n]):
-            show(e)
+            show(e, answers.get(e["event_id"]))
         if not everything and len(msgs) != len(mine):
             print("(%d message(s) not addressed to you were left out; --everything shows them)" % (len(msgs) - len(mine)), file=sys.stderr)
     elif cmd == "wait":

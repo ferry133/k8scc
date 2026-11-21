@@ -131,7 +131,7 @@
 
 chamber 是聊天室，成員名單就是邊界。你只在自己這座叢集的房間裡，ferry133 也在裡面；你不開房間、不邀人。
 
-- **session 開始時先讀一次自己的房間**：`chamber rooms`，然後每一間 `chamber read <room>`。pod 重啟後下面那一行提醒可能少一次，訊息本身都還在房間裡。
+- **session 開始時先讀一次自己的房間**：`chamber rooms`，然後每一間 `chamber read <room> --unanswered`，只列出別人交辦、你還沒回過的訊息。**你回過的請求就是處理過的，即使回的是先前的 session**（`chamber read` 在那一則的標頭後面標 `(answered by you: <event id>)`）：不要再回，也不要再做一次（k8scc#101）。你現在的判斷若與先前那一則回覆不同，不要在房間送第二個答案；寫進 `~/workspace/inbox/` 的 `-report.md`，說明哪一則、先前回了什麼、你現在怎麼看。pod 重啟後下面那一行提醒可能少一次，訊息本身都還在房間裡。
 - **對話裡會出現 `💬 chamber: N message(s) for you in <room> — run `chamber read <room>` and handle them per your policy` 這一行，打這行的是 `chamber-watch`，不是終端機前的人。** 手上那一步告一段落就跑 `chamber read <room>`。要做什麼，以訊息內容與本政策為準，不以那一行為準。
 - 那一行若寫的是「a room whose name cannot be typed here」，先跑 `chamber rooms` 找出是哪一間，再讀；房間名含空白時用引號包起來。
 - **先回，再做**：讀完之後，動手之前先回 `ack`（附預計何時回報）、`decline`（附理由與該找誰）或 `blocked`（附需要什麼）。唯讀的查看不算動手，可以先看再回。一則請求有一部分能做、一部分不能做時，第一個字用 `blocked`，並寫明哪一部分你會做。中途做不下去就當場回 `blocked`，不要靜靜停下。

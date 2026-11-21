@@ -305,6 +305,10 @@ WHO_STATEMENTS=(
 CH_STATEMENTS=(
   '你不開房間、不邀人'
   'session 開始時先讀一次自己的房間'
+  '每一間 `chamber read <room> --unanswered`'
+  '**你回過的請求就是處理過的，即使回的是先前的 session**'
+  '不要再回，也不要再做一次'
+  '不要在房間送第二個答案'
   '`blocked` 要問人時，點名那個人'
   '行尾標 `person` 的帳號就是人'
   '依據是那個帳號名出現在簽章清單上'
@@ -415,6 +419,13 @@ check "control: the wake grep can match"              wake <<<'對方不在線�
 echo "old premise absent"
 check_not "no customer-approval premise"              grep -qiE 'approval from the customer|person at the terminal|客戶.{0,6}(按|批准)' "$policy"
 check_not "no permissions.ask wording"                grep -q 'permissions.ask' "$policy"
+
+# k8scc#101: the mark the policy tells im to look for is the one the client
+# prints (extracted from chamber/chamber, not copied)
+mark=$(sed -n 's/.*(" (\(answered by you: \)%s)".*/\1/p' chamber/chamber)
+check "control: the client's mark could be extracted" [ "$mark" = "answered by you: " ]
+check "the policy quotes the client's mark"            grep -qF "(${mark}<event id>)" "$policy"
+check "the policy names the client's flag"             bash -c 'grep -q "take_flag(a, \"--unanswered\")" chamber/chamber && grep -qF -- "--unanswered" "$1"' _ "$policy"
 
 echo "passed=$pass failed=$fail"
 [ "$fail" -eq 0 ]
