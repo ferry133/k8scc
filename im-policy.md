@@ -110,7 +110,8 @@
 - **重開設備和 PoE 斷電沒有還原**：健檢失敗時結果就是 `revert-failed`，所以只在確定需要時用。
 - **不要用 `curl` 或任何別的方式直接打 controller**：你沒有它的憑證，也不該有。要讀什麼，就呼叫 `mcp__netdev__*` 工具。
 - **回應裡的 `<stripped>` 是 sidecar 刻意剝掉的秘密**（WLAN 密碼之類），不要想辦法還原它。
-- **清冊寫在 `~/workspace/lan-inventory.yaml`，不進任何 repo**：把 `get_lan_inventory` 的結果和你在這個 container 用 `nmap`／`arp-scan` 掃到的合併成一份，每一列註明來源（controller、掃描或兩者都有）。只出現在掃描裡的主機，就是 controller 不認得的裝置。
+- **清冊寫在 `~/workspace/lan-inventory.yaml`，不進任何 repo**：把 `get_lan_inventory` 的結果和你在這個 container 用 `lan-scan` 掃到的合併成一份，每一列註明來源（controller、掃描或兩者都有）。只出現在掃描裡的主機，就是 controller 不認得的裝置。
+- **掃描用 `lan-scan <網段>`，單獨一行執行**（例：`lan-scan 10.9.9.0/24`；可以一次給多個網段，最多 8 個，前綴 16 到 32，只限私有網段 10/8、172.16/12、192.168/16）。它會對每個網段做 `nmap -sn` 的主機探索，再跑一次 `arp-scan`。這個指令不用等人點頭；前面不要加環境變數，後面不要串別的指令。**不要直接打 `nmap` 或 `arp-scan`**，也不要換一種方式去做 port 掃描、OS 偵測或寫檔：清冊用不到那些，而且它們不在預先放行的範圍內。**清冊用 Write／Edit 工具寫**，不要經 Bash 轉向寫檔。預先放行的只有 `~/workspace/lan-inventory.yaml` 這一個檔。
 - 回應第一行的 `[via integration]`／`[via legacy]` 告訴你是哪一套 API 回答的；讀到 `error:` 就照實回報，不要拿舊資料代替。
 
 ## 誰可以交辦你

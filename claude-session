@@ -90,6 +90,22 @@ TALOS_UNASK=(mcp__talos__reboot_node)   # where this profile put it before 2026-
 APPS_ALLOW=('Bash(git *)' 'Bash(sops *)')
 HA_ALLOW=(mcp__ha)   # server-level: HA's tool names follow its expose settings
 NETDEV_ALLOW=(mcp__netdev)   # server-level: the write tools arrive in a later image, under the same rule
+# k8scc#105: im-policy's netdev section has im scan the LAN and merge the result
+# with get_lan_inventory into ~/workspace/lan-inventory.yaml; without these,
+# every scan and the write stopped to ask (fleet-ops-6c on jg-jcc2, 2026-11-18).
+# The scan is `lan-scan` (this repo; networks as arguments, nothing else), not
+# nmap or arp-scan: `Bash(nmap -sn *)` also matches `nmap -sn --script=…` (NSE
+# runs Lua), `-oN <path>` and `-iL <file>`, and arp-scan has `--pcapsavefile`
+# (the commit security review, 2026-11-22). The file is that one file. Its path
+# is absolute, written `//` + path, because a rule `Edit(/x)` means x relative
+# to the settings file, and `~` would be resolved by claude, not by this shell
+# (the pod is uid 0 with HOME=/home/claude). An Edit rule covers Write too.
+# Measured with a headless claude (2.1.330, dontAsk, fakes; the image pins
+# 2.1.261), each against a control with no rule (refused): `lan-scan <net>`
+# and a Write of the file pass; `nmap -sn --script=… <net>`, `lan-scan <net>
+# && nmap …`, a Write of another file in the same directory, and the same
+# Edit rule with a single leading `/` are refused.
+NETDEV_ALLOW+=('Bash(lan-scan *)' "Edit(/${HOME}/workspace/lan-inventory.yaml)")
 # k8scc#93 (ferry133, 2026-11-21: 「好，加 chamber send 的 allow 規則」): the
 # session's auto mode classifier refused an `ack` whose text said what im was
 # about to do, and im stopped without a word. Only `send`; nothing else.

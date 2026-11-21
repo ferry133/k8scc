@@ -450,7 +450,12 @@ NDURL=http://127.0.0.1:8766/sse
 h="$work/netdev"
 run_session "$h" NETDEV_MCP_URL=$NDURL >/dev/null
 check "netdev: registered as sse, no header"        grep -qx "claude mcp add --transport sse --scope local netdev $NDURL" "$h/fake.log"
-check "netdev: allow is exactly mcp__netdev"        [ "$(allow_of "$h")" = '["mcp__netdev"]' ]
+# k8scc#105: the LAN inventory im-policy asks for: lan-scan (never nmap or arp-scan),
+# and that one file, as an absolute (`//`) path under this session's HOME
+ND='"mcp__netdev", "Bash(lan-scan *)", "Edit(/'"$h"'/workspace/lan-inventory.yaml)"'
+check "netdev: allow is exactly mcp__netdev and the inventory rules" [ "$(allow_of "$h")" = "[$ND]" ]
+check "netdev: the inventory path is absolute (//), not relative to settings" grep -qF '"Edit(//' "$h/.claude/settings.json"
+check_not "netdev: no nmap or arp-scan rule (lan-scan only), no wider file rule" grep -qE 'Bash\((nmap|arp-scan)|Edit\([^)]*\*|"Write\(' "$h/.claude/settings.json"
 check_not "netdev: no talos entry"                  grep -q 'mcp__talos' "$h/.claude/settings.json"
 check_not "netdev: no header on the add line"       grep -q 'netdev.*--header' "$h/fake.log"
 before=$(mtime_of "$h"); before_body=$(settings_of "$h")
@@ -462,11 +467,12 @@ for v in unset empty; do
   if [ "$v" = unset ]; then run_session "$h" >/dev/null; else run_session "$h" NETDEV_MCP_URL= >/dev/null; fi
   check_not "netdev $v: not registered"             grep -q 'mcp add.*netdev' "$h/fake.log"
   check_not "netdev $v: no mcp__netdev"             grep -q 'mcp__netdev' "$h/.claude/settings.json"
+  check_not "netdev $v: no inventory rules"         grep -qE 'nmap|arp-scan|lan-scan|lan-inventory' "$h/.claude/settings.json"
   check "netdev $v: session still starts"           grep -q '^tmux ' "$h/fake.log"
 done
 h="$work/netdev-talos"
 run_session "$h" NETDEV_MCP_URL=$NDURL TALOS_MCP_URL=http://127.0.0.1:8765/sse >/dev/null
-check "talos+netdev: talos profile then mcp__netdev" [ "$(allow_of "$h")" = "${PROFILE%]}, \"mcp__netdev\"]" ]
+check "talos+netdev: talos profile then mcp__netdev" [ "$(allow_of "$h")" = "${PROFILE%]}, \"mcp__netdev\", \"Bash(lan-scan *)\", \"Edit(/$h/workspace/lan-inventory.yaml)\"]" ]
 check "talos+netdev: both registered"               [ "$(grep -c 'mcp add --transport sse' "$h/fake.log")" -eq 2 ]
 
 echo "chamber send (k8scc#93) and kubectl (k8scc#98)"
@@ -491,7 +497,7 @@ h="$work/chamber-existing"
 mkdir -p "$h/.claude"
 printf '%s\n' '{"permissions": {"allow": ["Bash(ls:*)"], "deny": ["Bash(rm:*)"]}, "theme": "dark"}' > "$h/.claude/settings.json"
 run_session "$h" CHAMBER_URL=unix:/run/chamber/bridge.sock NETDEV_MCP_URL=$NDURL >/dev/null
-check "chamber+netdev on an existing file: order kept, both added" [ "$(allow_of "$h")" = '["Bash(ls:*)", "mcp__netdev", "Bash(chamber send *)", "Bash(kubectl *)"]' ]
+check "chamber+netdev on an existing file: order kept, both added" [ "$(allow_of "$h")" = '["Bash(ls:*)", "mcp__netdev", "Bash(lan-scan *)", "Edit(/'"$h"'/workspace/lan-inventory.yaml)", "Bash(chamber send *)", "Bash(kubectl *)"]' ]
 check "chamber existing: deny untouched"            grep -q '"Bash(rm:\*)"' "$h/.claude/settings.json"
 check "chamber existing: unrelated key kept"        grep -q '"theme": "dark"' "$h/.claude/settings.json"
 h="$work/chamber-broken"

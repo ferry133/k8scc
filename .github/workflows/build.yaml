@@ -102,6 +102,12 @@ jobs:
       - name: Check the claude-session controls
         run: test/claude-session-controls.sh
 
+      # lan-scan, the one LAN scan im's profile allows (k8scc#105), with fake
+      # nmap / arp-scan: networks scanned with a fixed argv, anything else
+      # (--script, -oN, -iL, --pcapsavefile, a /8) refused before either runs.
+      - name: Check the lan-scan controls
+        run: test/lan-scan-controls.sh
+
       # inbox-watch runs as shipped with fake tmux / sleep: it types one line
       # into the running session per new inbox file, never the contents (k8scc#59).
       - name: Check the inbox-watch controls

@@ -245,6 +245,9 @@ ND_STATEMENTS=(
   '不要想辦法還原它'
   '清冊寫在 `~/workspace/lan-inventory.yaml`，不進任何 repo'
   '每一列註明來源'
+  '掃描用 `lan-scan <網段>`，單獨一行執行'
+  '不要直接打 `nmap` 或 `arp-scan`'
+  '清冊用 Write／Edit 工具寫'
   '讀到 `error:` 就照實回報，不要拿舊資料代替'
 )
 nd_checks() { # nd_checks <file> -> 0 when every statement is there
@@ -272,6 +275,15 @@ skip_look() { grep -vF '不要' | grep -qE '(跳過|略過|不必看|不用看).
 check_not "no wording that skips will_change"         skip_look < "$policy"
 check "control: the skip-will_change grep can match"  skip_look <<<'可以略過 will_change 直接 confirm'
 check_not "no wording that commits the inventory"     grep -qE 'lan-inventory.{0,30}(commit|推上|進 repo)' "$policy"
+# k8scc#105: the policy and the profile say the same thing. The rules are
+# extracted from claude-session, not copied: the scan the policy names is the
+# one the profile allows, and the file it pre-allows is the inventory's.
+nd_rules=$(grep -E '^NETDEV_ALLOW\+=' claude-session)
+check "profile: the inventory rules are found in claude-session" [ -n "$nd_rules" ]
+check "profile allows \`lan-scan\` and the policy names it" sh -c 'printf "%s" "$1" | grep -qF "Bash(lan-scan *)" && grep -qF "\`lan-scan <網段>\`" "$2"' _ "$nd_rules" "$policy"
+check_not "profile: no nmap or arp-scan rule beside it" sh -c 'printf "%s" "$1" | grep -qE "Bash\((nmap|arp-scan)"' _ "$nd_rules"
+check "profile: the pre-allowed file is the one the policy names" sh -c 'printf "%s" "$1" | grep -qF "/workspace/lan-inventory.yaml)" && grep -qF "預先放行的只有 \`~/workspace/lan-inventory.yaml\`" "$2"' _ "$nd_rules" "$policy"
+check_not "control: a policy without the scan line fails the same check" sh -c 'printf "%s" "$1" | grep -qF "Bash(lan-scan *)" && grep -vF "單獨一行執行" "$2" | grep -qF "\`lan-scan <網段>\`"' _ "$nd_rules" "$policy"
 
 echo "who may assign work, and the chamber (im-chamber-client 6.1)"
 section_of() { awk -v h="## $2" '/^## /{on = ($0 == h)} on' "$1"; }
