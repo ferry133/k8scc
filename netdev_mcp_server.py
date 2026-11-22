@@ -1346,12 +1346,16 @@ def _dns_effect(plan: "Plan", now: "tuple | None") -> "tuple[str, str]":
             return "unmeasured", f"the gateway answered as the target ({want}) before the apply"
         return (("in effect", f"the gateway answers as the target ({want})") if now == want
                 else ("not in effect", f"the gateway answers {now}, the target {want}"))
+    # A clear compares MNAME only: a gateway serving a cached answer of the old
+    # target carries an older serial, and comparing the serial would read the
+    # forward as gone while it is still there (fleet-ops-d5 on #112).
     old, _ = _dns_soa(str((plan.before or {}).get("value") or ""), plan.dns_domain)
-    if plan.dns_baseline is None or plan.dns_baseline != old:
-        return "unmeasured", (f"before the apply the gateway answered {plan.dns_baseline}, not as the old target "
-                              f"({old}), so the forward was not visibly in effect to begin with")
-    return (("in effect", f"the gateway answers {now}, no longer as the old target") if now != old
-            else ("not in effect", f"the gateway still answers as the old target ({old})"))
+    mname = lambda fp: fp[1] if fp and fp[1] else None
+    if mname(old) is None or mname(plan.dns_baseline) != mname(old):
+        return "unmeasured", (f"before the apply the gateway answered {plan.dns_baseline}, not with the old target's "
+                              f"MNAME ({old}), so the forward was not visibly in effect to begin with")
+    return (("in effect", f"the gateway answers {now}, no longer with the old target's MNAME") if mname(now) != mname(old)
+            else ("not in effect", f"the gateway still answers as the old target ({mname(old)})"))
 
 
 def _dns_path_names() -> list[str]:

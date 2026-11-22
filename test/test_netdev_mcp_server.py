@@ -405,6 +405,7 @@ class FakeDNS:
 
     def __init__(self):
         self.modes, self.socks, self.queries, self.soa, self.forward = {}, {}, [], {}, {}
+        self.stale = {}   # (ip, domain) -> serial: a cached answer, same MNAME, an older serial
 
     def endpoint(self, ip):
         if ip not in self.socks:
@@ -437,6 +438,7 @@ class FakeDNS:
             if mode == "silent":
                 continue
             mname, serial = self.soa.get(who, self.PUBLIC)
+            serial = self.stale.get((ip, ".".join(q).lower()), serial)
             rdata = self._name(mname) + self._name("hostmaster." + mname) + serial.to_bytes(4, "big") + b"\x00" * 16
             rr = b"\xc0\x0c" + b"\x00\x06\x00\x01" + (300).to_bytes(4, "big") + len(rdata).to_bytes(2, "big") + rdata
             an, ns = (1, 0) if mode == "noerror" else (0, 1) if mode == "nxdomain" else (0, 0)
@@ -1980,6 +1982,22 @@ class DnsForwards(WriteCase):
             res = self.write("clear_dns_forward")
             self.assertEqual(res["result"], "reverted", res)
             self.assertIn("still answers as the old target", " ".join(res["failed"]))
+
+    def test_a_cached_serial_does_not_read_a_clear_as_in_effect(self):
+        # fleet-ops-d5 on #112: the gateway still forwards to the old target but
+        # serves an older cached serial; only MNAME tells whose answer it is
+        def hook(m, path, body):
+            self.h.dns.stale[(GATEWAY_RESOLVER, "lab.test")] = 1
+        self.h.fake.on_write = hook
+        self.read("get_dns_records")
+        res = self.write("clear_dns_forward")
+        self.assertEqual(res["result"], "reverted", res)
+        self.assertIn("still answers as the old target", " ".join(res["failed"]))
+        with self.subTest(control="the fake really answers with a different serial and the same MNAME"):
+            now, _ = self.m._dns_soa(GATEWAY_RESOLVER, "lab.test")
+            old, _ = self.m._dns_soa(self.OLD, "lab.test")
+            self.assertEqual(now[1], old[1])
+            self.assertNotEqual(now[2], old[2])
 
     def setUp_dns(self):
         self.h.dns.soa.update({self.TARGET: ("k8s-gateway.home.test", 7), self.OLD: ("old-gw.lab.test", 3),
