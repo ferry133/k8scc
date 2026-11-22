@@ -53,15 +53,18 @@ os.environ["PATH"] = f"{SHIMS}{os.pathsep}{os.environ.get('PATH', '')}"
 
 FIXTURES = json.loads((HERE / "netdev-mcp-fixtures" / "controller.json").read_text())
 READ_TOOLS = {"get_sites", "get_controller_info", "get_devices", "get_clients", "get_networks",
-              "get_firewall_rules", "get_port_forwards", "get_dhcp_reservations", "get_wlans", "get_lan_inventory"}
+              "get_firewall_rules", "get_port_forwards", "get_dhcp_reservations", "get_wlans", "get_lan_inventory",
+              "get_dns_records"}
 WRITE_TOOLS = {"set_dhcp_reservation", "clear_dhcp_reservation", "block_client", "unblock_client",
-               "set_port_forward", "delete_port_forward", "restart_device", "power_cycle_port"}
+               "set_port_forward", "delete_port_forward", "restart_device", "power_cycle_port",
+               "set_dns_forward", "clear_dns_forward"}
 ENV_KEYS = ["UNIFI_CONTROLLER_URL", "UNIFI_SITE", "UNIFI_CA_FILE", "UNIFI_READER_FILE", "UNIFI_READER_KEY_FILE",
             "UNIFI_OPERATOR_FILE",
             "NETDEV_ALLOW_INSECURE_HTTP", "NETDEV_READ_TIMEOUT", "POD_IP", "IM_FAC_TICKET_REPO",
             "IM_FAC_TICKET_TOKEN_FILE", "IM_FAC_TICKET_API", "NETDEV_OUTSIDE_PROBES", "NETDEV_SNAPSHOT_DIR",
             "NETDEV_SNAPSHOT_KEEP", "NETDEV_HEALTH_TIMEOUT", "NETDEV_HEALTH_INTERVAL", "NETDEV_WRITES_PER_HOUR",
             "NETDEV_WITNESS_WAIT", "NETDEV_WITNESS_POLL", "NETDEV_PROBE_TIMEOUT", "CLUSTER_NAME", "CLAUDE_USER_ID",
+            "NETDEV_DNS_SETTLE", "NETDEV_DNS_PROTECT",
             "KUBERNETES_SERVICE_HOST", "NETDEV_SHIM_READYZ", "NETDEV_SHIM_ENDPOINTS_FAIL", "NETDEV_SHIM_APISERVER"]
 READER_USER = "im-reader"
 READER_VALUE = "dummy-reader-pw-7f3a9c"         # the View Only password: sent at login, never shown
@@ -108,7 +111,7 @@ class FakeController:
                 pass
 
             def _send(self, code, body, headers=()):
-                raw = json.dumps(body).encode()
+                raw = b"" if body is None else json.dumps(body).encode()
                 self.send_response(code)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(raw)))
@@ -181,7 +184,8 @@ class FakeController:
                    "/rest/firewallgroup": "firewallgroups", "/rest/portforward": "portforwards",
                    "/rest/user": "users", "/rest/wlanconf": "wlans", "/stat/sysinfo": "info",
                    "/stat/device": "devices", "/stat/sta": "clients"}
-    V2_GETS = {"/firewall-policies": "firewallpolicies", "/firewall/zone": "firewallzones"}
+    V2_GETS = {"/firewall-policies": "firewallpolicies", "/firewall/zone": "firewallzones",
+               "/static-dns": "dnsrecords"}
 
     def answer(self, path, query):
         if path in self.status:
@@ -207,6 +211,8 @@ class FakeController:
         if path in self.status:
             return self.status[path], {"error": "forced"}
         ok = lambda data: (200, {"meta": {"rc": "ok"}, "data": data})
+        if path == V2 + "/static-dns" or path.startswith(V2 + "/static-dns/"):
+            return self.write_v2(method, path[len(V2 + "/static-dns"):].strip("/"), body)
         if path in (LEGACY + "/cmd/stamgr", LEGACY + "/cmd/devmgr") and method == "POST":
             if body.get("cmd") in ("block-sta", "unblock-sta"):
                 for c in self.data["clients"]:
@@ -238,6 +244,32 @@ class FakeController:
         if method == "DELETE":
             del items[idx]
             return ok([])
+        return 405, {"error": method}
+
+    def write_v2(self, method, oid, body):
+        """v2 static-dns as FAC1 answered fleet-ops-b0 (k8scc#67 finding 7): POST
+        and PUT answer the object itself, a PUT must carry the whole object
+        (a partial body is 400), DELETE answers 200. The DELETE body is not on
+        record; this fake answers an empty one."""
+        items = self.data["dnsrecords"]
+        if method in self.swallow:
+            return 200, {**(body or {}), "_id": "ghost"}
+        if method == "POST" and not oid:
+            self.next_id += 1
+            obj = {**body, "_id": f"new-{self.next_id}"}
+            items.append(obj)
+            return 200, obj
+        idx = next((i for i, o in enumerate(items) if o.get("_id") == oid), None)
+        if not oid or idx is None:
+            return 404, {"code": "api.err.NotFound"}
+        if method == "PUT":
+            if set(items[idx]) - {"_id"} - set(body or {}):
+                return 400, {"code": "api.err.InvalidPayload"}
+            items[idx] = {**body, "_id": oid}
+            return 200, items[idx]
+        if method == "DELETE":
+            del items[idx]
+            return 200, None
         return 405, {"error": method}
 
     def puts(self):
@@ -360,6 +392,67 @@ class Probe:
         raise AssertionError(f"harness, not guard: probe {self.addr} still accepts connections after stop()")
 
 
+class FakeDNS:
+    """One UDP socket per address the server asks (`_dns_endpoint` is patched
+    to hand out these), answering SOA queries with the mode set for that
+    address: noerror (default; the SOA in the answer section), nxdomain (the
+    SOA in the authority section), servfail, refused, or silent. `soa[ip]` is
+    that address's (MNAME, serial); `forward[(ip, domain)] = other` makes ip
+    answer for that domain as other does, which is what a gateway with the
+    forward in effect looks like."""
+    RCODE = {"noerror": 0, "servfail": 2, "nxdomain": 3, "refused": 5}
+    PUBLIC = ("ns1.public.test", 2026112201)
+
+    def __init__(self):
+        self.modes, self.socks, self.queries, self.soa, self.forward = {}, {}, [], {}, {}
+        self.stale = {}   # (ip, domain) -> serial: a cached answer, same MNAME, an older serial
+
+    def endpoint(self, ip):
+        if ip not in self.socks:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock.bind(("127.0.0.1", 0))
+            self.socks[ip] = sock
+            threading.Thread(target=self._serve, args=(ip, sock), daemon=True).start()
+        return "127.0.0.1", self.socks[ip].getsockname()[1]
+
+    @staticmethod
+    def _name(name):
+        return b"".join(bytes([len(lb)]) + lb.encode() for lb in name.split(".")) + b"\x00"
+
+    def _serve(self, ip, sock):
+        while True:
+            try:
+                data, addr = sock.recvfrom(4096)
+            except OSError:
+                return
+            q, i = [], 12
+            while data[i]:
+                q.append(data[i + 1:i + 1 + data[i]].decode())
+                i += 1 + data[i]
+            question = data[12:i + 5]
+            self.queries.append((ip, ".".join(q), int.from_bytes(data[i + 1:i + 3], "big")))
+            who = self.forward.get((ip, ".".join(q).lower()), ip)
+            mode = self.modes.get(ip, "noerror")
+            if mode == "noerror" and who != ip:
+                mode = self.modes.get(who, "noerror")
+            if mode == "silent":
+                continue
+            mname, serial = self.soa.get(who, self.PUBLIC)
+            serial = self.stale.get((ip, ".".join(q).lower()), serial)
+            rdata = self._name(mname) + self._name("hostmaster." + mname) + serial.to_bytes(4, "big") + b"\x00" * 16
+            rr = b"\xc0\x0c" + b"\x00\x06\x00\x01" + (300).to_bytes(4, "big") + len(rdata).to_bytes(2, "big") + rdata
+            an, ns = (1, 0) if mode == "noerror" else (0, 1) if mode == "nxdomain" else (0, 0)
+            head = data[:2] + bytes([0x81, 0x80 | self.RCODE[mode]]) + b"\x00\x01" + bytes([0, an, 0, ns, 0, 0])
+            sock.sendto(head + question + (rr if an or ns else b""), addr)
+
+    def asked(self, ip):
+        return [name for who, name, _ in self.queries if who == ip]
+
+    def close(self):
+        for sock in self.socks.values():
+            sock.close()
+
+
 class Harness:
     def __init__(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -383,6 +476,7 @@ class Harness:
         self.fake = FakeController()
         self.fac = FakeFAC()
         self.probes = [Probe(), Probe(), Probe()]
+        self.dns = FakeDNS()
         self.mod = None
 
     def close(self):
@@ -391,6 +485,7 @@ class Harness:
                 p.stop()
         self.fake.close()
         self.fac.close()
+        self.dns.close()
         self.tmp.cleanup()
 
     def load(self, *, url="fake", key="ok", insecure=True, site="", ca="", write=False, **over):
@@ -422,7 +517,8 @@ class Harness:
                    "NETDEV_OUTSIDE_PROBES": ",".join(p.addr for p in self.probes), "POD_IP": "10.9.9.62",
                    "NETDEV_SNAPSHOT_DIR": str(self.snapshots), "NETDEV_WITNESS_WAIT": "0.3",
                    "NETDEV_WITNESS_POLL": "0.05", "NETDEV_HEALTH_TIMEOUT": "0.6", "NETDEV_HEALTH_INTERVAL": "0.05",
-                   "NETDEV_PROBE_TIMEOUT": "0.5", "CLUSTER_NAME": "jg-test", "CLAUDE_USER_ID": "im-test"}
+                   "NETDEV_PROBE_TIMEOUT": "0.5", "CLUSTER_NAME": "jg-test", "CLAUDE_USER_ID": "im-test",
+                   "NETDEV_DNS_SETTLE": "0.05"}
             env.update({k: v for k, v in over.items() if v is not None})
             for k in [k for k, v in over.items() if v is None]:
                 env.pop(k, None)
@@ -431,6 +527,7 @@ class Harness:
         self.mod = importlib.reload(netdev_mcp_server)
         # the fake's URL is 127.0.0.1; the fixture's controller is the gateway
         self.mod._controller_ip = lambda: "10.9.9.1"
+        self.mod._dns_endpoint = self.dns.endpoint   # every DNS query goes to the fake, by address
         self.fake.requests.clear()
         self.fake.writes.clear()
         self.fake.logins.clear()
@@ -764,7 +861,7 @@ class StartupStates(Case):
         tools = self.h.tools()
         self.assertEqual(tools, READ_TOOLS | WRITE_TOOLS)
         forbidden = re.compile(r"vlan|network|wlan|passphrase|psk|firmware|upgrade|wan(?!_port)|site|policy|apikey|api_key|"
-                               r"admin|account|firewall|dns", re.I)
+                               r"admin|account|firewall", re.I)   # dns: set/clear_dns_forward since k8scc#109
         writers = [t for t in asyncio.run(self.h.mod.app.list_tools()) if t.name in WRITE_TOOLS]
         for t in writers:
             self.assertIsNone(forbidden.search(t.name), t.name)
@@ -847,7 +944,7 @@ class ReaderTools(Case):
         expect = {"get_sites": "legacy-root", "get_controller_info": "legacy", "get_devices": "legacy",
                   "get_clients": "legacy", "get_lan_inventory": "legacy", "get_networks": "legacy",
                   "get_firewall_rules": "legacy+v2", "get_port_forwards": "legacy",
-                  "get_dhcp_reservations": "legacy", "get_wlans": "legacy"}
+                  "get_dhcp_reservations": "legacy", "get_wlans": "legacy", "get_dns_records": "v2"}
         for name, api in expect.items():
             out, _ = self.h.call(getattr(m, name))
             self.assertEqual(out.split("\n", 1)[0], f"[via {api}]", name)
@@ -1159,8 +1256,10 @@ ARGS = {
     "delete_port_forward": {"id": "pf-1"},
     "restart_device": {"mac": AP},
     "power_cycle_port": {"switch_mac": SW, "port": 3},
+    "set_dns_forward": {"domain": "home.test", "target": "10.9.9.200"},
+    "clear_dns_forward": {"domain": "lab.test"},
 }
-READERS_FOR_WRITES = ("get_dhcp_reservations", "get_clients", "get_port_forwards", "get_devices")
+READERS_FOR_WRITES = ("get_dhcp_reservations", "get_clients", "get_port_forwards", "get_devices", "get_dns_records")
 USER_PATH = f"{LEGACY}/rest/user"
 
 
@@ -1554,11 +1653,12 @@ class DeadMan(WriteCase):
         self.assertFalse(ok)
         self.assertIn("not reverted by DELETE on this console", why)
         self.assertEqual([m for m, _, _ in self.h.fake.writes if m == "DELETE"], [])
-        with self.subTest(control="portforwards is in the table, and no shipped tool creates outside it"):
-            self.assertEqual(self.m.DELETE_REVERTS, {"portforwards"})
+        with self.subTest(control="the table holds what a shipped tool creates, and no shipped tool creates outside it"):
+            # dnsrecords since k8scc#109 (DELETE static-dns answered 200 on FAC1, finding 7)
+            self.assertEqual(self.m.DELETE_REVERTS, {"portforwards", "dnsrecords"})
             src = (ROOT / "netdev_mcp_server.py").read_text()
             creates = re.findall(r'Plan\("[a-z_]+", "([a-z]+)", "", [^\n]*"create"', src)
-            self.assertEqual(set(creates), {"portforwards"}, creates)
+            self.assertEqual(set(creates), {"portforwards", "dnsrecords"}, creates)
 
     def test_object_changed_since_the_token_aborts(self):
         self.read()
@@ -1728,6 +1828,282 @@ class WriteClassA(WriteCase):
         self.assertEqual(self.h.fac.issues, {})
         with self.subTest(control="readable again: the same write reaches the token phase"):
             self.assertIn("token", self.token("block_client"))
+
+
+DNS_PATH = f"{V2}/static-dns"
+GATEWAY_RESOLVER = "10.9.9.1"     # net-lan's ip_subnet host part: the network carrying POD_IP 10.9.9.62
+
+
+class DnsForwards(WriteCase):
+    """k8scc#109: set_dns_forward / clear_dns_forward on v2 static-dns. The
+    write shape is fleet-ops-b0's FAC1 reading (k8scc#67 finding 7); the
+    timing rule is finding 8; "in effect" is the gateway answering SOA as the
+    target does (fleet-ops-d5 on #112). Every DNS answer comes from FakeDNS:
+    the targets each have their own SOA, the gateway answers lab.test as
+    10.9.9.201 (the fixture's forward) and everything else as public DNS."""
+
+    TARGET, OLD, NEW = "10.9.9.200", "10.9.9.201", "10.9.9.202"
+
+    def setUp(self):
+        super().setUp()
+        self.setUp_dns()
+
+    def dns_writes(self):
+        return [(m, p, b) for m, p, b in self.h.fake.mutations() if p.startswith(DNS_PATH)]
+
+    def takes_effect(self, domain, target):
+        """After the controller accepts the write, the gateway answers `domain` as `target` (None: as public DNS)."""
+        def hook(m, path, body):
+            if target is None:
+                self.h.dns.forward.pop((GATEWAY_RESOLVER, domain), None)
+            else:
+                self.h.dns.forward[(GATEWAY_RESOLVER, domain)] = target
+        self.h.fake.on_write = hook
+
+    def test_records_are_read_over_v2_and_fill_the_cache(self):
+        out = self.run_tool("get_dns_records")
+        self.assertEqual(out.split("\n", 1)[0], "[via v2]")
+        self.assertEqual({r["key"] for r in body(out)}, {"nas.home.test", "lab.test"})
+        self.assertIn(DNS_PATH, self.h.fake.paths())
+        with self.subTest(control="unread, the write is refused naming the reader"):
+            self.h.load(write=True)
+            self.m = self.h.mod
+            self.assertIn("get_dns_records", self.run_tool("set_dns_forward", reason="x", **ARGS["set_dns_forward"]))
+
+    def test_forward_created_in_the_measured_shape_and_seen_in_effect(self):
+        self.takes_effect("home.test", self.TARGET)
+        self.read("get_dns_records")
+        res = self.write("set_dns_forward")
+        self.assertEqual(res["result"], "applied", res)
+        self.assertIn("dns", res["health"])
+        self.assertEqual(res["dns_effect"], "in effect")
+        self.assertNotIn("dns_note", res)
+        self.assertIn("dns_effect: in effect", self.last_comment())
+        self.assertEqual(self.dns_writes(), [("POST", DNS_PATH, {"record_type": "NS", "key": "home.test",
+                                                                 "value": self.TARGET, "port": 0, "enabled": True})])
+        self.assertIn("home.test", self.h.dns.asked(self.TARGET), "the target was asked before the token")
+        self.assertIn("home.test", self.h.dns.asked(GATEWAY_RESOLVER), "the LAN resolver was asked in health")
+        self.assertEqual(self.phases("dnsrecords/home.test"), ["token", "execute"])
+        with self.subTest(control="every write went to v2, none to a legacy rest path"):
+            self.assertFalse([p for _, p, _ in self.h.fake.mutations() if p.startswith(LEGACY + "/rest/")])
+
+    def test_a_forward_the_gateway_never_answers_through_is_reverted(self):
+        # the controller took the record, the gateway still answers home.test from public DNS
+        self.read("get_dns_records")
+        res = self.write("set_dns_forward")
+        self.assertEqual(res["result"], "reverted", res)
+        self.assertIn("not in effect", " ".join(res["failed"]))
+        self.assertEqual([m for m, _, _ in self.dns_writes()], ["POST", "DELETE"])
+
+    def test_an_answer_that_cannot_show_the_change_is_unmeasured_not_a_pass(self):
+        self.h.dns.soa[self.TARGET] = FakeDNS.PUBLIC     # the target itself answers as public DNS does
+        self.read("get_dns_records")
+        res = self.write("set_dns_forward")
+        self.assertEqual(res["result"], "applied", res)
+        self.assertTrue(res["dns_effect"].startswith("unmeasured"), res["dns_effect"])
+        self.assertNotIn("dns", res["health"])
+        self.assertIn("could not be measured", res["dns_note"])
+        self.assertIn("dns_effect: unmeasured", self.last_comment())
+        with self.subTest(control="a target with its own SOA, and the gateway turning to it, is measured"):
+            self.h.dns.soa[self.TARGET] = ("k8s-gateway.home.test", 7)
+            self.takes_effect("other.test", self.TARGET)
+            self.read("get_dns_records")
+            res = self.write("set_dns_forward", domain="other.test", target=self.TARGET)
+            self.assertEqual((res["result"], res["dns_effect"]), ("applied", "in effect"))
+            self.assertIn("dns", res["health"])
+
+    def test_existing_forward_is_put_whole(self):
+        self.takes_effect("lab.test", self.NEW)
+        self.read("get_dns_records")
+        res = self.write("set_dns_forward", domain="lab.test", target=self.NEW)
+        self.assertEqual((res["result"], res["dns_effect"]), ("applied", "in effect"), res)
+        before = next(r for r in FIXTURES["dnsrecords"] if r["_id"] == "dns-fwd-lab")
+        self.assertEqual(self.dns_writes(), [("PUT", f"{DNS_PATH}/dns-fwd-lab", {**before, "value": self.NEW})])
+        with self.subTest(control="the fake refuses a partial PUT, as FAC1 did (400)"):
+            with self.assertRaises(self.m.ControllerError) as cm:
+                self.m.OPERATOR.request_v2("PUT", "/static-dns/dns-fwd-lab", {"enabled": False})
+            self.assertIn("400", str(cm.exception))
+
+    def test_settle_comes_before_the_first_health_round(self):
+        # the gateway turns to the target only once the settle has passed: a round before it fails.
+        # A settle distinct from NETDEV_HEALTH_INTERVAL (0.05), or the hook cannot tell them apart.
+        self.m = self.h.load(write=True, NETDEV_DNS_SETTLE="0.07")
+        real_sleep, settle = self.m._sleep, self.m.DNS_SETTLE
+        self.assertEqual(settle, 0.07)
+        landing = {"domain": "home.test"}
+
+        def sleep(sec):
+            if sec == settle:
+                self.h.dns.forward[(GATEWAY_RESOLVER, landing["domain"])] = self.TARGET
+            real_sleep(sec)
+        self.m._sleep = sleep
+        self.read("get_dns_records")
+        self.assertEqual(self.write("set_dns_forward")["result"], "applied")
+        with self.subTest(control="a forward that never lands in the window reads as not in effect"):
+            self.m.DNS_SETTLE = 0.09   # not the value the hook lands the forward on
+            landing["domain"] = "other.test"
+            self.m._LAST_WRITE.clear()
+            self.read("get_dns_records")
+            self.assertEqual(self.write("set_dns_forward", domain="other.test", target=self.TARGET)["result"],
+                             "reverted")
+
+    def test_created_forward_deleted_when_the_lan_resolver_fails(self):
+        self.h.fake.on_write = lambda m, p, b: self.h.dns.modes.__setitem__(GATEWAY_RESOLVER, "servfail")
+        self.read("get_dns_records")
+        res = self.write("set_dns_forward")
+        self.assertEqual(res["result"], "reverted", res)
+        self.assertIn("dns:", " ".join(res["failed"]))
+        self.assertEqual([m for m, _, _ in self.dns_writes()], ["POST", "DELETE"])
+        self.assertEqual(self.dns_writes()[1][1], f"{DNS_PATH}/new-1")
+        self.assertEqual([r["_id"] for r in self.h.fake.data["dnsrecords"]], ["dns-a-nas", "dns-fwd-lab"])
+        self.assertEqual(self.phases("dnsrecords/home.test"), ["token", "execute", "reverted"])
+
+    def test_cleared_forward_recreated_when_the_lan_resolver_fails(self):
+        self.h.fake.on_write = lambda m, p, b: self.h.dns.modes.__setitem__(GATEWAY_RESOLVER, "refused")
+        self.read("get_dns_records")
+        res = self.write("clear_dns_forward")
+        self.assertEqual(res["result"], "reverted", res)
+        before = {k: v for k, v in next(r for r in FIXTURES["dnsrecords"] if r["_id"] == "dns-fwd-lab").items()
+                  if k != "_id"}
+        self.assertEqual(self.dns_writes(), [("DELETE", f"{DNS_PATH}/dns-fwd-lab", None), ("POST", DNS_PATH, before)])
+
+    def test_a_clear_is_in_effect_only_when_the_old_target_stops_answering_through_the_gateway(self):
+        self.takes_effect("lab.test", None)
+        self.read("get_dns_records")
+        res = self.write("clear_dns_forward")
+        self.assertEqual((res["result"], res["dns_effect"]), ("applied", "in effect"), res)
+        self.assertNotIn("lab.test", [r["key"] for r in self.h.fake.data["dnsrecords"]])
+        with self.subTest(control="the gateway still answering as the old target is not in effect: re-created"):
+            self.h.close()
+            self.h = Harness()
+            self.setUp_dns()
+            self.m = self.h.load(write=True)
+            self.read("get_dns_records")
+            res = self.write("clear_dns_forward")
+            self.assertEqual(res["result"], "reverted", res)
+            self.assertIn("still answers as the old target", " ".join(res["failed"]))
+
+    def test_a_cached_serial_does_not_read_a_clear_as_in_effect(self):
+        # fleet-ops-d5 on #112: the gateway still forwards to the old target but
+        # serves an older cached serial; only MNAME tells whose answer it is
+        def hook(m, path, body):
+            self.h.dns.stale[(GATEWAY_RESOLVER, "lab.test")] = 1
+        self.h.fake.on_write = hook
+        self.read("get_dns_records")
+        res = self.write("clear_dns_forward")
+        self.assertEqual(res["result"], "reverted", res)
+        self.assertIn("still answers as the old target", " ".join(res["failed"]))
+        with self.subTest(control="the fake really answers with a different serial and the same MNAME"):
+            now, _ = self.m._dns_soa(GATEWAY_RESOLVER, "lab.test")
+            old, _ = self.m._dns_soa(self.OLD, "lab.test")
+            self.assertEqual(now[1], old[1])
+            self.assertNotEqual(now[2], old[2])
+
+    def setUp_dns(self):
+        self.h.dns.soa.update({self.TARGET: ("k8s-gateway.home.test", 7), self.OLD: ("old-gw.lab.test", 3),
+                               self.NEW: ("new-gw.lab.test", 5)})
+        self.h.dns.forward[(GATEWAY_RESOLVER, "lab.test")] = self.OLD
+
+    def test_a_clear_of_a_forward_not_visibly_in_effect_is_unmeasured(self):
+        self.h.dns.forward.pop((GATEWAY_RESOLVER, "lab.test"))   # the gateway did not answer through it before
+        self.read("get_dns_records")
+        res = self.write("clear_dns_forward")
+        self.assertEqual(res["result"], "applied", res)
+        self.assertTrue(res["dns_effect"].startswith("unmeasured"), res["dns_effect"])
+        self.assertNotIn("dns", res["health"])
+
+    def test_a_target_that_does_not_answer_is_refused_before_any_ticket(self):
+        self.read("get_dns_records")
+        for mode in ("silent", "refused", "servfail"):
+            with self.subTest(target=mode):
+                self.h.dns.modes[self.TARGET] = mode
+                out = self.run_tool("set_dns_forward", reason="x", **ARGS["set_dns_forward"])
+                self.assertIn("does not answer for home.test", out)
+        self.assertEqual(self.h.fac.issues, {})
+        with self.subTest(control="NXDOMAIN is an answer: the target serves DNS for that name"):
+            self.h.dns.modes[self.TARGET] = "nxdomain"
+            self.assertIn("token", self.token("set_dns_forward"))
+
+    def test_the_soa_fingerprint_is_parsed_from_answer_and_authority(self):
+        self.assertEqual(self.m._dns_soa(self.TARGET, "home.test"), (("NOERROR", "k8s-gateway.home.test", 7), ""))
+        self.h.dns.modes[self.OLD] = "nxdomain"
+        self.assertEqual(self.m._dns_soa(self.OLD, "x.lab.test"), (("NXDOMAIN", "old-gw.lab.test", 3), ""))
+        with self.subTest(control="two servers with different SOAs read differently"):
+            self.assertNotEqual(self.m._dns_soa(self.TARGET, "home.test")[0], self.m._dns_soa(GATEWAY_RESOLVER, "home.test")[0])
+
+    def test_names_on_im_path_under_the_domain_are_refused(self):
+        self.h.load(write=True, NETDEV_DNS_PROTECT="chamber.home.test")
+        self.m = self.h.mod
+        self.read("get_dns_records")
+        out = self.run_tool("set_dns_forward", reason="x", **ARGS["set_dns_forward"])
+        self.assertIn("class A", out)
+        self.assertIn("chamber.home.test", out)
+        self.assertEqual(self.h.fac.issues, {})
+        with self.subTest(control="a domain that covers none of them reaches the token"):
+            self.assertIn("token", self.token("set_dns_forward", domain="other.test", target=self.TARGET))
+        with self.subTest(control="a sibling name is not under it"):
+            self.assertEqual(self.m._dns_on_path("chamber.home.test.evil"), [])
+            self.assertEqual(self.m._dns_on_path("ome.test"), [])
+        with self.subTest(names="what the sidecar connects to counts by itself"):
+            self.m.TICKET_API = "https://api.github.com"
+            self.m.CONTROLLER_URL = "https://unifi.home.test"
+            self.m.PROBES = [self.m.Probe("https://probe.example.org/x", "https", "probe.example.org", 443),
+                             self.m.Probe("10.0.0.1:443", "tcp", "10.0.0.1", 443)]
+            self.assertEqual(self.m._dns_on_path("github.com"), ["api.github.com"])
+            self.assertEqual(self.m._dns_on_path("example.org"), ["probe.example.org"])
+            self.assertEqual(self.m._dns_on_path("home.test"), ["unifi.home.test", "chamber.home.test"])
+            self.assertNotIn("10.0.0.1", self.m._dns_path_names(), "an address is not a name")
+        with self.subTest(default="cloudflared's tunnel names are protected without configuration"):
+            self.h.load(write=True)
+            self.assertEqual(self.h.mod._dns_on_path("argotunnel.com"), ["argotunnel.com"])
+
+    def test_clear_on_im_path_refused_too(self):
+        self.h.load(write=True, NETDEV_DNS_PROTECT="api.lab.test")
+        self.m = self.h.mod
+        self.read("get_dns_records")
+        out = self.run_tool("clear_dns_forward", reason="x", **ARGS["clear_dns_forward"])
+        self.assertIn("api.lab.test", out)
+        self.assertEqual(self.dns_writes(), [])
+
+    def test_bad_domains_and_targets_refused_before_any_ticket(self):
+        self.read("get_dns_records")
+        bad = {"com": "one label", "-a.test": "not a domain", "a..test": "not a domain", "a_b.test": "not a domain",
+               "": "not a domain"}
+        for domain, said in bad.items():
+            with self.subTest(domain=domain):
+                self.assertIn(said, self.run_tool("set_dns_forward", reason="x", domain=domain, target=self.TARGET))
+        for target in ("gw.home.test", "127.0.0.1", "0.0.0.0", "224.0.0.5"):
+            with self.subTest(target=target):
+                self.assertIn("refused", self.run_tool("set_dns_forward", reason="x", domain="home.test", target=target))
+        self.assertEqual(self.h.fac.issues, {})
+        with self.subTest(control="a trailing dot and capitals normalise to the same domain"):
+            tok = self.token("set_dns_forward", domain="Home.Test.", target=self.TARGET)
+            self.assertEqual(tok["target"], "dnsrecords/home.test")
+
+    def test_a_record_with_the_same_key_and_an_unchanged_forward_refused(self):
+        self.read("get_dns_records")
+        self.assertIn("already has a A record",
+                      self.run_tool("set_dns_forward", reason="x", domain="nas.home.test", target=self.TARGET))
+        self.assertIn("already forwards to 10.9.9.201",
+                      self.run_tool("set_dns_forward", reason="x", domain="lab.test", target=self.OLD))
+        self.assertIn("no forward to clear", self.run_tool("clear_dns_forward", reason="x", domain="nas.home.test"))
+        self.assertEqual(self.h.fac.issues, {})
+
+    def test_no_lan_resolver_fails_closed(self):
+        self.h.fake.data["networks"] = [n for n in self.h.fake.data["networks"] if n["_id"] != "net-lan"]
+        self.read("get_dns_records")
+        out = self.run_tool("set_dns_forward", reason="x", **ARGS["set_dns_forward"])
+        self.assertIn("no LAN resolver", out)
+        with self.subTest(control="with the network, the resolver is its gateway"):
+            self.h.fake.data["networks"] = json.loads(json.dumps(FIXTURES["networks"]))
+            self.assertIn("token", self.token("set_dns_forward"))
+
+    def test_one_cooldown_for_set_and_clear_of_one_domain(self):
+        self.takes_effect("lab.test", None)
+        self.read("get_dns_records")
+        self.assertEqual(self.write("clear_dns_forward")["result"], "applied")
+        self.read("get_dns_records")
+        self.assertIn("cooldown", self.run_tool("set_dns_forward", reason="x", domain="lab.test", target=self.NEW))
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
