@@ -1,0 +1,4 @@
+.DS_Store
+
+# Claude Code local permissions: per machine, never shared (k8scc#110)
+.claude/settings.local.json
