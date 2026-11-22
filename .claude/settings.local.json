@@ -86,9 +86,7 @@
       "Bash(rm -f /Users/ferry133/coding/jcom/kubernetes/apps/claudecode/claude-code/app/secret-plain-tmp.yaml)",
       "Bash(SOPS_AGE_KEY_FILE=age.key sops --decrypt --output /tmp/current-secret.yaml kubernetes/apps/claudecode/claude-code/app/secret.sops.yaml)",
       "Bash(grep -rn \"auth0\\\\|Auth0\\\\|AUTH0\" /Users/ferry133/coding/jg-base/kubernetes/ 2>/dev/null | grep -v \"ENC\\\\[\" | head -30)",
-      "Read(//Users/ferry133/coding/jg-base/kubernetes/**)",
-      "Read(//Users/ferry133/coding/jg-jiahd/.claude/**)",
-      "Read(//Users/ferry133/coding/jg-jiahd/**)"
+      "Read(//Users/ferry133/coding/jg-base/kubernetes/**)"
     ]
   }
 }
