@@ -113,6 +113,12 @@ WRITES_PER_HOUR = int(os.environ.get("NETDEV_WRITES_PER_HOUR", "12"))
 WITNESS_WAIT = float(os.environ.get("NETDEV_WITNESS_WAIT", "120"))
 WITNESS_POLL = float(os.environ.get("NETDEV_WITNESS_POLL", "5"))
 PROBE_TIMEOUT = float(os.environ.get("NETDEV_PROBE_TIMEOUT", "5"))
+# DNS forwards (k8scc#109): seconds after the apply before the health rounds
+# start (FAC1, k8scc#67 finding 8: the forward took effect at ~30 s, and the
+# gateway's resolver went dark for under ~20 s after a DELETE; 5 s sampling),
+# and the names on im's path that this sidecar cannot see for itself.
+DNS_SETTLE = float(os.environ.get("NETDEV_DNS_SETTLE", "45"))
+DNS_PROTECT_RAW = os.environ.get("NETDEV_DNS_PROTECT", "argotunnel.com")
 CLUSTER = os.environ.get("CLUSTER_NAME", "").strip()
 USER_ID = os.environ.get("CLAUDE_USER_ID", "")
 KUBECTL = shutil.which("kubectl") or "/usr/local/bin/kubectl"
@@ -163,6 +169,11 @@ ROUTES = {
     "portforwards":     ("legacy", "/rest/portforward"),
     "users":            ("legacy", "/rest/user"),
     "wlans":            ("legacy", "/rest/wlanconf"),
+    # k8scc#109: v2 static-dns holds both A records and forwards (record_type
+    # NS, key = domain, value = target). Read on FAC1 with the since-revoked
+    # key (k8scc#67 finding 3, 5 rows), written there with the operator
+    # (finding 7); not yet read with the View Only cookie (root §6).
+    "dnsrecords":       ("v2", "/static-dns"),
 }
 API_PREFIX = {"legacy": "/proxy/network/api/s/{site}", "legacy-root": "/proxy/network/api",
               "v2": "/proxy/network/v2/api/site/{site}"}
@@ -170,7 +181,9 @@ API_PREFIX = {"legacy": "/proxy/network/api/s/{site}", "legacy-root": "/proxy/ne
 # The operator's side, all legacy (cookie + CSRF from a local account). Read
 # on FAC1 (k8scc#67 findings 4-6): login, PUT rest/user (it merges), DELETE
 # rest/user (404), cmd/stamgr forget-sta (200). The rest are UniFi's
-# documented paths, not yet read on a console.
+# documented paths, not yet read on a console. One collection is written over
+# v2 instead, on its ROUTES path: dnsrecords (static-dns; finding 7: POST 200
+# with the whole object, PUT wants the whole object, partial PUT 400, DELETE 200).
 LOGIN_PATH = "/api/auth/login"
 WRITES = {
     "rest":   "/rest/{collection}",          # PUT …/{_id}, POST (create), DELETE …/{_id}
@@ -183,7 +196,7 @@ LEGACY_NAME = {"networks": "networkconf", "firewallrules": "firewallrule", "fire
 # `DELETE rest/user/<_id>` answered 404 (k8scc#67 finding 5; `forget-sta`
 # removed it instead), so a create in any other collection is never "reverted"
 # by a DELETE that cannot work. rest/portforward's DELETE is not measured.
-DELETE_REVERTS = {"portforwards"}
+DELETE_REVERTS = {"portforwards", "dnsrecords"}   # dnsrecords: DELETE measured on FAC1 (finding 7)
 
 # A PUT on the legacy API MERGES (k8scc#67 finding 4: a partial PUT kept
 # fixed_ip/use_fixedip), so PUTting the snapshot back cannot remove a key the
@@ -471,6 +484,23 @@ class Operator:
         path = API_PREFIX["legacy"].format(site=SITE) + path
         return _legacy_data(method, path, self._session.send(method, path, body))
 
+    def request_v2(self, method: str, path: str, body=None) -> list:
+        """v2 answers the object itself (POST, PUT), a list, or nothing (DELETE);
+        returned as a list either way. A status outside 2xx is an error."""
+        path = API_PREFIX["v2"].format(site=SITE) + path
+        resp = self._session.send(method, path, body)
+        if resp.status_code // 100 != 2:
+            raise ControllerError(f"{method} {path}: controller answered {resp.status_code} {resp.text[:200]!r}",
+                                  answered=True)
+        if not resp.content:
+            return []
+        try:
+            data = resp.json()
+        except ValueError:
+            raise ControllerError(f"{method} {path}: controller answered {resp.status_code} with a body that is not JSON",
+                                  answered=True) from None
+        return data if isinstance(data, list) else [data] if isinstance(data, dict) else []
+
 
 _CONTROLLER: "Controller | None" = None
 
@@ -598,6 +628,13 @@ def get_dhcp_reservations() -> str:
 def get_wlans() -> str:
     """無線網路設定（唯讀；passphrase 一律剝掉，顯示為 <stripped>）。"""
     return _read_one("wlans")
+
+
+@app.tool()
+def get_dns_records() -> str:
+    """閘道的靜態 DNS 紀錄（v2 static-dns，唯讀）：A 紀錄與條件式轉發（record_type NS，
+    key 是網域、value 是轉發目標）。set_dns_forward／clear_dns_forward 只認這裡讀過的。"""
+    return _read_one("dnsrecords")
 
 
 @app.tool()
@@ -1193,6 +1230,93 @@ def _apiserver_ready() -> str:
     return "" if rc == 0 and out.strip() == "ok" else f"/readyz: {(err or out).strip() or f'exit {rc}'}"
 
 
+# --- DNS (k8scc#109) ---------------------------------------------------------------
+
+_LABEL = re.compile(r"^(?!-)[a-z0-9-]{1,63}(?<!-)$")
+DNS_RCODES = {0: "NOERROR", 1: "FORMERR", 2: "SERVFAIL", 3: "NXDOMAIN", 4: "NOTIMP", 5: "REFUSED"}
+
+
+def _domain_or_refusal(value: str) -> "tuple[str, str]":
+    """(normalised domain, '') or ('', why not). At least two labels: a forward
+    of a single label (`com`, `lan`) sends a whole top-level name away."""
+    d = (value or "").strip().lower().rstrip(".")
+    labels = d.split(".") if d else []
+    if not d or len(d) > 253 or not all(_LABEL.match(lb) for lb in labels):
+        return "", f"domain {value!r} is not a domain name (letters, digits and hyphens, dot-separated)"
+    if len(labels) < 2:
+        return "", f"domain {value!r} has one label; forwarding it would send a whole top-level name away"
+    return d, ""
+
+
+def _is_ip(value: str) -> bool:
+    try:
+        ipaddress.ip_address(value)
+    except ValueError:
+        return False
+    return True
+
+
+def _dns_endpoint(ip: str) -> "tuple[str, int]":
+    """Where a DNS query for `ip` goes. A patch point for the controls."""
+    return ip, 53
+
+
+def _dns_answers(server: str, domain: str) -> str:
+    """'' when `server` answers an SOA query for `domain` with NOERROR or
+    NXDOMAIN (a DNS server that answers for that name), else why not. One UDP
+    query, standard library only, PROBE_TIMEOUT."""
+    qid = secrets.randbits(16)
+    qname = b"".join(bytes([len(lb)]) + lb.encode() for lb in domain.split(".")) + b"\x00"
+    packet = qid.to_bytes(2, "big") + b"\x01\x00" + b"\x00\x01\x00\x00\x00\x00\x00\x00" + qname + b"\x00\x06\x00\x01"
+    host, port = _dns_endpoint(server)
+    try:
+        with socket.socket(socket.AF_INET6 if ":" in host else socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.settimeout(PROBE_TIMEOUT)
+            sock.sendto(packet, (host, port))
+            deadline = _clock() + PROBE_TIMEOUT
+            while True:
+                sock.settimeout(max(0.01, deadline - _clock()))
+                data, _ = sock.recvfrom(4096)
+                if len(data) >= 4 and int.from_bytes(data[:2], "big") == qid and data[2] & 0x80:
+                    break
+    except OSError as exc:
+        return f"{server}: no DNS answer for {domain} ({type(exc).__name__})"
+    rcode = data[3] & 0x0F
+    if rcode in (0, 3):
+        return ""
+    return f"{server}: answered {DNS_RCODES.get(rcode, rcode)} for {domain}"
+
+
+def _dns_path_names() -> list[str]:
+    """The names im's own path resolves: what this sidecar connects to, plus
+    NETDEV_DNS_PROTECT for what it cannot see (chamber, cloudflared…)."""
+    names = [urlsplit(CONTROLLER_URL).hostname or "", urlsplit(TICKET_API).hostname or "",
+             os.environ.get("KUBERNETES_SERVICE_HOST", "").strip()]
+    names += [pr.host for pr in PROBES]
+    names += [n.strip() for n in DNS_PROTECT_RAW.split(",")]
+    out = []
+    for n in names:
+        n = n.lower().rstrip(".")
+        if n and not _is_ip(n) and n not in out:
+            out.append(n)
+    return out
+
+
+def _dns_on_path(domain: str) -> list[str]:
+    """The names on im's path that a forward of `domain` would redirect."""
+    return [n for n in _dns_path_names() if n == domain or n.endswith("." + domain)]
+
+
+def _lan_resolver(ctx: dict) -> str:
+    """The gateway of the network carrying this node (ip_subnet's host part):
+    the resolver UniFi hands out by default. '' when none is found."""
+    for net in own_networks(POD_IP, ctx["controller_ip"], ctx["api_server_ips"], ctx["networks"]) or []:
+        subnet = str(net.get("ip_subnet") or "")
+        if "/" in subnet and _contains(subnet, POD_IP):
+            return subnet.split("/", 1)[0]
+    return ""
+
+
 def _class_a_inputs() -> "tuple[dict | None, str]":
     """Everything class A reads, fresh at each write. Any one unreadable ⇒ None
     with the reader's own error — every write then refuses (fail closed)."""
@@ -1243,6 +1367,9 @@ class Plan:
     class_a: "tuple[str, str] | None" = None
     refuse_ips: tuple = ()     # addresses this write would give away (checked against im's own path)
     gateway_mac: str = ""      # restart_device, power_cycle_port: refused when this is the gateway
+    unique: str = "name"       # the field a create must not collide with (snapshot check)
+    dns_domain: str = ""       # set/clear_dns_forward: the forwarded domain (class A, health)
+    dns_resolver: str = ""     # the LAN gateway the health check asks; set by class A
 
 
 def _read_first(reader: str) -> str:
@@ -1355,7 +1482,73 @@ def _plan_delete_port_forward(pf_id: str) -> "tuple[Plan | None, str]":
                 before=pf), ""
 
 
+def _dns_forwards() -> "tuple[list | None, str]":
+    """The cached static-dns rows, or (None, read it first)."""
+    if not _collection_fresh("dnsrecords"):
+        return None, _read_first("get_dns_records")
+    rows = [o for o in (_seen("dnsrecords", k) for k in list(_SEEN.get("dnsrecords", {}))) if o is not None]
+    return rows, ""
+
+
+def _plan_dns_forward(domain: str, target: str) -> "tuple[Plan | None, str]":
+    d, bad = _domain_or_refusal(domain)
+    if bad:
+        return None, bad
+    t = (target or "").strip()
+    if not _is_ip(t):
+        return None, f"target {target!r} is not an IP address (the forward goes to a resolver's address, not a name)"
+    ip = ipaddress.ip_address(t)
+    if ip.is_unspecified or ip.is_loopback or ip.is_multicast:
+        return None, f"target {t} is not a resolver anyone in the LAN can reach (unspecified, loopback or multicast)"
+    rows, why = _dns_forwards()
+    if rows is None:
+        return None, why
+    same_key = [r for r in rows if str(r.get("key") or "").lower().rstrip(".") == d]
+    other = [r for r in same_key if str(r.get("record_type") or "").upper() != "NS"]
+    if other:
+        kinds = ", ".join(sorted({str(r.get("record_type")) for r in other}))
+        return None, f"{d} already has a {kinds} record; a forward beside it would shadow it or be shadowed (refusing)"
+    existing = next((r for r in same_key if str(r.get("record_type") or "").upper() == "NS"), None)
+    why = _dns_answers(t, d)
+    if why:
+        return None, (f"target {t} does not answer for {d} ({why}); forwarding to it would make every name under "
+                      f"{d} fail in the LAN")
+    if existing is not None:
+        if existing.get("value") == t and existing.get("enabled") is True:
+            return None, f"{d} already forwards to {t}"
+        return Plan("set_dns_forward", "dnsrecords", str(existing["_id"]), f"dnsrecords/{d}", "put",
+                    {"value": t, "enabled": True}, before=existing, unique="key", dns_domain=d), ""
+    return Plan("set_dns_forward", "dnsrecords", "", f"dnsrecords/{d}", "create",
+                {"record_type": "NS", "key": d, "value": t, "port": 0, "enabled": True}, unique="key",
+                dns_domain=d), ""
+
+
+def _plan_clear_dns_forward(domain: str) -> "tuple[Plan | None, str]":
+    d, bad = _domain_or_refusal(domain)
+    if bad:
+        return None, bad
+    rows, why = _dns_forwards()
+    if rows is None:
+        return None, why
+    existing = next((r for r in rows if str(r.get("key") or "").lower().rstrip(".") == d
+                     and str(r.get("record_type") or "").upper() == "NS"), None)
+    if existing is None:
+        return None, f"{d} has no forward to clear (no NS record with that key in get_dns_records)"
+    return Plan("clear_dns_forward", "dnsrecords", str(existing["_id"]), f"dnsrecords/{d}", "delete",
+                before=existing, unique="key", dns_domain=d), ""
+
+
 def _class_a_refusal(plan: Plan, ctx: dict) -> str:
+    if plan.dns_domain:
+        hit = _dns_on_path(plan.dns_domain)
+        if hit:
+            return (f"{', '.join(hit)} {'is' if len(hit) == 1 else 'are'} on im's own path and under "
+                    f"{plan.dns_domain}; changing how the LAN resolves {plan.dns_domain} would change how im "
+                    "reaches them")
+        plan.dns_resolver = _lan_resolver(ctx)
+        if not plan.dns_resolver:
+            return ("no network carrying this node was read, so there is no LAN resolver to check the forward "
+                    "against (fail closed)")
     own = {POD_IP, ctx["controller_ip"], *ctx["api_server_ips"]}
     for ip in plan.refuse_ips:
         if ip in own:
@@ -1485,15 +1678,17 @@ def _snapshot(plan: Plan) -> Snapshot:
             os.remove(os.path.join(SNAPSHOT_DIR, old))
         except OSError:
             pass
-    names = [o.get("name") for o in items if isinstance(o, dict) and o.get("name")]
+    names = [str(o.get(plan.unique)).lower() for o in items if isinstance(o, dict) and o.get(plan.unique)]
     return Snapshot(obj, ids, _digest(raw), path, names)
 
 
 def _unchanged_since_token(plan: Plan, snap: Snapshot) -> str:
     """'' when the object is still what will_change was computed from."""
     if plan.kind == "create":
-        if plan.fields.get("name") in snap.names:
-            return f"a {plan.collection} object named {plan.fields['name']!r} appeared since the token; read it again"
+        mine = str(plan.fields.get(plan.unique) or "").lower()
+        if mine and mine in snap.names:
+            return (f"a {plan.collection} object with {plan.unique} {plan.fields[plan.unique]!r} appeared since the "
+                    "token; read it again")
         return ""
     if plan.kind == "put":
         now = _strip(snap.obj)
@@ -1507,17 +1702,26 @@ def _rest(plan: Plan) -> str:
     return WRITES["rest"].format(collection=LEGACY_NAME[plan.collection])
 
 
+def _op(plan: Plan, method: str, sub: str = "", body=None) -> list:
+    """One object write on the plan's collection: legacy rest, or the
+    collection's own v2 path where ROUTES says v2 (dnsrecords)."""
+    api, path = ROUTES[plan.collection]
+    if api == "v2":
+        return OPERATOR.request_v2(method, path + sub, body)
+    return OPERATOR.request(method, _rest(plan) + sub, body)
+
+
 def _apply(plan: Plan, snap: Snapshot) -> "tuple[str, str, bool]":
     """(created _id, rc, maybe_applied). rc is 'ok' or the error; maybe_applied
     is False only when the controller itself refused the request."""
     try:
         if plan.kind == "put":
-            OPERATOR.request("PUT", f"{_rest(plan)}/{plan.obj_id}", {**snap.obj, **plan.fields})
+            _op(plan, "PUT", f"/{plan.obj_id}", {**snap.obj, **plan.fields})
         elif plan.kind == "create":
-            data = OPERATOR.request("POST", _rest(plan), dict(plan.fields))
+            data = _op(plan, "POST", "", dict(plan.fields))
             return (_obj_id(data[0]) if data else ""), "ok", True
         elif plan.kind == "delete":
-            OPERATOR.request("DELETE", f"{_rest(plan)}/{plan.obj_id}")
+            _op(plan, "DELETE", f"/{plan.obj_id}")
         else:
             OPERATOR.request("POST", WRITES[plan.endpoint], plan.command)
     except ControllerError as exc:
@@ -1558,6 +1762,10 @@ def _health(plan: Plan, created_id: str, number: int, witness: str) -> Health:
     """Every HEALTH_INTERVAL until HEALTH_TIMEOUT: the first round in which every
     check passes ends it. A breakage that shows only after that round is not
     seen here — that is what FAC's post-ack is for."""
+    if plan.dns_domain:
+        # the forward lands ~30 s late and the gateway's resolver reloads
+        # (k8scc#67 finding 8): a round before that would pass on the old state
+        _sleep(DNS_SETTLE)
     deadline = _clock() + HEALTH_TIMEOUT
     while True:
         passed, failed = [], []
@@ -1571,6 +1779,9 @@ def _health(plan: Plan, created_id: str, number: int, witness: str) -> Health:
         why = _readback(plan, created_id)
         if why is not None:
             (failed.append(f"readback: {why}") if why else passed.append("readback"))
+        if plan.dns_domain:
+            why = _dns_answers(plan.dns_resolver, plan.dns_domain)
+            (failed.append(f"dns: {why}") if why else passed.append("dns"))
         lost = _probes_lost()
         outbound = _outbound(lost)
         (failed.append("probes: " + "; ".join(lost)) if len(lost) >= 2 else passed.append("probes"))
@@ -1593,7 +1804,7 @@ def _revert(plan: Plan, snap: Snapshot, created_id: str) -> "tuple[bool, str]":
     """Back to the snapshot, from inside the LAN. (reverted?, what happened)."""
     try:
         if plan.kind == "put":
-            OPERATOR.request("PUT", f"{_rest(plan)}/{plan.obj_id}", snap.obj)
+            _op(plan, "PUT", f"/{plan.obj_id}", snap.obj)
             _, items = _controller().read(plan.collection)
             now = next((o for o in items if _obj_id(o) == plan.obj_id), None) or {}
             moved = [f for f in plan.fields if f in snap.obj and now.get(f) != snap.obj.get(f)]
@@ -1620,14 +1831,14 @@ def _revert(plan: Plan, snap: Snapshot, created_id: str) -> "tuple[bool, str]":
             if new != [created_id]:
                 return False, (f"new ids in {plan.collection} are {new}, not only the created {created_id}: someone "
                                "else's object must not be removed by this revert, so nothing was deleted")
-            OPERATOR.request("DELETE", f"{_rest(plan)}/{created_id}")
+            _op(plan, "DELETE", f"/{created_id}")
             _, items = _controller().read(plan.collection)
             ids = sorted(i for i in (_obj_id(o) for o in items) if i)
             return (True, f"DELETEd the created {created_id}") if ids == snap.ids \
                 else (False, f"after the DELETE, {plan.collection} ids are {ids}, not the snapshot's {snap.ids}")
         if plan.kind == "delete":
             body = {k: v for k, v in snap.obj.items() if k != "_id"}
-            data = OPERATOR.request("POST", _rest(plan), body)
+            data = _op(plan, "POST", "", body)
             new_id = _obj_id(data[0]) if data else ""
             # Read back like the other two paths: an accepted POST is not an
             # object (fleet-ops-65 measured a re-create that answered ok and
@@ -1892,12 +2103,23 @@ def power_cycle_port(switch_mac: str, port: int, reason: str, confirm: str = "")
                   lambda: _plan_device("power_cycle_port", switch_mac, port))
 
 
-WRITE_TOOLS = [set_dhcp_reservation, clear_dhcp_reservation, block_client, unblock_client,
-               set_port_forward, delete_port_forward, restart_device, power_cycle_port]
+def set_dns_forward(domain: str, target: str, reason: str, confirm: str = "") -> str:
+    """新增或修改一條條件式 DNS 轉發：LAN 裡 domain 底下的名字改問 target（一個 IP，
+    例如叢集的 k8s-gateway）。須先 get_dns_records 讀過。target 要先能回答這個網域；
+    im 自己路徑上的名字在 domain 底下就拒絕。每次套用閘道的 DNS 會重載、整個 LAN 的
+    解析短暫中斷，約 30 秒才生效，所以健檢先等 NETDEV_DNS_SETTLE 秒。新建的失敗就刪掉。兩段式。"""
+    return _write("set_dns_forward", f"dnsrecords/{domain}", reason, confirm, lambda: _plan_dns_forward(domain, target))
 
-# set_dns_forward is not here: it is sub-change 1.2. Root spike 1.1 found its
-# write path (v2 static-dns, record_type NS) and that every apply reloads the
-# gateway's resolver (k8scc#67 findings 7-8); the tool is that sub-change's.
+
+def clear_dns_forward(domain: str, reason: str, confirm: str = "") -> str:
+    """刪除一條條件式 DNS 轉發（以網域指定，須先 get_dns_records 讀過）。回滾＝從快照重建。
+    套用時整個 LAN 的解析同樣會短暫中斷。兩段式。"""
+    return _write("clear_dns_forward", f"dnsrecords/{domain}", reason, confirm, lambda: _plan_clear_dns_forward(domain))
+
+
+WRITE_TOOLS = [set_dhcp_reservation, clear_dhcp_reservation, block_client, unblock_client,
+               set_port_forward, delete_port_forward, restart_device, power_cycle_port,
+               set_dns_forward, clear_dns_forward]
 
 # Registered only when every write input is usable: there is no "present but
 # refuses for lack of configuration" state.
@@ -1934,10 +2156,11 @@ def _startup_readings() -> list[str]:
     if WRITE_BLOCKERS:
         readings.append("write tools: not registered — " + "; ".join(WRITE_BLOCKERS))
     else:
-        readings.append("write tools: registered — " + ", ".join(fn.__name__ for fn in WRITE_TOOLS)
-                        + "; set_dns_forward not shipped (sub-change 1.2)")
+        readings.append("write tools: registered — " + ", ".join(fn.__name__ for fn in WRITE_TOOLS))
+        readings.append("dns: settle " + f"{DNS_SETTLE:g} s; names on im's path a forward may not cover: "
+                        + (", ".join(_dns_path_names()) or "none"))
     readings.append("routes: " + ", ".join(f"{c}={api}" for c, (api, _) in sorted(ROUTES.items()))
-                    + "; writes=legacy (stat/device, stat/sta, self/sites, v2 firewall/zone not yet read on a console)")
+                    + "; writes=legacy, dnsrecords=v2 (stat/device, stat/sta, self/sites, v2 firewall/zone not yet read on a console)")
     if not WRITE_BLOCKERS:
         lost = _probes_lost()
         readings.append("outside probes baseline: " + (f"{_outbound(lost)} — " + "; ".join(lost) if lost else "ok (3/3)"))

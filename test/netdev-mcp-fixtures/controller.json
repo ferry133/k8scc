@@ -331,5 +331,10 @@
       ],
       "radius_secret": "radius-s3cret-55"
     }
+  ],
+  "_comment_dnsrecords": "v2 static-dns (k8scc#109): a forward is record_type NS, key = domain, value = target, port 0, per fleet-ops-b0's FAC1 write spike (k8scc#67 finding 7). The A row's shape and the enabled field are hand-written.",
+  "dnsrecords": [
+    {"_id": "dns-a-nas", "record_type": "A", "key": "nas.home.test", "value": "10.9.9.12", "port": 0, "enabled": true},
+    {"_id": "dns-fwd-lab", "record_type": "NS", "key": "lab.test", "value": "10.9.9.201", "port": 0, "enabled": true}
   ]
 }

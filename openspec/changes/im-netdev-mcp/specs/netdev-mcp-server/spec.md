@@ -159,3 +159,27 @@ For every write call the server SHALL write one JSON line to stdout with `ts`, `
 #### Scenario: The access log does not reach stdout
 - **WHEN** the server runs as its container does and receives HTTP requests
 - **THEN** stdout holds no line (the access lines are on stderr), while the same server run as a plain FastMCP app puts each request's access line on stdout (positive control; measured by hand 2026-10-26, not in the automated controls)
+
+### Requirement: DNS conditional forwards wait for the resolver and never cover im's own path
+
+`set_dns_forward(domain, target, reason, confirm)` and `clear_dns_forward(domain, reason, confirm)` (k8scc#109) SHALL write v2 `static-dns` rows with `record_type: NS`, `key` = domain, `value` = target, `port: 0`, creating with POST, changing with a PUT of the whole object, clearing with DELETE, under every gate of the other write tools. Before any ticket they SHALL refuse a domain that is not a domain name or has a single label, a key that already holds a record of another type, a target that is not an IP literal or is loopback, unspecified or multicast, an unchanged forward, and a target that does not answer an SOA query for the domain with NOERROR or NXDOMAIN. Class A SHALL refuse a domain that is, or is a parent of, a name on im's own path: the controller host, the ticket API host, every outside probe host, `KUBERNETES_SERVICE_HOST`, and each name in `NETDEV_DNS_PROTECT`. At execute the server SHALL wait `NETDEV_DNS_SETTLE` seconds before the first health round, and SHALL add a `dns` check: the gateway of the network carrying the node answers SOA for the domain; no such network ⇒ refused (fail closed).
+
+#### Scenario: A new forward in the measured shape
+- **WHEN** a confirmed `set_dns_forward` names a domain with no record
+- **THEN** the fake controller recorded one POST to v2 `static-dns` with exactly `{record_type: NS, key, value, port: 0, enabled: true}`, the target and the LAN gateway were each asked for the domain, and `health` lists `dns`
+
+#### Scenario: A changed forward is the whole object
+- **WHEN** a confirmed `set_dns_forward` names a domain that already forwards elsewhere
+- **THEN** the PUT body equals the read object with only `value` changed (negative control: the fake answers a partial PUT 400, as FAC1 did)
+
+#### Scenario: Settle before health
+- **WHEN** the LAN gateway answers SERVFAIL until the settle has passed
+- **THEN** the write is `applied` (negative control: a gateway that stays SERVFAIL through the window is `reverted`, the created row DELETEd)
+
+#### Scenario: A dead target is refused before the ticket
+- **WHEN** the target is silent, REFUSED or SERVFAIL for the domain
+- **THEN** the call is refused and no ticket is opened (positive control: NXDOMAIN reaches the token)
+
+#### Scenario: A name on im's path is never under the forward
+- **WHEN** `NETDEV_DNS_PROTECT` holds `chamber.home.test` and the domain is `home.test`
+- **THEN** class A refuses it naming that host (negative controls: `other.test` reaches the token; `ome.test` and `chamber.home.test.evil` cover nothing)
