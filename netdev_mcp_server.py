@@ -1354,6 +1354,10 @@ def _dns_effect(plan: "Plan", now: "tuple | None") -> "tuple[str, str]":
     if mname(old) is None or mname(plan.dns_baseline) != mname(old):
         return "unmeasured", (f"before the apply the gateway answered {plan.dns_baseline}, not with the old target's "
                               f"MNAME ({old}), so the forward was not visibly in effect to begin with")
+    if mname(now) is None:
+        # An answer with no SOA names nobody, so it cannot show the old target
+        # is gone (k8scc#113, fleet-ops-d5 on #112): never a pass.
+        return "unmeasured", f"the gateway answered {now} with no SOA, so whose answer it is cannot be read"
     return (("in effect", f"the gateway answers {now}, no longer with the old target's MNAME") if mname(now) != mname(old)
             else ("not in effect", f"the gateway still answers as the old target ({mname(old)})"))
 
