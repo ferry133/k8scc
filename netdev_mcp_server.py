@@ -1261,10 +1261,32 @@ def _dns_endpoint(ip: str) -> "tuple[str, int]":
     return ip, 53
 
 
-def _dns_answers(server: str, domain: str) -> str:
-    """'' when `server` answers an SOA query for `domain` with NOERROR or
-    NXDOMAIN (a DNS server that answers for that name), else why not. One UDP
-    query, standard library only, PROBE_TIMEOUT."""
+def _dns_name(data: bytes, off: int) -> "tuple[str, int]":
+    """A (possibly compressed) name at `off`: (name, offset after it)."""
+    labels, jumped, end, hops = [], False, off, 0
+    while True:
+        n = data[off]
+        if n & 0xC0 == 0xC0:
+            if not jumped:
+                end = off + 2
+            off, jumped, hops = ((n & 0x3F) << 8) | data[off + 1], True, hops + 1
+            if hops > 32:
+                raise ValueError("compression loop")
+            continue
+        if n == 0:
+            return ".".join(labels).lower(), (end if jumped else off + 1)
+        labels.append(data[off + 1:off + 1 + n].decode("ascii", "replace"))
+        off += 1 + n
+
+
+def _dns_soa(server: str, domain: str) -> "tuple[tuple | None, str]":
+    """Ask `server` for the SOA of `domain` (one UDP query, standard library,
+    PROBE_TIMEOUT). Returns (fingerprint, '') when it answered NOERROR or
+    NXDOMAIN, else (None, why not). The fingerprint is (rcode, SOA MNAME, SOA
+    serial), from the answer section or else the authority section, so two
+    servers can be compared: a forward is in effect when the gateway answers
+    as the target does (fleet-ops-d5 on #112: NOERROR alone also holds before
+    the forward, through the gateway's public upstream)."""
     qid = secrets.randbits(16)
     qname = b"".join(bytes([len(lb)]) + lb.encode() for lb in domain.split(".")) + b"\x00"
     packet = qid.to_bytes(2, "big") + b"\x01\x00" + b"\x00\x01\x00\x00\x00\x00\x00\x00" + qname + b"\x00\x06\x00\x01"
@@ -1277,14 +1299,59 @@ def _dns_answers(server: str, domain: str) -> str:
             while True:
                 sock.settimeout(max(0.01, deadline - _clock()))
                 data, _ = sock.recvfrom(4096)
-                if len(data) >= 4 and int.from_bytes(data[:2], "big") == qid and data[2] & 0x80:
+                if len(data) >= 12 and int.from_bytes(data[:2], "big") == qid and data[2] & 0x80:
                     break
     except OSError as exc:
-        return f"{server}: no DNS answer for {domain} ({type(exc).__name__})"
+        return None, f"{server}: no DNS answer for {domain} ({type(exc).__name__})"
     rcode = data[3] & 0x0F
-    if rcode in (0, 3):
-        return ""
-    return f"{server}: answered {DNS_RCODES.get(rcode, rcode)} for {domain}"
+    if rcode not in (0, 3):
+        return None, f"{server}: answered {DNS_RCODES.get(rcode, rcode)} for {domain}"
+    mname, serial = "", None
+    try:
+        off = 12
+        for _ in range(int.from_bytes(data[4:6], "big")):
+            off = _dns_name(data, off)[1] + 4
+        records = int.from_bytes(data[6:8], "big") + int.from_bytes(data[8:10], "big")
+        for _ in range(records):
+            off = _dns_name(data, off)[1]
+            rtype, rdlen = int.from_bytes(data[off:off + 2], "big"), int.from_bytes(data[off + 8:off + 10], "big")
+            rdata = off + 10
+            if rtype == 6:
+                mname, after = _dns_name(data, rdata)
+                after = _dns_name(data, after)[1]
+                serial = int.from_bytes(data[after:after + 4], "big")
+                break
+            off = rdata + rdlen
+    except (IndexError, ValueError):
+        return None, f"{server}: an answer for {domain} that could not be parsed"
+    return (DNS_RCODES[rcode], mname, serial), ""
+
+
+def _dns_answers(server: str, domain: str) -> str:
+    """'' when `server` answers for `domain` (NOERROR or NXDOMAIN), else why not."""
+    return _dns_soa(server, domain)[1]
+
+
+def _dns_effect(plan: "Plan", now: "tuple | None") -> "tuple[str, str]":
+    """Whether the gateway's answer `now` shows the change: ('in effect' |
+    'not in effect' | 'unmeasured', detail). set: the gateway answers as the
+    target does. clear: it answers, and no longer as the old target does.
+    When the gateway already answered that way before the apply, the reading
+    cannot tell the change happened: unmeasured, never a pass."""
+    if plan.tool == "set_dns_forward":
+        want, why = _dns_soa(plan.fields.get("value") or "", plan.dns_domain)
+        if want is None:
+            return "not in effect", f"the target no longer answers ({why})"
+        if plan.dns_baseline == want:
+            return "unmeasured", f"the gateway answered as the target ({want}) before the apply"
+        return (("in effect", f"the gateway answers as the target ({want})") if now == want
+                else ("not in effect", f"the gateway answers {now}, the target {want}"))
+    old, _ = _dns_soa(str((plan.before or {}).get("value") or ""), plan.dns_domain)
+    if plan.dns_baseline is None or plan.dns_baseline != old:
+        return "unmeasured", (f"before the apply the gateway answered {plan.dns_baseline}, not as the old target "
+                              f"({old}), so the forward was not visibly in effect to begin with")
+    return (("in effect", f"the gateway answers {now}, no longer as the old target") if now != old
+            else ("not in effect", f"the gateway still answers as the old target ({old})"))
 
 
 def _dns_path_names() -> list[str]:
@@ -1370,6 +1437,7 @@ class Plan:
     unique: str = "name"       # the field a create must not collide with (snapshot check)
     dns_domain: str = ""       # set/clear_dns_forward: the forwarded domain (class A, health)
     dns_resolver: str = ""     # the LAN gateway the health check asks; set by class A
+    dns_baseline: "tuple | None" = None   # the gateway's answer just before the apply
 
 
 def _read_first(reader: str) -> str:
@@ -1756,6 +1824,7 @@ class Health:
     failed: list
     outbound: str
     witness: str
+    dns_effect: str = ""   # DNS forwards only: 'in effect' or 'unmeasured: …' (k8scc#112)
 
 
 def _health(plan: Plan, created_id: str, number: int, witness: str) -> Health:
@@ -1779,9 +1848,19 @@ def _health(plan: Plan, created_id: str, number: int, witness: str) -> Health:
         why = _readback(plan, created_id)
         if why is not None:
             (failed.append(f"readback: {why}") if why else passed.append("readback"))
+        effect = ""
         if plan.dns_domain:
-            why = _dns_answers(plan.dns_resolver, plan.dns_domain)
-            (failed.append(f"dns: {why}") if why else passed.append("dns"))
+            now, why = _dns_soa(plan.dns_resolver, plan.dns_domain)
+            if why:
+                failed.append(f"dns: {why}")
+            else:
+                effect, detail = _dns_effect(plan, now)
+                if effect == "in effect":
+                    passed.append("dns")
+                elif effect == "not in effect":
+                    failed.append(f"dns: not in effect: {detail}")
+                else:
+                    effect = f"unmeasured: {detail}"   # neither a pass nor a failure
         lost = _probes_lost()
         outbound = _outbound(lost)
         (failed.append("probes: " + "; ".join(lost)) if len(lost) >= 2 else passed.append("probes"))
@@ -1794,9 +1873,9 @@ def _health(plan: Plan, created_id: str, number: int, witness: str) -> Health:
             seen = "ok" if acked else "lost"
             (passed.append("post-ack") if acked else failed.append("post-ack: not (yet) on the ticket"))
         if not failed:
-            return Health(True, passed, failed, outbound, seen)
+            return Health(True, passed, failed, outbound, seen, effect)
         if _clock() >= deadline:
-            return Health(False, passed, failed, outbound, seen)
+            return Health(False, passed, failed, outbound, seen, effect)
         _sleep(HEALTH_INTERVAL)
 
 
@@ -2010,6 +2089,8 @@ def _write(tool: str, hint: str, reason: str, confirm: str, build) -> str:
                          **({"release_not_posted": note} if note else {})})
     common["snapshot_digest"] = snap.digest
 
+    if plan.dns_domain:
+        plan.dns_baseline = _dns_soa(plan.dns_resolver, plan.dns_domain)[0]
     created_id, rc, maybe_applied = _apply(plan, snap)
     if not maybe_applied:
         why = f"the controller refused the write, nothing changed: {rc}"
@@ -2023,10 +2104,16 @@ def _write(tool: str, hint: str, reason: str, confirm: str, build) -> str:
     readings = {"outbound": h.outbound, "fac_witness": h.witness}
     _audit(tool, target, "execute", stated, rc=rc, health=h.passed, **readings, **common)
     if h.ok:
-        note = _release(number, "applied", h.outbound, h.witness, ["health: " + ", ".join(h.passed),
+        effect = [f"dns_effect: {h.dns_effect}"] if h.dns_effect else []
+        note = _release(number, "applied", h.outbound, h.witness, ["health: " + ", ".join(h.passed), *effect,
                                                                     f"snapshot_digest: {snap.digest}"])
         body = {"result": "applied", "target": target, "ticket": number, **readings, "health": h.passed,
                 "snapshot_digest": snap.digest}
+        if h.dns_effect:
+            body["dns_effect"] = h.dns_effect
+            if h.dns_effect != "in effect":
+                body["dns_note"] = ("the record is written, but whether the LAN resolves through it could not be "
+                                    "measured here; check it with a lookup from the LAN and say so in your report")
         if h.outbound == "degraded":
             body["note"] = "one outside probe did not answer (outbound: degraded); not reverted, but say so in your report"
         if note:
