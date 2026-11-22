@@ -60,7 +60,7 @@ done
 [ -n "$standin" ] || { echo "FAIL CANNOT MEASURE: no stand-in that tmux names claude (read:${readings}; cat run: $(echo | "$work/bin/claude" 2>&1 | head -c 200))"; exit 1; }
 echo "stand-in: ${standin##*/} (tmux read:${readings})"
 
-# the rule-drawn idle prompt, as in the inbox-watch fixtures
+# the rule-drawn idle prompt, as in test/pane-fixtures.sh (IDLE_RULE)
 printf '%s\n' '● Restart applied.' '────────────────────────────────────────────' '❯ ' \
     '────────────────────────────────────────────' '  ⏵⏵ auto mode on (shift+tab to cycle)' > "$work/idle"
 

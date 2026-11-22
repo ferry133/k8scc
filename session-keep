@@ -23,8 +23,6 @@
 #   sends no alive signal and logs the pane gate's reason, and the im is not
 #   online.
 # - It never kills or replaces a session that exists.
-# - ⚠ It also changes the inbox channel: with a session always there,
-#   inbox-watch announces an assignment with nobody at the ttyd.
 #
 # SESSION_KEEP_TICKS=N runs N rounds and exits (the controls use it, with a
 # fake `sleep`). Started by entrypoint.sh in the background; writes to stderr.

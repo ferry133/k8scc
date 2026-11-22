@@ -9,8 +9,9 @@
 #    `netdev` server
 # 5. Configure im's apps repo (if IM_APPS_REPO and its write key are both here):
 #    ssh alias + git identity, and git/sops into the permission profile
-# 6. Announce ~/workspace/inbox/ if it holds anything unread
-# 7. exec tmux → claude (detached, without 6, when session-keep runs it)
+# 6. exec tmux → claude (detached, without the greeting, when session-keep runs it)
+#    (The inbox notice that was step 6 is retired with inbox-watch, k8scc#103:
+#    assignments arrive through chamber; ~/workspace/inbox/ keeps im's reports.)
 # CLAUDE_USER_ID is set by the pod environment (oauth2-proxy handles auth externally)
 
 # HOME is /home/claude in the image (Dockerfile pins it); the fallback only
@@ -290,18 +291,6 @@ core.sshCommand=ssh -F $cfg
 EOF
 }
 
-# Print one line when the inbox directory holds an assignment not yet marked
-# read: anything not ending in `.read`, and not one of im's own reports
-# (`*-report.md`, k8scc#65). Counts files; never opens them. Prints nothing
-# when the directory is absent, empty, or holds only read files and reports.
-inbox_notice() {
-    local dir="$1" n
-    [ -d "$dir" ] || return 0
-    n=$(find "$dir" -mindepth 1 -maxdepth 1 -type f ! -name '*.read' ! -name '*-report.md' | wc -l | tr -d ' ')
-    [ "$n" -gt 0 ] || return 0
-    printf '📥 inbox: %s file(s) — read %s/ before anything else\n' "$n" "${dir/#"$HOME"/\~}"
-}
-
 # --- settings.json -------------------------------------------------------------
 mkdir -p "${CLAUDE_HOME}/.claude"
 if [ ! -f "${CLAUDE_HOME}/.claude/settings.json" ]; then
@@ -400,7 +389,7 @@ fi
 
 # session-keep starts the session with nobody at a terminal (openspec
 # im-chamber-client 4.3): the same set-up as above, then a detached session
-# and no greeting, no inbox pause. -x/-y because a detached session has no
+# and no greeting. -x/-y because a detached session has no
 # client to take its size from. If a session appeared in the meantime, leave
 # it alone.
 if [ "${CLAUDE_SESSION_DETACHED:-}" = 1 ]; then
@@ -411,16 +400,6 @@ fi
 echo ""
 echo "✓ 歡迎，${CLAUDE_USER_ID}"
 echo ""
-
-# Company colleagues who are not at this ttyd drop hand-over notes for im into
-# ~/workspace/inbox/ (on the workspace PVC). Say so before the agent starts. tmux clears the screen the
-# moment it attaches, so the line gets a short, Enter-skippable pause --
-# otherwise it is on screen for one frame, which is the same as not printed.
-if notice=$(inbox_notice "${CLAUDE_HOME}/workspace/inbox") && [ -n "${notice}" ]; then
-    echo "${notice}"
-    read -r -t 8 -p "（按 Enter 繼續；8 秒後自動繼續）" _ 2>/dev/null || true
-    echo ""
-fi
 
 # -A: attach to the "claude" tmux session if it already exists (a
 # reconnecting ttyd WebSocket after an idle disconnect) instead of forking

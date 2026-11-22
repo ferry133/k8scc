@@ -1,10 +1,10 @@
 # pane-gate -- the one reading of "is the Claude Code pane at its idle, empty
-# prompt" (openspec im-chamber-client tasks 5.1). Sourced, not run: by
-# inbox-watch, and by chamber-watch, so that the two cannot disagree about
-# when a line may be typed into the session.
+# prompt" (openspec im-chamber-client tasks 5.1). Sourced, not run, by
+# chamber-watch, to decide when a line may be typed into the session.
 #
-# This text was moved out of inbox-watch unchanged (k8scc#59, #60); how each
-# pattern was measured is written there and in CLAUDE.md.
+# This text was moved out of inbox-watch unchanged (k8scc#59, #60), and stayed
+# when inbox-watch was retired (k8scc#103); how each pattern was measured is in
+# CLAUDE.md. Its fixtures are test/pane-fixtures.sh.
 #
 # Before sourcing, the caller may set:
 #   session   the tmux session name (default claude)

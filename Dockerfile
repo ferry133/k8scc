@@ -300,12 +300,11 @@ COPY talos_mcp_server.py /usr/local/bin/talos_mcp_server.py
 COPY netdev_mcp_server.py /usr/local/bin/netdev_mcp_server.py
 COPY auth0_login.py /usr/local/bin/auth0_login.py
 COPY claude-session /usr/local/bin/claude-session
-COPY inbox-watch /usr/local/bin/inbox-watch
 COPY session-keep /usr/local/bin/session-keep
 # The one LAN scan the permission profile allows (k8scc#105): networks only,
 # so no nmap or arp-scan option reaches either tool through it.
 COPY lan-scan /usr/local/bin/lan-scan
-# The pane gate inbox-watch sources. It must sit next to it: without the file
+# The pane gate chamber-watch sources. It must sit next to it: without the file
 # the watcher refuses to start (and says so).
 COPY pane-gate /usr/local/bin/pane-gate
 # The chamber client and the directive verifier (openspec im-chamber-client,
@@ -335,7 +334,6 @@ RUN chmod +x /usr/local/bin/memory_mcp_server.py \
              /usr/local/bin/netdev_mcp_server.py \
              /usr/local/bin/auth0_login.py \
              /usr/local/bin/claude-session \
-             /usr/local/bin/inbox-watch \
              /usr/local/bin/session-keep \
              /usr/local/bin/chamber \
              /usr/local/bin/directive-verify \

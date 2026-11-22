@@ -98,7 +98,7 @@ jobs:
         run: python3 test/test_mcp_stdout.py
 
       # claude-session runs as shipped with HOME redirected and fake claude /
-      # tmux binaries: the permission profile merge and the inbox notice.
+      # tmux binaries: the permission profile merge.
       - name: Check the claude-session controls
         run: test/claude-session-controls.sh
 
@@ -108,10 +108,6 @@ jobs:
       - name: Check the lan-scan controls
         run: test/lan-scan-controls.sh
 
-      # inbox-watch runs as shipped with fake tmux / sleep: it types one line
-      # into the running session per new inbox file, never the contents (k8scc#59).
-      - name: Check the inbox-watch controls
-        run: test/inbox-watch-controls.sh
 
       # im's managed policy (root 7.3b): shipped to /etc/claude-code/CLAUDE.md
       # and saying what the 2026-10-15 ruling requires, with a control per line.
