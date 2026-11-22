@@ -396,11 +396,12 @@ class FakeDNS:
     """One UDP socket per address the server asks (`_dns_endpoint` is patched
     to hand out these), answering SOA queries with the mode set for that
     address: noerror (default; the SOA in the answer section), nxdomain (the
-    SOA in the authority section), servfail, refused, or silent. `soa[ip]` is
+    SOA in the authority section), nosoa (NOERROR with no record at all),
+    servfail, refused, or silent. `soa[ip]` is
     that address's (MNAME, serial); `forward[(ip, domain)] = other` makes ip
     answer for that domain as other does, which is what a gateway with the
     forward in effect looks like."""
-    RCODE = {"noerror": 0, "servfail": 2, "nxdomain": 3, "refused": 5}
+    RCODE = {"noerror": 0, "nosoa": 0, "servfail": 2, "nxdomain": 3, "refused": 5}
     PUBLIC = ("ns1.public.test", 2026112201)
 
     def __init__(self):
@@ -1998,6 +1999,22 @@ class DnsForwards(WriteCase):
             old, _ = self.m._dns_soa(self.OLD, "lab.test")
             self.assertEqual(now[1], old[1])
             self.assertNotEqual(now[2], old[2])
+
+    def test_a_clear_answered_without_an_soa_is_unmeasured(self):
+        # k8scc#113 (fleet-ops-d5 on #112): an answer with no SOA has no MNAME,
+        # so nobody can tell whose answer it is; it must not read as in effect
+        def hook(m, path, body):
+            self.h.dns.forward.pop((GATEWAY_RESOLVER, "lab.test"), None)
+            self.h.dns.modes[GATEWAY_RESOLVER] = "nosoa"
+        self.h.fake.on_write = hook
+        self.read("get_dns_records")
+        res = self.write("clear_dns_forward")
+        self.assertEqual(res["result"], "applied", res)
+        self.assertTrue(res["dns_effect"].startswith("unmeasured"), res["dns_effect"])
+        self.assertIn("no SOA", res["dns_effect"])
+        self.assertNotIn("dns", res["health"])
+        with self.subTest(control="the fake really answers NOERROR with an empty MNAME"):
+            self.assertEqual(self.m._dns_soa(GATEWAY_RESOLVER, "lab.test"), (("NOERROR", "", None), ""))
 
     def setUp_dns(self):
         self.h.dns.soa.update({self.TARGET: ("k8s-gateway.home.test", 7), self.OLD: ("old-gw.lab.test", 3),
