@@ -342,6 +342,82 @@ rc, o, e = verify("--transcripts", os.path.join(T, "nowhere"), PTR)
 check("T7 without the switch the same call says it found nothing (control)", (2, True), (rc, "no transcript" in e))
 check("T8 --use with the switch off records nothing", (2, False), (verify(*base, "--use", PTR, env={"CHAMBER_TRANSCRIPTS": "off"})[0], os.path.exists(os.path.join(T, "ledger"))))
 
+print("directive-verify: step lists (R22; the original catches up with the installed copy, tasks 2.4)")
+# Ported from the operator side's steps-test.py. The directive header below is the format
+# directive-sign composes; that tool is not in this repo and must not be in the image, so this
+# is a second definition of the format. ST1 and ST10 are the controls that it is still the one
+# the verifier accepts. The key is made here and thrown away with T.
+if not shutil.which("ssh-keygen"):
+    res.append(False)
+    print("FAIL CANNOT MEASURE: no ssh-keygen on this machine; the step-list cells did not run")
+else:
+    import datetime, hashlib
+    SK = os.path.join(T, "stepkey")
+    rig = subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", SK], capture_output=True).returncode == 0
+    if rig:
+        open(os.path.join(T, "step-signers"), "w").write('vector-person namespaces="chamber-directive" ' + open(SK + ".pub").read())
+    now = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0)
+    hour = datetime.timedelta(hours=1)
+    z = lambda t: t.strftime("%Y-%m-%dT%H:%M:%SZ")
+    count = [0]
+
+    def signed(words):
+        count[0] += 1
+        body = ("chamber-directive v1\nid: step%d\nsigner: vector-person\nissued: %s\nexpires: %s\ndelegable: yes\nto: any\n---\n"
+                % (count[0], z(now - hour), z(now + hour))).encode() + words
+        f = os.path.join(T, "stepmsg")
+        open(f, "wb").write(body)
+        if os.path.exists(f + ".sig"):
+            os.remove(f + ".sig")
+        if subprocess.run(["ssh-keygen", "-Y", "sign", "-f", SK, "-n", "chamber-directive", f], capture_output=True).returncode:
+            return None
+        return body + open(f + ".sig", "rb").read()
+
+    SL = os.path.join(T, "step-ledger")
+
+    def sv(msg, *args):
+        rc, _, err = verify("--signers", os.path.join(T, "step-signers"), "--ledger", SL, "--transcripts", TR, *args,
+                            *([] if msg is None else ["-"]), stdin=msg or b"")
+        return rc, err
+
+    def ledger_lines():
+        return len(open(SL).read().splitlines()) if os.path.isfile(SL) else 0
+
+    d = signed("do these three:\nsteps:\n1. merge the first\n2. mint the second\n3. push the third\n".encode()) if rig else None
+    if d is None:
+        res.append(False)
+        print("FAIL CANNOT MEASURE: the throwaway key could not be made or could not sign; the step-list cells did not run")
+    else:
+        rc, e = sv(d)
+        check("ST1 three steps, read: pass, none used, no ledger", (0, True, 0), (rc, "used: none" in e, ledger_lines()))
+        check("ST2 --use without --step: fail, nothing recorded", (1, 0), (sv(d, "--use")[0], ledger_lines()))
+        rc, e = sv(d, "--use", "--step", "1")
+        check("ST3 --use --step 1: pass, names the step, one line", (0, True, 1), (rc, "step 1/3: merge the first" in e, ledger_lines()))
+        check("ST4 step 1 again (read): used", 1, sv(d, "--step", "1")[0])
+        check("ST5 --use --step 2: pass (the R22 cell; one use per step, not per directive)", (0, 2), (sv(d, "--use", "--step", "2")[0], ledger_lines()))
+        rc, e = sv(d)
+        check("ST6 read again: pass, used 1, 2", (0, True), (rc, "used: 1, 2" in e))
+        check("ST7 --step 4 (not on the list)", (1, 2), (sv(d, "--use", "--step", "4")[0], ledger_lines()))
+        check("ST8a --step 0", 1, sv(d, "--step", "0")[0])
+        check("ST8b --step x", 1, sv(d, "--step", "x")[0])
+        o = signed(b"delete the scratch branch\n")
+        check("ST9 no list, --step 1: fail, nothing recorded", (1, 2), (sv(o, "--use", "--step", "1")[0], ledger_lines()))
+        check("ST10 no list, --use, then again (control: used once as a whole, as before)", (0, 1, 3), (sv(o, "--use")[0], sv(o, "--use")[0], ledger_lines()))
+        check("ST11 a gap (1, 3)", 1, sv(signed(b"steps:\n1. a\n3. c\n"))[0])
+        check("ST12 two lists", 1, sv(signed(b"steps:\n1. a\nand\nsteps:\n1. b\n"))[0])
+        check("ST13 `steps:` with no `1.` after it", 1, sv(signed(b"steps:\nfirst do a\n"))[0])
+        check("ST14 step 3's words edited after signing", 1, sv(d.replace(b"push the third", b"push the fourth"), "--step", "3")[0])
+        check("ST15a a transcript pointer with --step: fail, nothing recorded", (1, 3), (sv(None, "--use", "--step", "1", PTR)[0], ledger_lines()))
+        check("ST15b the same pointer without --step (control: pointers unchanged)", (0, 4), (sv(None, "--use", PTR)[0], ledger_lines()))
+        w = signed(b"steps:\n1. a\n2. b\n")
+        whole = "signed:" + hashlib.sha256(w.rsplit(b"-----BEGIN SSH SIGNATURE-----", 1)[0]).hexdigest()
+        open(SL, "a").write(whole + "\t2026-01-01T00:00:00Z\n")
+        check("ST16 a whole-directive use in the ledger blocks every step", 1, sv(w, "--step", "2")[0])
+        check("ST17 numbered lines without `steps:` are not a list: --step fails", 1, sv(signed(b"1. a\n2. b\n"), "--step", "1")[0])
+        x = signed(b"steps:\n1. a\n2. b\nthen prose\n3. c\n")
+        rc, e = sv(x)
+        check("ST18 the list ends at the first other line (2 steps, not 3)", (0, True, 1), (rc, "2 step(s)" in e, sv(x, "--step", "3")[0]))
+
 print("image defaults")
 df = open(os.path.join(ROOT, "Dockerfile")).read()
 check("I1 the image sets the signer directory", True, "ENV CHAMBER_SIGNERS_DIR=/etc/chamber/signers \\\n    CHAMBER_TRANSCRIPTS=off\n" in df)

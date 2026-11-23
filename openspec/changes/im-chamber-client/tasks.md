@@ -31,6 +31,8 @@
 - [ ] 2.6 用過的指令的那本帳在 PVC 上（預設 `~/.claude/chamber/used_directives`，而 `~/.claude` 是 PVC——讀 `directive-verify` 與 `CLAUDE.md` 得來，沒在 pod 上量）：control 是「`--use` 之後重啟 pod，同一份再驗回 1」
 - [ ] 2.4 正本住哪（design Open Questions 1）裁定後：另一側改成安裝的副本，加一格雜湊比對
   - **裁定（ferry133 2026-11-19，在 `k8scc-0f` 的 console，逐字）：「正本放 k8scc」。** 正本是本 repo 的 `chamber/`。Mac 側（`~/.claude/scripts/`）改成安裝的副本與雜湊比對那一格由 fleet-ops 收（`fleet-ops-98 [047e9c]` 已接）；那一半做完這一項才勾
+  - **Mac 那一半（2026-11-19 06:48，`fleet-ops-98 [047e9c]`，k8scc#70 的留言）**：`~/.claude/scripts/chamber-originals` 比雜湊，六格都與預期相同。它自己寫明「沒有任何東西定期跑它」
+  - **2026-11-24 06:21 量到分岔（`k8scc-bf [97703c]`）**：`chamber` 兩側相同（`9a813efaf798e592`）；`directive-verify` 正本 `8b6edaeb638829e6`、Mac 副本 `5270cbe1ff545ed7`。副本比正本新：root R22 的 `--step`（2026-11-22 18:12 寫在 Mac 側，沒有經過本 repo 的 PR）。本 repo 收下 Mac 的位元組並把 `steps-test.py` 的 20 格搬進 `test/test_chamber_tools.py`（ST1–ST18；舊正本跑同一批 20 格全紅；七個變異各自轉紅）。**這一項仍不勾**：分岔兩天沒有任何東西說出來，「雜湊比對」要有東西定期跑才算數，那一半在 fleet-ops
 
 ## 3. 橋接程式（root 6.3 的一半）
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """directive-verify — check a person-signed chamber directive. Standard library + ssh-keygen.
 
-  directive-verify [--me AGENT] [--relayed] [--signers FILE] [--print-body] [FILE|-]
+  directive-verify [--me AGENT] [--relayed] [--signers FILE] [--print-body] [--use] [--step N] [FILE|-]
 
 A directive is one chamber message:
 
@@ -78,6 +78,22 @@ moment you start the action it covers. A ledger that exists but cannot be read, 
 cannot be written under --use, is CANNOT MEASURE (2) — never a pass.
 The ledger is per host and per OS user: it stops this agent on this host from acting
 twice on one directive. It does not know what another host or another agent did.
+
+Step lists (ferry133 2026-11-22, R22: one directive may cover several steps, each used once)
+
+  --step N       the step of a signed directive's step list that you are about to do
+
+A signed directive whose words contain a step list is used once PER STEP, not once
+as a whole. The list is a line holding only `steps:` followed directly by lines
+`1. …`, `2. …` (numbered from 1, no gaps, ASCII digit and full stop; the list ends at
+the first line that is not such a line). One list per directive.
+  - with a list:   --use needs --step N; the ledger records `<directive>#step=N`.
+                   Without --step (reading) it passes and names the steps already used.
+  - without one:   --step FAILS — the directive is used once as a whole, as before.
+  - --step outside the list, a malformed list, or a second list: FAIL.
+A pass on a step proves the person listed it. Whether what you are about to do IS
+that step is yours to judge — the same as for the words as a whole.
+Transcript pointers have no step lists (R22 speaks of signed directives): --step FAILS.
 """
 import datetime, glob, hashlib, json, os, re, shutil, subprocess, sys, tempfile
 
@@ -111,6 +127,39 @@ def once(key, ledger, use):
                 fh.write("%s\t%s\n" % (key, datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")))
         except Exception as e:
             out(UNMEASURED, "CANNOT MEASURE", "cannot record the use (%s) — do not act" % type(e).__name__)
+
+
+STEPS_HEAD = "steps:"
+STEP = re.compile(r"\s*([0-9]+)\. +(\S.*?)\s*")
+
+
+def steps(body):
+    """-> None (no list) or [step text, …] numbered from 1; raises ValueError."""
+    lines = body.decode("utf-8", "strict").split("\n")
+    at = [i for i, ln in enumerate(lines) if ln.strip() == STEPS_HEAD]
+    if not at:
+        return None
+    if len(at) > 1:
+        raise ValueError("%d `steps:` lists — one directive has at most one" % len(at))
+    got = []
+    for ln in lines[at[0] + 1:]:
+        m = STEP.fullmatch(ln)
+        if not m:
+            break
+        if int(m.group(1)) != len(got) + 1:
+            raise ValueError("step %s where step %d was expected — number them 1, 2, 3 without gaps" % (m.group(1), len(got) + 1))
+        got.append(m.group(2))
+    if not got:
+        raise ValueError("`steps:` is not followed by `1. …`")
+    return got
+
+
+def used(key, ledger):
+    """The ledger keys that start with key (read only; an unreadable ledger is handled by once())."""
+    try:
+        return [ln.split("\t")[0] for ln in open(ledger, encoding="utf-8").read().split("\n") if ln.startswith(key)]
+    except Exception:
+        return []
 
 
 def split(raw):
@@ -248,6 +297,7 @@ def main():
            "--transcripts": os.path.expanduser("~/.claude/projects"),
            "--ledger": os.path.expanduser("~/.claude/chamber/used_directives")}
     relayed = print_body = use = False
+    step = None
     src = "-"
     i = 0
     while i < len(a):
@@ -262,6 +312,11 @@ def main():
         elif a[i] == "--use":
             use = True
             i += 1
+        elif a[i] == "--step":
+            if i + 1 >= len(a):
+                out(UNMEASURED, "CANNOT MEASURE", "--step needs a value")
+            step = a[i + 1]
+            i += 2
         elif a[i] == "--print-body":
             print_body = True
             i += 1
@@ -270,7 +325,11 @@ def main():
         else:
             src = a[i]
             i += 1
+    if step is not None and not re.fullmatch(r"[1-9][0-9]*", step):
+        out(FAIL, "FAIL", "--step must be a step number (1, 2, …), not %r" % step)
     if src.startswith("transcript:"):
+        if step is not None:
+            out(FAIL, "FAIL", "transcript pointers have no step lists (R22 covers signed directives)")
         m = POINTER.fullmatch(src)
         if not m:
             out(UNMEASURED, "CANNOT MEASURE", "not a pointer of the form transcript:<session-uuid>/<record-uuid>")
@@ -284,6 +343,8 @@ def main():
     if parts is None:
         ptrs = {m.groups() for ln in raw.decode("utf-8", "replace").split("\n") for m in [POINTER.fullmatch(ln.strip())] if m}
         if len(ptrs) == 1:
+            if step is not None:
+                out(FAIL, "FAIL", "transcript pointers have no step lists (R22 covers signed directives)")
             transcript(*ptrs.pop(), opt["--transcripts"], opt["--ledger"], use)
         if ptrs:
             out(UNMEASURED, "CANNOT MEASURE", "no signature block and %d different transcript pointers" % len(ptrs))
@@ -297,6 +358,7 @@ def main():
     try:
         f, body = parse(signed)
         issued, expires = when(f["issued"]), when(f["expires"])
+        plan = steps(body)
     except (ValueError, UnicodeDecodeError) as e:
         out(FAIL, "FAIL", "malformed directive: %s" % e)
 
@@ -346,11 +408,29 @@ def main():
     if relayed and f["delegable"] != "yes":
         out(FAIL, "FAIL", "relayed, but the person marked it delegable: no")
 
-    # 5. used once
-    once("signed:%s" % hashlib.sha256(signed).hexdigest(), opt["--ledger"], use)
+    # 5. used once — as a whole, or (with a step list, R22) once per step
+    whole = "signed:%s" % hashlib.sha256(signed).hexdigest()
+    note = ""
+    if plan is None:
+        if step is not None:
+            out(FAIL, "FAIL", "this directive has no step list (`steps:`), so it is used once as a whole — --step does not apply")
+        once(whole, opt["--ledger"], use)
+    else:
+        once(whole, opt["--ledger"], False)        # a whole-directive use (should not exist) blocks every step
+        if step is None:
+            if use:
+                out(FAIL, "FAIL", "this directive has a step list of %d; name the step you are doing with --step N" % len(plan))
+            done = sorted(int(k.rsplit("=", 1)[1]) for k in used(whole + "#step=", opt["--ledger"]))
+            note = " · %d step(s), used: %s" % (len(plan), ", ".join(map(str, done)) or "none")
+        else:
+            n = int(step)
+            if n > len(plan):
+                out(FAIL, "FAIL", "step %d is not on the list (it has %d)" % (n, len(plan)))
+            once("%s#step=%d" % (whole, n), opt["--ledger"], use)
+            note = " · step %d/%d: %s" % (n, len(plan), plan[n - 1])
 
-    print("PASS: signed by %s · id %s · to %s · delegable %s · expires %s%s" % (
-        f["signer"], f["id"], f["to"], f["delegable"], f["expires"], " · relayed" if relayed else ""), file=sys.stderr)
+    print("PASS: signed by %s · id %s · to %s · delegable %s · expires %s%s%s" % (
+        f["signer"], f["id"], f["to"], f["delegable"], f["expires"], " · relayed" if relayed else "", note), file=sys.stderr)
     if print_body:
         sys.stdout.buffer.write(body)
     sys.exit(PASS)
