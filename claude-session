@@ -106,6 +106,12 @@ NETDEV_ALLOW=(mcp__netdev)   # server-level: the write tools arrive in a later i
 # && nmap …`, a Write of another file in the same directory, and the same
 # Edit rule with a single leading `/` are refused.
 NETDEV_ALLOW+=('Bash(lan-scan *)' "Edit(/${HOME}/workspace/lan-inventory.yaml)")
+# k8scc#118: im writes that file by hand and could not find out that it did not
+# parse (fleet-ops-1e on jg-jcc2, 2026-11-24: one unquoted list item holding
+# "word: word"; no python3 in the profile, no YAML parser in the image).
+# `lan-inventory-check` takes no arguments and reads that one file, so the rule
+# is the bare command, with no wildcard: there is nothing to pass it.
+NETDEV_ALLOW+=('Bash(lan-inventory-check)')
 # k8scc#93 (ferry133, 2026-11-21: 「好，加 chamber send 的 allow 規則」): the
 # session's auto mode classifier refused an `ack` whose text said what im was
 # about to do, and im stopped without a word. Only `send`; nothing else.

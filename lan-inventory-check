@@ -1,0 +1,72 @@
+#!/usr/bin/env python3
+"""lan-inventory-check: does ~/workspace/lan-inventory.yaml parse, and what is in it (k8scc#118).
+
+im writes that file by hand (Write/Edit), and one unquoted list item holding "word: word"
+turns it into something no parser accepts. im could not find that out: its profile has no
+python3, and the image had no YAML parser. This reads that ONE file and nothing else.
+
+  lan-inventory-check        no arguments, no options; anything else is refused (2)
+
+  0  parses, and has the shape below; prints  rows=N controller=A scan=B both=C
+  1  does not parse (the line and column are named), or parses and is not the shape
+  2  cannot measure: no file, unreadable, too large, no parser in this image, or arguments
+
+The shape (im-policy states the same): the top level is a mapping, `hosts` is a list, each
+row is a mapping whose `source` is controller, scan or both. Nothing else is judged.
+"""
+import os
+import sys
+
+FILE = os.path.join(os.environ.get("HOME") or "/home/claude", "workspace", "lan-inventory.yaml")
+LIMIT = 4 * 1024 * 1024
+SOURCES = ("controller", "scan", "both")
+
+
+def out(code, word, text):
+    print("lan-inventory-check: %s: %s" % (word, text), file=sys.stderr if code else sys.stdout)
+    sys.exit(code)
+
+
+def main():
+    if len(sys.argv) > 1:
+        out(2, "CANNOT MEASURE", "this takes no arguments; it reads %s and nothing else" % FILE)
+    try:
+        import yaml
+    except Exception as e:
+        out(2, "CANNOT MEASURE", "no YAML parser in this image (%s); the file was not read" % type(e).__name__)
+    try:
+        if os.path.getsize(FILE) > LIMIT:
+            out(2, "CANNOT MEASURE", "%s is larger than %d bytes; not read" % (FILE, LIMIT))
+        with open(FILE, "rb") as f:
+            raw = f.read(LIMIT + 1)
+    except OSError as e:
+        out(2, "CANNOT MEASURE", "%s: %s" % (FILE, e.strerror or type(e).__name__))
+    try:
+        doc = yaml.safe_load(raw)
+    except yaml.YAMLError as e:
+        mark = getattr(e, "problem_mark", None)
+        where = "line %d, column %d" % (mark.line + 1, mark.column + 1) if mark else "position unknown"
+        problem = (getattr(e, "problem", None) or type(e).__name__).strip()
+        out(1, "FAIL", "not valid YAML at %s: %s. A list item or value holding `: ` or ` #` must be quoted." % (where, problem))
+    except Exception as e:          # an alias bomb, a recursion limit: not a verdict on the file
+        out(2, "CANNOT MEASURE", "the parser gave up (%s)" % type(e).__name__)
+    if not isinstance(doc, dict):
+        out(1, "FAIL", "the top level is not a mapping")
+    hosts = doc.get("hosts")
+    if not isinstance(hosts, list):
+        out(1, "FAIL", "`hosts` is %s; it must be a list of rows" % ("missing" if hosts is None else "not a list"))
+    count = dict.fromkeys(SOURCES, 0)
+    for i, row in enumerate(hosts, 1):
+        if not isinstance(row, dict):
+            out(1, "FAIL", "row %d of `hosts` is not a mapping" % i)
+        src = row.get("source")
+        if src not in SOURCES:
+            out(1, "FAIL", "row %d of `hosts`: `source` must be controller, scan or both" % i)
+        count[src] += 1
+    print("lan-inventory-check: ok: rows=%d controller=%d scan=%d both=%d" % (
+        len(hosts), count["controller"], count["scan"], count["both"]))
+    sys.exit(0)
+
+
+if __name__ == "__main__":
+    main()
