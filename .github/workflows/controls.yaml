@@ -57,5 +57,13 @@ jobs:
         run: test/chamber-watch-controls.sh
       - name: Check the session-keep controls
         run: test/session-keep-controls.sh
+      - name: Check the lan-scan controls
+        run: test/lan-scan-controls.sh
+      - name: Check the lan-inventory-check controls
+        run: |
+          pin=$(grep -o '"PyYAML==[0-9.]*"' Dockerfile | tr -d '"')
+          test -n "$pin" || { echo "no PyYAML pin found in Dockerfile"; exit 1; }
+          python3 -m pip install --quiet "$pin"
+          test/lan-inventory-check-controls.sh
       - name: Check the entrypoint secret-service controls
         run: test/entrypoint-controls.sh

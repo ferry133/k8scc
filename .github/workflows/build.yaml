@@ -108,6 +108,15 @@ jobs:
       - name: Check the lan-scan controls
         run: test/lan-scan-controls.sh
 
+      # lan-inventory-check (k8scc#118), against the Dockerfile's PyYAML pin: the
+      # broken shape read on a pod is refused with its line, a good file is counted.
+      - name: Check the lan-inventory-check controls
+        run: |
+          pin=$(grep -o '"PyYAML==[0-9.]*"' Dockerfile | tr -d '"')
+          test -n "$pin" || { echo "no PyYAML pin found in Dockerfile"; exit 1; }
+          python3 -m pip install --quiet "$pin"
+          test/lan-inventory-check-controls.sh
+
       # inbox-watch runs as shipped with fake tmux / sleep: it types one line
       # into the running session per new inbox file, never the contents (k8scc#59).
       - name: Check the inbox-watch controls

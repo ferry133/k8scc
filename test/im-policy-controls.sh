@@ -249,6 +249,11 @@ ND_STATEMENTS=(
   '掃描用 `lan-scan <網段>`，單獨一行執行'
   '不要直接打 `nmap` 或 `arp-scan`'
   '清冊用 Write／Edit 工具寫'
+  '`source` 只能是 `controller`、`scan` 或 `both`'
+  '整句要加引號'
+  '跑 `lan-inventory-check`，單獨一行、不帶任何參數'
+  '回報列數時用它印出來的數字'
+  '明說清冊沒有通過檢查'
   '讀到 `error:` 就照實回報，不要拿舊資料代替'
 )
 nd_checks() { # nd_checks <file> -> 0 when every statement is there
@@ -284,6 +289,8 @@ check "profile: the inventory rules are found in claude-session" [ -n "$nd_rules
 check "profile allows \`lan-scan\` and the policy names it" sh -c 'printf "%s" "$1" | grep -qF "Bash(lan-scan *)" && grep -qF "\`lan-scan <網段>\`" "$2"' _ "$nd_rules" "$policy"
 check_not "profile: no nmap or arp-scan rule beside it" sh -c 'printf "%s" "$1" | grep -qE "Bash\((nmap|arp-scan)"' _ "$nd_rules"
 check "profile: the pre-allowed file is the one the policy names" sh -c 'printf "%s" "$1" | grep -qF "/workspace/lan-inventory.yaml)" && grep -qF "預先放行的只有 \`~/workspace/lan-inventory.yaml\`" "$2"' _ "$nd_rules" "$policy"
+check "profile allows the bare \`lan-inventory-check\` and the policy names it (k8scc#118)" sh -c 'printf "%s" "$1" | grep -qF "Bash(lan-inventory-check)" && grep -qF "跑 \`lan-inventory-check\`，單獨一行、不帶任何參數" "$2"' _ "$nd_rules" "$policy"
+check "the sources the policy names are the ones the check accepts" sh -c 'grep -qF "SOURCES = (\"controller\", \"scan\", \"both\")" lan-inventory-check && grep -qF "\`controller\`、\`scan\` 或 \`both\`" "$1"' _ "$policy"
 check_not "control: a policy without the scan line fails the same check" sh -c 'printf "%s" "$1" | grep -qF "Bash(lan-scan *)" && grep -vF "單獨一行執行" "$2" | grep -qF "\`lan-scan <網段>\`"' _ "$nd_rules" "$policy"
 
 echo "who may assign work, and the chamber (im-chamber-client 6.1)"
