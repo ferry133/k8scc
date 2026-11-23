@@ -40,6 +40,7 @@ import tempfile
 import threading
 import time
 import unittest
+import unittest.mock
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 
@@ -726,6 +727,113 @@ def make_certs(d: pathlib.Path) -> dict:
     (d / "chain.pem").write_text((d / "root.pem").read_text() + (d / "leaf_ip.pem").read_text())
     names = ("fac1", "fac1_child", "plain", "other", "root", "leaf_ip", "leaf_name", "two", "chain")
     return {n: d / f"{n}.pem" for n in names} | {f"{n}.key": d / f"{n}.key" for n in names if (d / f"{n}.key").exists()}
+
+
+class ProbeFamilies(Case):
+    """k8scc#115 (fleet-ops-d5, jg-jcc2): a probe hostname that publishes A and
+    AAAA sometimes resolved to AAAA only (8 of 120 lookups), and the v4-only
+    node then failed the connect with ENETUNREACH while the network was fine.
+    Here the lookup is faked: `dual.test` answers an unspecified-family query
+    with an IPv6 address only (::1 on a closed port, so the v6 path fails at
+    once), and an AF_INET query with 127.0.0.1, where the listener is."""
+
+    HOST = "dual.test"
+
+    def setUp(self):
+        super().setUp()
+        self.m = self.h.load()
+        closed = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+        closed.bind(("::1", 0))
+        self.v6_port = closed.getsockname()[1]
+        closed.close()
+        self.v4_port = None
+        self.asked = []
+        real = socket.getaddrinfo
+
+        def fake(host, port, family=0, type=0, proto=0, flags=0):
+            if host != self.HOST:
+                return real(host, port, family, type, proto, flags)
+            self.asked.append(family)
+            if family == socket.AF_INET:
+                if self.v4_port is None:
+                    raise socket.gaierror(socket.EAI_NONAME, "no A record (fake)")
+                return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", self.v4_port))]
+            return [(socket.AF_INET6, socket.SOCK_STREAM, 6, "", ("::1", self.v6_port, 0, 0))]
+        patcher = unittest.mock.patch("socket.getaddrinfo", fake)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def probe(self, raw):
+        probes, why = self.m._parse_probes(",".join([raw, "127.0.0.1:1", "127.0.0.1:2"]))
+        self.assertEqual(why, "")
+        return self.m._probe(probes[0])
+
+    def test_a_tcp_probe_whose_lookup_lost_the_a_record_still_connects_over_ipv4(self):
+        self.v4_port = self.h.probes[0].sock.getsockname()[1]
+        self.assertEqual(self.probe(f"{self.HOST}:{self.v4_port}"), "")
+        self.assertEqual(set(self.asked), {socket.AF_INET}, "only an A lookup is made")
+        with self.subTest(control="the unspecified lookup really is v6-only and does fail"):
+            with self.assertRaises(OSError):
+                socket.create_connection((self.HOST, self.v4_port), timeout=1).close()
+
+    def test_an_https_probe_whose_lookup_lost_the_a_record_still_connects_over_ipv4(self):
+        d = pathlib.Path(self.h.tmp.name)
+        certs = make_certs(d)
+        (d / "dual.ext").write_text(f"subjectAltName=DNS:{self.HOST}\nbasicConstraints=CA:FALSE\n")
+        _openssl("req", "-new", "-newkey", "rsa:2048", "-nodes", "-keyout", "dual.key", "-out", "dual.csr",
+                 "-config", "plain.cnf", cwd=d)
+        _openssl("x509", "-req", "-in", "dual.csr", "-CA", "root.pem", "-CAkey", "root.key", "-CAcreateserial",
+                 "-out", "dual.pem", "-days", "2", "-extfile", "dual.ext", cwd=d)
+
+        class Ok(BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(204 if self.headers.get("Host", "").split(":")[0] == ProbeFamilies.HOST else 421)
+                self.end_headers()
+
+            def log_message(self, *a):
+                pass
+
+        class Server(ThreadingHTTPServer):
+            def server_bind(self):   # no getfqdn(): see FakeController
+                socketserver.TCPServer.server_bind(self)
+        srv = Server(("127.0.0.1", 0), Ok)
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ctx.load_cert_chain(str(d / "dual.pem"), str(d / "dual.key"))
+        srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        self.v4_port = srv.server_address[1]
+        os.environ["SSL_CERT_FILE"] = str(certs["root"])
+        self.addCleanup(os.environ.pop, "SSL_CERT_FILE", None)
+        self.assertEqual(self.probe(f"https://{self.HOST}:{self.v4_port}/minio/health/live"), "")
+        self.assertNotIn(socket.AF_INET6, self.asked)
+        with self.subTest(control="the name is verified: a certificate for another name is refused"):
+            ctx2 = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            ctx2.load_cert_chain(str(certs["leaf_name"]), str(certs["leaf_name.key"]))
+            # a second server with the unifi.local leaf, behind the same A answer
+            srv2 = Server(("127.0.0.1", 0), Ok)
+            srv2.socket = ctx2.wrap_socket(srv2.socket, server_side=True)
+            threading.Thread(target=srv2.serve_forever, daemon=True).start()
+            self.addCleanup(srv2.server_close)
+            self.addCleanup(srv2.shutdown)
+            self.v4_port = srv2.server_address[1]
+            why = self.probe(f"https://{self.HOST}:{self.v4_port}/x")
+            self.assertIn("CERTIFICATE_VERIFY_FAILED", why)
+
+    def test_no_a_record_is_lost_and_says_so(self):
+        why = self.probe(f"{self.HOST}:443")
+        self.assertIn("no IPv4 address", why)
+        self.assertNotIn(socket.AF_INET6, self.asked)
+
+    def test_an_ipv6_literal_probe_is_refused_at_startup(self):
+        for raw in ("[2001:db8::1]:443", "https://[2001:db8::1]/x"):
+            with self.subTest(probe=raw):
+                probes, why = self.m._parse_probes(",".join([raw, "127.0.0.1:1", "127.0.0.1:2"]))
+                self.assertEqual(probes, [])
+                self.assertIn("IPv4", why)
+        with self.subTest(control="an IPv4 literal and a hostname are accepted"):
+            self.assertEqual(self.m._parse_probes("1.1.1.1:443,https://api.github.com/x,dual.test:443")[1], "")
 
 
 class TLS(Case):
