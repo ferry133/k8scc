@@ -14,7 +14,7 @@
 - [x] 2.1 `netdev_mcp_server.py` 骨架：設定讀取、三種啟動狀態、`_startup_readings`、TLS 規則（D-b）、`Controller` 與兩個 backend、`ROUTES`。（reader-only 版：operator／通道不讀，啟動狀態兩種；`ROUTES` 值是暫定，等 1.2。）
 - [x] 2.2 reader 10 支＋`_strip`（D-c）＋ session 快取（D-d）＋路徑標記。
 - [x] 2.3 class A 的四個純函式（D-e）＋ fixture（group／位址／子網三種寫法、正負對照）。
-- [x] 2.4 operator 工具（proposal 的清單；`set_dns_forward` 依 1.2 決定出不出）：型別化參數、伺服器組 body、reason／快取／token／冷卻／計數五道。（八支；`set_dns_forward` 不出——1.2 沒讀數。body 從快照的未剝物件組，不是從已剝的快取，否則秘密會被寫成 `<stripped>`。`WRITES`／`LOGIN_PATH` 與 `ROUTES` 一樣是暫定值。）
+- [x] 2.4 operator 工具（proposal 的清單；`set_dns_forward` 依 1.2 決定出不出）：型別化參數、伺服器組 body、reason／快取／token／冷卻／計數五道。（八支；`set_dns_forward` 不出——1.2 沒讀數。**k8scc#109（2026-11-22）：root 1.1 的寫入讀數（#67 finding 7／8）到了，加上 `get_dns_records` 與 `set_dns_forward`／`clear_dns_forward`，共十支；只對假物量過。**body 從快照的未剝物件組，不是從已剝的快取，否則秘密會被寫成 `<stripped>`。`WRITES`／`LOGIN_PATH` 與 `ROUTES` 一樣是暫定值。）
 - [x] 2.5 向內 dead-man：探針（D-f）、票與 ack（D-g）、快照、健檢、回滾、release 三值、`revert-failed` 的 inbox 指令。
 - [x] 2.6 稽核行（spec 的欄位）＋ stdout 除此之外不印任何東西。**讀數（2026-10-26）**：「talos 已這樣做」不成立——uvicorn 的 access log 是 `ext://sys.stdout` 上的 StreamHandler，照 FastMCP 原樣跑，兩個 POST 在 stdout 留兩行；`__main__` 把 `sys.stdout` 指向 stderr、真的 stdout 只給 `_audit`，之後 stdout 0 行。talos-mcp 沒有這一步，另開 issue。
 

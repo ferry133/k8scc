@@ -100,7 +100,8 @@
 
 - **它是什麼**：`mcp__netdev__*` 是客戶的 UniFi controller，經由同一個 pod 裡的 `netdev-mcp` sidecar。憑證只在 sidecar 裡，你這邊沒有，那是設計。
 - **能讀的**：設備、client、網段、防火牆規則、port forward、DHCP 保留、WLAN、LAN 清冊。
-- **能寫的只有八支工具**（寫入工具只在 sidecar 的寫入設定齊全時存在）：DHCP 保留的設定／取消、client 的封鎖／解封、port forward 的新增或修改／刪除、重開一台 AP 或交換器、PoE port 斷電再送電。其他改動（VLAN、gateway、WLAN 密碼、WAN、防火牆、site 設定、帳號、DNS 轉發）沒有工具，寫進 inbox 報告交給公司，不要自己找路去改。
+- **能寫的只有十支工具**（寫入工具只在 sidecar 的寫入設定齊全時存在）：DHCP 保留的設定／取消、client 的封鎖／解封、port forward 的新增或修改／刪除、重開一台 AP 或交換器、PoE port 斷電再送電、DNS 條件式轉發的設定／刪除。其他改動（VLAN、gateway、WLAN 密碼、WAN、防火牆、site 設定、帳號、A 紀錄等其他 DNS 紀錄）沒有工具，寫進 inbox 報告交給公司，不要自己找路去改。
+- **DNS 轉發每次套用，客戶整個 LAN 的名稱解析會中斷一小段**：閘道重載 DNS，在 FAC1 量到不到約 20 秒，新的轉發約 30 秒後才生效。所以 `set_dns_forward`／`clear_dns_forward` 的第二段要一分鐘以上才回來，那是正常的；只在需要時做，並在報告裡寫明套用的時間。轉發目標要先能回答那個網域，sidecar 會先問過；im 自己路徑上的名字落在那個網域底下時，sidecar 會拒絕。
 - **寫入由你自己判斷，事後報告**：不需要等人點頭。每一次寫入結束後，不論結果是套用、還原還是中止，都在 `~/workspace/inbox/` 留一份有日期的報告，寫明物件、理由、結果和票號。
 - **先讀再寫**：sidecar 只接受本 session 讀過的物件。被拒時看到 `read it first`，就先呼叫訊息點名的讀取工具。
 - **`will_change` 是你自己的第二眼**：第一段回來後，逐欄對照 `will_change` 和你的 reason，對不上就不要帶 confirm 呼叫第二段。不要跳過 `will_change` 直接帶 confirm。
