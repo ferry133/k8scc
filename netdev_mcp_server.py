@@ -45,7 +45,7 @@ Write inputs (all of them, or no write tool is registered):
           close its issues). The ticket leaves the LAN before anything is
           written: besides stdout it is the only company-side record.
           NETDEV_OUTSIDE_PROBES — exactly three, `https://host/path` (GET,
-          2xx/3xx) or `host:port` (TCP connect).
+          2xx/3xx) or `host:port` (TCP connect), over IPv4 only (k8scc#115).
           POD_IP — the node's address (hostNetwork); class A starts from it.
           NETDEV_SNAPSHOT_DIR — a writable directory on this sidecar's own
           volume. Snapshots keep secrets (they are the revert's raw material),
@@ -1041,6 +1041,13 @@ class Probe:
     port: int
 
 
+def _is_ipv6(host: str) -> bool:
+    try:
+        return ipaddress.ip_address(host).version == 6
+    except ValueError:
+        return False
+
+
 def _parse_probes(raw: str) -> "tuple[list[Probe], str]":
     items = [p.strip() for p in raw.split(",") if p.strip()]
     if len(items) != 3:
@@ -1056,6 +1063,8 @@ def _parse_probes(raw: str) -> "tuple[list[Probe], str]":
                 return [], f"probe {item!r} has no host"
             if port == 0:
                 return [], f"probe {item!r} has an invalid port"
+            if _is_ipv6(host):
+                return [], f"probe {item!r}: probes go out over IPv4 only (k8scc#115); use an IPv4 address or a name"
             probes.append(Probe(item, "https", host, port or 443))
             continue
         if "://" in item:
@@ -1063,6 +1072,8 @@ def _parse_probes(raw: str) -> "tuple[list[Probe], str]":
         host, _, port = item.rpartition(":")
         if not host or not (port.isascii() and port.isdigit()) or not 0 < int(port) < 65536:   # '²'.isdigit() is True, int('²') raises
             return [], f"probe {item!r}: expected host:port"
+        if _is_ipv6(host.strip("[]")):
+            return [], f"probe {item!r}: probes go out over IPv4 only (k8scc#115); use an IPv4 address or a name"
         probes.append(Probe(item, "tcp", host, int(port)))
     return probes, ""
 
@@ -1179,16 +1190,39 @@ def _run(argv: list, timeout: int = 20) -> "tuple[int, str, str]":
     return r.returncode, r.stdout, r.stderr
 
 
+def _ipv4_of(host: str) -> "tuple[str, str]":
+    """(first IPv4 address of host, '') or ('', why not). Probes go out over
+    IPv4 only (k8scc#115): the node im runs on is IPv4-only, and on jg-jcc2 a
+    name publishing A and AAAA resolved to AAAA alone in 8 of 120 lookups
+    (fleet-ops-d5), so an unspecified-family lookup failed the connect with
+    ENETUNREACH while the network was fine. An A lookup cannot return that."""
+    try:
+        infos = socket.getaddrinfo(host, None, socket.AF_INET, socket.SOCK_STREAM)
+    except OSError as exc:
+        return "", f"no IPv4 address for {host} ({exc})"
+    return (infos[0][4][0], "") if infos else ("", f"no IPv4 address for {host}")
+
+
 def _probe(p: Probe) -> str:
     """'' when the probe answered, else why not."""
+    ip, why = _ipv4_of(p.host)
+    if why:
+        return f"{p.raw}: {why}"
     if p.kind == "tcp":
         try:
-            with socket.create_connection((p.host, p.port), timeout=PROBE_TIMEOUT):
+            with socket.create_connection((ip, p.port), timeout=PROBE_TIMEOUT):
                 return ""
         except OSError as exc:
             return f"{p.raw}: {exc}"
+    # Connect to the address read above; the name still goes out as SNI and
+    # Host, and the certificate is verified against it.
+    parts = urlsplit(p.raw)
+    url = parts._replace(netloc=f"{ip}:{p.port}").geturl()
+    host_header = p.host if p.port == 443 else f"{p.host}:{p.port}"
     try:
-        resp = httpx.get(p.raw, timeout=PROBE_TIMEOUT, follow_redirects=False)
+        with httpx.Client(timeout=PROBE_TIMEOUT, follow_redirects=False) as client:
+            resp = client.send(client.build_request("GET", url, headers={"Host": host_header},
+                                                    extensions={"sni_hostname": p.host}))
     except httpx.HTTPError as exc:
         return f"{p.raw}: {type(exc).__name__}: {exc}"
     return "" if resp.status_code // 100 in (2, 3) else f"{p.raw}: answered {resp.status_code}"

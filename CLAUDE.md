@@ -216,6 +216,7 @@ Six mutations (2026-11-14), each red: no identity check; pin whenever there is �
      - Any input unreadable ⇒ every write refuses with the reader's own error.
   4. **④ Two phases.** Without `confirm`:
      - W1: all three outside probes must answer, or the write is refused with no ticket.
+     - Probes go out over **IPv4 only** (k8scc#115): each host is looked up with `AF_INET`, and an https probe connects to that address with the name as SNI and `Host` (the certificate is still verified against the name). On jg-jcc2 a name publishing A and AAAA resolved to AAAA alone in 8 of 120 lookups, and the v4-only node then failed the connect (`ENETUNREACH`): `minio.jiahd.cc` read as down 16% of a day while the network was fine (fleet-ops-d5). An IPv6 literal probe is refused at startup. Why the A record went missing was not measured.
      - The ticket goes out. If it cannot be opened, the write is refused.
      - W3: wait up to `NETDEV_WITNESS_WAIT` for FAC's `pre-ack:`. If one arrives the witness is `armed`; if not it is `unmeasured`, which is a reading, not a gate.
      - Then a single-use token bound to tool, target and the `will_change` digest (`expires_in: 120`, `cooldown_after: 600`, ticket number).
@@ -555,7 +556,7 @@ build: `build=false`, `build-ops=true`.
 | `IM_FAC_TICKET_REPO` (netdev-mcp only) | `owner/repo` of the private im→FAC ticket repo; unset ⇒ no write tools |
 | `IM_FAC_TICKET_TOKEN_FILE` (netdev-mcp only) | File holding the ticket token (issues read/write on that repo; minimal scope is root spike 1.5); missing or empty ⇒ no write tools |
 | `IM_FAC_TICKET_API` (netdev-mcp only) | Default `https://api.github.com`; the controls point it at the fake FAC. Leave unset |
-| `NETDEV_OUTSIDE_PROBES` (netdev-mcp only) | Exactly three, comma-separated: `https://host/path` (GET, 2xx/3xx) or `host:port` (TCP connect). Not three, or any one malformed — a bad port included (k8scc#49) — ⇒ no write tools |
+| `NETDEV_OUTSIDE_PROBES` (netdev-mcp only) | Exactly three, comma-separated: `https://host/path` (GET, 2xx/3xx) or `host:port` (TCP connect), over IPv4 only (an IPv6 literal is refused; k8scc#115). Not three, or any one malformed — a bad port included (k8scc#49) — ⇒ no write tools |
 | `POD_IP` (netdev-mcp only) | Downward API `status.podIP` (hostNetwork ⇒ the node's address); class A starts from it. Unset ⇒ no write tools |
 | `NETDEV_SNAPSHOT_DIR` (netdev-mcp only) | Writable directory on a small PVC mounted on `netdev-mcp` only (snapshots keep secrets and must outlive a sidecar restart; root D5). Unset or not writable ⇒ no write tools |
 | `NETDEV_SNAPSHOT_KEEP`, `NETDEV_HEALTH_TIMEOUT`, `NETDEV_HEALTH_INTERVAL`, `NETDEV_WRITES_PER_HOUR`, `NETDEV_WITNESS_WAIT`, `NETDEV_WITNESS_POLL`, `NETDEV_PROBE_TIMEOUT` (netdev-mcp only) | Defaults 50, 120 s, 10 s, 12, 120 s, 5 s, 5 s |
