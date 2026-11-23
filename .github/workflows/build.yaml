@@ -108,6 +108,14 @@ jobs:
       - name: Check the lan-scan controls
         run: test/lan-scan-controls.sh
 
+      # lan-inventory-check (k8scc#118), against the Dockerfile's PyYAML pin: the
+      # broken shape read on a pod is refused with its line, a good file is counted.
+      - name: Check the lan-inventory-check controls
+        run: |
+          pin=$(grep -o '"PyYAML==[0-9.]*"' Dockerfile | tr -d '"')
+          test -n "$pin" || { echo "no PyYAML pin found in Dockerfile"; exit 1; }
+          python3 -m pip install --quiet "$pin"
+          test/lan-inventory-check-controls.sh
 
       # im's managed policy (root 7.3b): shipped to /etc/claude-code/CLAUDE.md
       # and saying what the 2026-10-15 ruling requires, with a control per line.

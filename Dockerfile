@@ -224,6 +224,10 @@ RUN set -eu; \
 # talos_mcp_server.py use the FastMCP class) in favor of a new API this
 # codebase hasn't migrated to yet.
 RUN pip3 install --break-system-packages psycopg2-binary "mcp==1.29.0"
+# The YAML parser lan-inventory-check needs (k8scc#118). Pinned, and the build
+# fails here if it does not import: without it the check answers "cannot
+# measure" for every file, which im would have to read as "not checked".
+RUN pip3 install --break-system-packages "PyYAML==6.0.2" && python3 -c 'import yaml'
 
 # Create D-Bus machine-id (required for session bus)
 RUN mkdir -p /var/lib/dbus && dbus-uuidgen > /var/lib/dbus/machine-id
@@ -304,6 +308,9 @@ COPY session-keep /usr/local/bin/session-keep
 # The one LAN scan the permission profile allows (k8scc#105): networks only,
 # so no nmap or arp-scan option reaches either tool through it.
 COPY lan-scan /usr/local/bin/lan-scan
+# The one check of the inventory file the profile allows (k8scc#118): it takes
+# no arguments and reads ~/workspace/lan-inventory.yaml only.
+COPY lan-inventory-check /usr/local/bin/lan-inventory-check
 # The pane gate chamber-watch sources. It must sit next to it: without the file
 # the watcher refuses to start (and says so).
 COPY pane-gate /usr/local/bin/pane-gate
