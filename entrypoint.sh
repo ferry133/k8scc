@@ -116,8 +116,10 @@ session_setup() {
     # loop again (fleet-ops-1e on #125, measured in a pod).
     # Its output goes to a file, not through $(…): a pipe is read until every
     # process holding it has ended, so a child the killed set-up left behind
-    # kept this waiting for as long as that child lived (the first CI run of
-    # the cell below: 30 s on Linux for a limit of 1 s).
+    # can keep this waiting for as long as that child lives. The first CI run
+    # of the TERM-deaf cell took 30 s for a limit of 1 s and 1 s-plus with the
+    # file; that the pipe was the cause is inferred from that, and fleet-ops-1e
+    # did not reproduce the 30 s in a pod (6 s with either form).
     log=$(mktemp) || { echo "entrypoint: session set-up: no temp file, nothing set up before the first terminal session" >&2; return 0; }
     CLAUDE_SESSION_SETUP_ONLY=1 timeout -k 5 "$t" claude-session </dev/null >"$log" 2>&1 && rc=0 || rc=$?
     out=$(tail -n 8 "$log"); rm -f "$log"
