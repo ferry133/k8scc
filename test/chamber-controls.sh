@@ -39,6 +39,17 @@ vec=test/chamber-vectors/sk-ecdsa
 client()   { HOME="$tmp" python3 -I chamber/chamber "$@"; }
 verifier() { HOME="$tmp" python3 -I chamber/directive-verify "$@"; }
 
+# The interpreter itself has to start the way every cell below starts it. When
+# it does not, each cell would answer 1 and read as "the tool is broken": a
+# python3 that is a mise shim does exactly that once HOME is redirected
+# (k8scc#119, seven red cells on a tool that was fine). That is "cannot
+# measure", said once, and the run fails with 2.
+if ! why=$(HOME="$tmp" python3 -I -c 'pass' 2>&1); then
+    echo "CANNOT MEASURE: python3 ($(command -v python3 || echo 'not on PATH')) does not start with HOME redirected, so no cell below would be about the tools"
+    printf '%s\n' "$why" | head -n 3 | sed 's/^/  | /'
+    exit 2
+fi
+
 echo "shipped"
 for f in chamber directive-verify chamber-bridge chamber-watch; do
     check "chamber/$f exists and is not empty"    test -s "chamber/$f"
