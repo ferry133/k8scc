@@ -1137,14 +1137,23 @@ class Tickets:
         data = self._call("POST", f"/repos/{TICKET_REPO}/issues", {"title": title, "body": body})
         return int(data["number"])
 
-    def comment(self, number: int, body: str) -> None:
+    def comment(self, number: int, body: str):
+        """-> the new comment's id (None when GitHub's answer carried none)."""
         if not body.startswith(SERVER_MARK):
             raise AssertionError("a server comment must start with SERVER_MARK, never with a witness prefix")
         data = self._call("POST", f"/repos/{TICKET_REPO}/issues/{number}/comments", {"body": body})
         self.own.add(data.get("id"))
+        return data.get("id")
 
-    def witnessed(self, number: int, prefix: str) -> bool:
+    def witnessed(self, number: int, prefix: str, after=None) -> bool:
+        """With `after` (the id of one of this server's comments), only what
+        stands behind that comment in the listing counts, and nothing counts
+        when that comment is not in the listing. The order is the listing's
+        own, so no clock of ours is compared with GitHub's."""
         comments = self._call("GET", f"/repos/{TICKET_REPO}/issues/{number}/comments?per_page=100")
+        if after is not None:
+            at = next((i for i, c in enumerate(comments) if isinstance(c, dict) and c.get("id") == after), None)
+            comments = [] if at is None else comments[at + 1:]
         return any(isinstance(c, dict) and c.get("id") not in self.own
                    and str(c.get("body") or "").lstrip().startswith(prefix) for c in comments)
 
@@ -1716,7 +1725,9 @@ def _ticket_body(plan: Plan, change: dict, stated: str, deadline: float) -> str:
         "```",
         "",
         f"FAC: comment `{PRE_ACK} <peer name [ref]>` once you can reach this cluster from outside, and "
-        f"`{POST_ACK} <peer name [ref]>` after the change if you still can. Without a pre-ack within "
+        f"`{POST_ACK} <peer name [ref]>` after the change if you still can. The change is sent right after this "
+        f"sidecar comments `{SERVER_MARK}applying` here: a `{POST_ACK}` counts only when it stands after that "
+        "comment, so wait for it, then check, then comment. Without a pre-ack within "
         f"{int(WITNESS_WAIT)} s the write goes ahead unwitnessed. A token unused for {TOKEN_TTL} s closes this "
         "ticket as `result: not-executed`; an open ticket past its deadline with no release comment means this "
         "sidecar could not post one.",
@@ -1734,6 +1745,25 @@ def _wait_pre_ack(number: int) -> str:
         if _clock() >= deadline:
             return "unmeasured"
         _sleep(max(0.0, min(WITNESS_POLL, deadline - _clock())))
+
+
+def _announce_apply(number: int, plan: Plan) -> "tuple[object, str]":
+    """Say on the ticket that the change is about to be sent (k8scc#126).
+    -> (the comment's id, '') or (None, why). FAC had no way to tell from the
+    ticket that the change was applied, and a post-ack left before it counted
+    as the witness of what came after. A post-ack now counts only behind this
+    comment, so without it there is no write: the same direction as a ticket
+    that cannot be opened."""
+    lines = [f"{SERVER_MARK}applying",
+             f"the change is being sent to the controller now; a `{POST_ACK}` counts only after this comment"]
+    if plan.dns_domain:
+        lines.append(f"dns: the gateway reloads its resolver; this sidecar waits {int(DNS_SETTLE)} s before its first "
+                     "check, and a look from outside before that sees the old state")
+    try:
+        cid = TICKETS.comment(number, "\n".join(lines))
+    except TicketError as exc:
+        return None, str(exc)
+    return (cid, "") if cid is not None else (None, "GitHub's answer carried no comment id, so nothing could be placed after it")
 
 
 def _release(number: int, result: str, outbound: str, witness: str, extra: "list[str]", close: bool = True) -> str:
@@ -1869,7 +1899,7 @@ class Health:
     dns_effect: str = ""   # DNS forwards only: 'in effect' or 'unmeasured: …' (k8scc#112)
 
 
-def _health(plan: Plan, created_id: str, number: int, witness: str) -> Health:
+def _health(plan: Plan, created_id: str, number: int, witness: str, applying=None) -> Health:
     """Every HEALTH_INTERVAL until HEALTH_TIMEOUT: the first round in which every
     check passes ends it. A breakage that shows only after that round is not
     seen here — that is what FAC's post-ack is for."""
@@ -1909,7 +1939,7 @@ def _health(plan: Plan, created_id: str, number: int, witness: str) -> Health:
         seen = witness
         if witness == "armed":
             try:
-                acked = TICKETS.witnessed(number, POST_ACK)
+                acked = TICKETS.witnessed(number, POST_ACK, after=applying)
             except TicketError:
                 acked = False
             seen = "ok" if acked else "lost"
@@ -2131,6 +2161,14 @@ def _write(tool: str, hint: str, reason: str, confirm: str, build) -> str:
                          **({"release_not_posted": note} if note else {})})
     common["snapshot_digest"] = snap.digest
 
+    applying, why = _announce_apply(number, plan)
+    if why:
+        why = f"the ticket could not be told that the change is about to be applied, nothing was written: {why}"
+        _audit(tool, target, "aborted", stated, reason=why, outbound="ok", fac_witness=witness, **common)
+        note = _release(number, "aborted", "ok", witness, [why])
+        return _respond({"result": "aborted", "target": target, "ticket": number, "reason": why,
+                         **({"release_not_posted": note} if note else {})})
+
     if plan.dns_domain:
         plan.dns_baseline = _dns_soa(plan.dns_resolver, plan.dns_domain)[0]
     created_id, rc, maybe_applied = _apply(plan, snap)
@@ -2142,7 +2180,7 @@ def _write(tool: str, hint: str, reason: str, confirm: str, build) -> str:
                          **({"release_not_posted": note} if note else {})})
 
     # ⑥ health, then revert from inside on any failure
-    h = _health(plan, created_id, number, witness)
+    h = _health(plan, created_id, number, witness, applying)
     readings = {"outbound": h.outbound, "fac_witness": h.witness}
     _audit(tool, target, "execute", stated, rc=rc, health=h.passed, **readings, **common)
     if h.ok:
