@@ -106,7 +106,7 @@ fi
 # at about 75 s. A set-up that hung for longer would restart it for ever.
 # test/entrypoint-controls.sh extracts this function; keep the markers.
 session_setup() {
-    local out rc t="${SESSION_SETUP_TIMEOUT:-40}"
+    local out log rc t="${SESSION_SETUP_TIMEOUT:-40}"
     if ! command -v claude-session >/dev/null 2>&1; then
         echo "entrypoint: session set-up: claude-session is not on PATH, nothing set up before the first terminal session" >&2
         return 0
@@ -114,7 +114,13 @@ session_setup() {
     # -k: a set-up that ignores TERM is killed 5 s later (rc 137). Without it
     # `timeout` waits for as long as the process likes, which is the restart
     # loop again (fleet-ops-1e on #125, measured in a pod).
-    out=$(CLAUDE_SESSION_SETUP_ONLY=1 timeout -k 5 "$t" claude-session </dev/null 2>&1) && rc=0 || rc=$?
+    # Its output goes to a file, not through $(…): a pipe is read until every
+    # process holding it has ended, so a child the killed set-up left behind
+    # kept this waiting for as long as that child lived (the first CI run of
+    # the cell below: 30 s on Linux for a limit of 1 s).
+    log=$(mktemp) || { echo "entrypoint: session set-up: no temp file, nothing set up before the first terminal session" >&2; return 0; }
+    CLAUDE_SESSION_SETUP_ONLY=1 timeout -k 5 "$t" claude-session </dev/null >"$log" 2>&1 && rc=0 || rc=$?
+    out=$(tail -n 8 "$log"); rm -f "$log"
     if [ "$rc" -eq 0 ]; then
         echo "entrypoint: session set-up: done at pod start (MCP registrations and permission profile; memory waits for a terminal)" >&2
     elif [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
@@ -123,7 +129,7 @@ session_setup() {
         echo "entrypoint: session set-up: FAILED (exit $rc); the first terminal session does it again" >&2
     fi
     # its own warnings, made printable
-    [ -z "$out" ] || printf '%s\n' "$out" | tail -n 8 | LC_ALL=C tr -c '[:print:]\n\200-\377' '?' | sed 's/^/entrypoint:   | /' >&2
+    [ -z "$out" ] || printf '%s\n' "$out" | LC_ALL=C tr -c '[:print:]\n\200-\377' '?' | sed 's/^/entrypoint:   | /' >&2
     return 0
 }
 # --- end session set-up at pod start -------------------------------------------
