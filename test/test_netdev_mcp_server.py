@@ -298,6 +298,7 @@ class FakeFAC:
         self.after = lambda: True
         self.fail = False
         self.fail_comment = None
+        self.no_id_for = None       # a server comment containing this is stored, and answered without an id
         fake = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -335,6 +336,8 @@ class FakeFAC:
                         return self._send(502, {"message": "forced for this comment"})
                     cid = next_id()
                     issue["comments"].append({"id": cid, "body": body["body"]})
+                    if fake.no_id_for and fake.no_id_for in body["body"]:
+                        return self._send(201, {"body": body["body"]})
                     return self._send(201, {"id": cid})
                 if parts[6:] == ["comments"] and self.command == "GET":
                     def fac_says(kind, text):
@@ -1684,6 +1687,24 @@ class DeadMan(WriteCase):
             self.read()
             self.assertEqual(self.write("set_dhcp_reservation")["result"], "applied")
             self.assertEqual(len(self.h.fake.mutations()), 1)
+
+    def test_an_applying_comment_without_an_id_is_no_write(self):
+        # with no id there is nothing to place a post-ack behind, and falling
+        # back to "any post-ack" is the hole of k8scc#126 again (fleet-ops-1e
+        # on #129: removing the check left every cell green)
+        self.h.fac.pre_ack, self.h.fac.post_ack = True, "early"
+        self.h.fac.no_id_for = "netdev-mcp applying"
+        self.read()
+        res = self.write("set_dhcp_reservation")
+        self.assertEqual(res["result"], "aborted", res)
+        self.assertIn("no comment id", res["reason"])
+        self.assertEqual(self.h.fake.mutations(), [])
+        with self.subTest(control="with an id in the answer the same write is sent"):
+            self.h.fac.no_id_for = None
+            self.m._LAST_WRITE.clear()
+            self.read()
+            self.assertNotEqual(self.write("set_dhcp_reservation")["result"], "aborted")
+            self.assertGreaterEqual(len(self.h.fake.mutations()), 1)
 
     def test_server_comments_never_count_as_witness(self):
         self.read()
