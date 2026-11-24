@@ -99,5 +99,79 @@ echo "the five outcomes leave five different logs"
 logs=$(for o in "$up" "$kf" "$ks" "$df" "$ds"; do grep '^entrypoint:' <<<"$o" | tr '\n' '|'; echo; done | sort -u | wc -l | tr -d ' ')
 if [ "$logs" -eq 5 ]; then ok; else bad "expected 5 distinct logs, got $logs"; fi
 
+echo "session set-up at pod start (k8scc#122)"
+sfn="$tmp/setup-fn.sh"
+sed -n '/^# --- session set-up at pod start/,/^# --- end session set-up at pod start/p' entrypoint.sh > "$sfn"
+if ! grep -q '^session_setup()' "$sfn"; then
+  bad "could not extract session_setup from entrypoint.sh"
+elif ! command -v timeout >/dev/null 2>&1; then
+  bad "CANNOT MEASURE: no timeout(1) on this machine; the session set-up cells did not run"
+else
+  tbin=$(dirname "$(command -v timeout)")
+  mkdir -p "$tmp/sbin"
+  cat > "$tmp/sbin/claude-session" <<'SH'
+#!/bin/sh
+echo "SETUP_ONLY=${CLAUDE_SESSION_SETUP_ONLY:-<unset>}" > "$FAKE_SEEN"
+case "${FAKE_SETUP:-ok}" in
+  ok)   exit 0 ;;
+  warn) echo "⚠ settings.json 的 netdev permission 設定沒有寫入"; exit 0 ;;
+  fail) echo "boom: cannot write"; exit 3 ;;
+  hang) sleep 30 ;;
+esac
+SH
+  chmod +x "$tmp/sbin/claude-session"
+  # srun MODE [PATH] [TIMEOUT]
+  srun() {
+    rm -f "$tmp/seen"
+    env -i HOME="$tmp" PATH="${2:-$tmp/sbin:$tbin:/usr/bin:/bin}" FAKE_SETUP="$1" FAKE_SEEN="$tmp/seen" SESSION_SETUP_TIMEOUT="${3:-20}" \
+      bash -c 'set -e; . "$0"; session_setup; echo survived' "$sfn" 2>&1
+  }
+  o=$(srun ok)
+  has "$o" "session set-up: done at pod start" "ok"
+  has "$o" "survived" "ok"
+  if [ "$(cat "$tmp/seen" 2>/dev/null)" = "SETUP_ONLY=1" ]; then ok; else bad "claude-session was not run with CLAUDE_SESSION_SETUP_ONLY=1: $(cat "$tmp/seen" 2>/dev/null)"; fi
+  o=$(srun warn)
+  has "$o" "entrypoint:   | ⚠ settings.json 的 netdev permission 設定沒有寫入" "warn: its own words reach the pod log"
+  o=$(srun fail)
+  has "$o" "session set-up: FAILED (exit 3)" "fail"
+  has "$o" "entrypoint:   | boom: cannot write" "fail: its own words"
+  has "$o" "survived" "fail: the container goes on"
+  hasnt "$o" "done at pod start" "fail is not read as done"
+  o=$(srun hang "" 1)
+  has "$o" "NOT finished within 1s" "hang"
+  has "$o" "survived" "hang: the container goes on"
+  hasnt "$o" "done at pod start" "a timeout is not read as done"
+  o=$(srun ok "$tbin:/usr/bin:/bin")
+  has "$o" "claude-session is not on PATH" "absent"
+  has "$o" "survived" "absent"
+  hasnt "$o" "done at pod start" "absent is not read as done"
+  if [ ! -e "$tmp/seen" ]; then ok; else bad "absent: something still ran"; fi
+
+  # where it is called: once, before ttyd and before every watcher
+  at()  { grep -n -m1 -E "$1" entrypoint.sh | cut -d: -f1; }
+  call=$(at '^session_setup$')
+  if [ -n "$call" ]; then ok; else bad "entrypoint.sh never calls session_setup"; call=0; fi
+  for later in '^[[:space:]]*inbox-watch &' '^[[:space:]]*chamber-watch &' '^[[:space:]]*session-keep &' '^exec ttyd '; do
+    l=$(at "$later")
+    if [ -n "$l" ] && [ "$call" -gt 0 ] && [ "$call" -lt "$l" ]; then ok; else bad "session_setup (line $call) is not before '$later' (line ${l:-none})"; fi
+  done
+
+  # the real claude-session behind it: the profile is on disk with no session
+  mkdir -p "$tmp/rbin" "$tmp/rhome"
+  ln -s "$PWD/claude-session" "$tmp/rbin/claude-session"
+  printf '#!/bin/sh\necho "claude $*" >> "$FAKE_LOG"\n[ "$1 $2" = "mcp get" ] && exit 1\nexit 0\n' > "$tmp/rbin/claude"
+  printf '#!/bin/sh\necho "tmux $*" >> "$FAKE_LOG"\nexit 0\n' > "$tmp/rbin/tmux"
+  chmod +x "$tmp/rbin/claude" "$tmp/rbin/tmux"
+  : > "$tmp/real.log"
+  rrun() { env -i HOME="$tmp/rhome" PATH="$tmp/rbin:$tbin:$PATH" FAKE_LOG="$tmp/real.log" "$@" bash -c 'set -e; . "$0"; session_setup; echo survived' "$sfn" 2>&1; }
+  o=$(rrun NETDEV_MCP_URL=http://127.0.0.1:8766/sse)
+  has "$o" "session set-up: done at pod start" "real claude-session"
+  if grep -qF '"Bash(lan-inventory-check)"' "$tmp/rhome/.claude/settings.json" 2>/dev/null; then ok; else bad "real claude-session: the rule is not in settings.json after pod start"; fi
+  if grep -q '^tmux ' "$tmp/real.log"; then bad "real claude-session: a session was started at pod start"; else ok; fi
+  rm -rf "$tmp/rhome"; mkdir -p "$tmp/rhome"
+  o=$(rrun NETDEV_MCP_URL=)
+  if grep -q 'lan-inventory-check' "$tmp/rhome/.claude/settings.json" 2>/dev/null; then bad "control: the rule is written without the sidecar env"; else ok; fi
+fi
+
 echo "passed=$pass failed=$fail"
 [ "$fail" -eq 0 ]

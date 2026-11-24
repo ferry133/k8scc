@@ -513,5 +513,36 @@ check "control: the rule prefix could be extracted" [ "$rule_prefix" = "chamber 
 check "the policy's reply form starts with the rule's prefix" grep -qF "\`${rule_prefix} <room> --to" im-policy.md
 check "the policy says not to chain anything after it" grep -qF '後面不要接 `; echo' im-policy.md
 
+echo "set-up only, at pod start (k8scc#122)"
+ALLENV=(TALOS_MCP_URL=http://127.0.0.1:8765/sse NETDEV_MCP_URL=$NDURL CHAMBER_URL=unix:/run/chamber/bridge.sock DATABASE_URL=postgres://db.invalid/x)
+h="$work/setup-only"
+out=$(run_session "$h" "${ALLENV[@]}" CLAUDE_SESSION_SETUP_ONLY=1); rc=$?
+c="$work/setup-control"
+cout=$(run_session "$c" "${ALLENV[@]}")
+check "set-up only: exit 0"                               [ "$rc" -eq 0 ]
+check "set-up only: the profile is the one a terminal session writes" [ "$(allow_of "$h" | sed "s#$h#HOME#g")" = "$(allow_of "$c" | sed "s#$c#HOME#g")" ]
+check "control: that profile is not empty and has the newest rule"   grep -qF '"Bash(lan-inventory-check)"' <<<"$(allow_of "$c")"
+check "set-up only: the sidecars are registered"          grep -q '^claude mcp add --transport sse --scope local talos ' "$h/fake.log"
+check "set-up only: netdev too"                           grep -q '^claude mcp add --transport sse --scope local netdev ' "$h/fake.log"
+check_not "set-up only: no session is started"            grep -q '^tmux ' "$h/fake.log"
+check "control: a terminal session does start one"        grep -q '^tmux ' "$c/fake.log"
+check_not "set-up only: no greeting"                      grep -q '歡迎' <<<"$out"
+check "control: a terminal session greets"                grep -q '歡迎' <<<"$cout"
+check_not "set-up only: memory is not registered for nobody" grep -q 'memory' "$h/fake.log"
+check "control: a terminal session registers memory"      grep -q '^claude mcp add --scope local memory ' "$c/fake.log"
+# the terminal session that follows changes nothing in the profile, and adds memory
+before=$(mtime_of "$h")
+run_session "$h" "${ALLENV[@]}" >/dev/null
+check "after set-up, the first terminal session leaves settings.json untouched" [ "$(mtime_of "$h")" = "$before" ]
+check "after set-up, the first terminal session registers memory" grep -q '^claude mcp add --scope local memory ' "$h/fake.log"
+# without any sidecar env it writes no permissions, as a terminal session does not
+h="$work/setup-bare"
+run_session "$h" CLAUDE_SESSION_SETUP_ONLY=1 >/dev/null
+check_not "set-up only, no sidecar env: no permissions key"  has_perms "$h"
+# any other value is not the switch
+h="$work/setup-zero"
+run_session "$h" CLAUDE_SESSION_SETUP_ONLY=0 >/dev/null
+check "control: CLAUDE_SESSION_SETUP_ONLY=0 is a terminal session" grep -q '^tmux ' "$h/fake.log"
+
 echo "passed=$pass failed=$fail"
 [ "$fail" -eq 0 ]
