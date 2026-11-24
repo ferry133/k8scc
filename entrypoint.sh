@@ -100,9 +100,13 @@ fi
 # part once here, before ttyd and the watchers, so nothing writes the same
 # files at the same time. A failure or a timeout stops nothing: the terminal
 # session does it again. One `entrypoint:` line either way.
+# The limit has to stay under the liveness probe's patience: ttyd does not
+# listen until this returns, and jg-base's probe on `app` (read on jg-jcc2,
+# 2026-11-24: first at 15 s, every 30 s, three failures) restarts the container
+# at about 75 s. A set-up that hung for longer would restart it for ever.
 # test/entrypoint-controls.sh extracts this function; keep the markers.
 session_setup() {
-    local out rc t="${SESSION_SETUP_TIMEOUT:-120}"
+    local out rc t="${SESSION_SETUP_TIMEOUT:-40}"
     if ! command -v claude-session >/dev/null 2>&1; then
         echo "entrypoint: session set-up: claude-session is not on PATH, nothing set up before the first terminal session" >&2
         return 0

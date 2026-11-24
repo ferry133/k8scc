@@ -147,6 +147,10 @@ SH
   hasnt "$o" "done at pod start" "absent is not read as done"
   if [ ! -e "$tmp/seen" ]; then ok; else bad "absent: something still ran"; fi
 
+  # the default limit stays well under the liveness probe's ~75 s (see entrypoint.sh)
+  dflt=$(sed -n 's/.*SESSION_SETUP_TIMEOUT:-\([0-9]*\)}.*/\1/p' "$sfn" | head -n 1)
+  if [ -n "$dflt" ] && [ "$dflt" -ge 10 ] && [ "$dflt" -le 45 ]; then ok; else bad "the default SESSION_SETUP_TIMEOUT is '${dflt}', not between 10 and 45"; fi
+
   # where it is called: once, before ttyd and before every watcher
   at()  { grep -n -m1 -E "$1" entrypoint.sh | cut -d: -f1; }
   call=$(at '^session_setup$')
