@@ -575,7 +575,7 @@ jobs:
         # pinned another image there. It reads only this commit's three sites.
         run: |
           set -euo pipefail
-          ../k8scc/.github/scripts/check_written_pin.sh \
+          bash ../k8scc/.github/scripts/check_written_pin.sh \
             kubernetes/apps/base/claudecode/claude-code/im/enabled/helmrelease.yaml \
             "${GITHUB_SHA:0:7}" "${BUILT_DIGEST}"
 
