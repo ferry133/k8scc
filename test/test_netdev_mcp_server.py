@@ -690,6 +690,13 @@ def _openssl(*args, cwd):
         raise AssertionError(f"harness, not guard: openssl {' '.join(args)}: {r.stderr.strip()}")
 
 
+# What a CA writes into the leaves it signs. Without the authority key id the
+# strict check, on by default since Python 3.13, refuses the leaf before the
+# hostname is looked at ("Missing Authority Key Identifier", k8scc#119), and
+# the cell then measures the fixture, not the server.
+LEAF_IDS = "subjectKeyIdentifier=hash\nauthorityKeyIdentifier=keyid:always\n"
+
+
 def make_certs(d: pathlib.Path) -> dict:
     """Certificates shaped like the ones that matter:
     - fac1: FAC1's factory certificate as fleet-ops-b0 read it (2026-11-14):
@@ -697,8 +704,11 @@ def make_certs(d: pathlib.Path) -> dict:
       no basicConstraints, no SKI/AKI. Its SANs minus IP:127.0.0.1, which is
       where the fake listens: with it a hostname check would pass and the
       control below would stop discriminating (fleet-ops-b0).
-    - fac1_child: signed by fac1's key. OpenSSL counts fac1 as a CA, so this
-      chains to it; only the identity check refuses it.
+    - fac1_child: signed by fac1's key, under a name of its own. OpenSSL
+      counts fac1 as a CA, so this chains to it; only the identity check
+      refuses it. With fac1's own name as its subject it looked self-issued,
+      and OpenSSL 4.1 refused it as "self-signed certificate" before the
+      identity check was reached (k8scc#119).
     - plain: self-signed CN=unifi.local with no extensions besides SKI.
     - other: another such certificate, a stranger's.
     - root + leaf_ip / leaf_name: a customer's own CA (CA:TRUE) and two leaves
@@ -712,15 +722,17 @@ def make_certs(d: pathlib.Path) -> dict:
         "subjectAltName=DNS:unifi.local,DNS:localhost,DNS:[::1],IP:FE80::1\n"
         "subjectKeyIdentifier=none\nauthorityKeyIdentifier=none\n")
     (d / "ca.cnf").write_text("[req]\ndistinguished_name=dn\nprompt=no\nx509_extensions=v3\n[dn]\nCN=Customer Root CA\n"
-                              "[v3]\nbasicConstraints=critical,CA:TRUE\nkeyUsage=keyCertSign,cRLSign\n")
+                              "[v3]\nbasicConstraints=critical,CA:TRUE\nkeyUsage=keyCertSign,cRLSign\nsubjectKeyIdentifier=hash\n")
     for name, cnf in (("fac1", "fac1.cnf"), ("plain", "plain.cnf"), ("other", "plain.cnf"), ("root", "ca.cnf")):
         _openssl("req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", f"{name}.key", "-out", f"{name}.pem",
                  "-days", "2", "-config", cnf, cwd=d)
-    for name, issuer, ext in (("fac1_child", "fac1", ""), ("leaf_ip", "root", "subjectAltName=IP:127.0.0.1\n"),
-                              ("leaf_name", "root", "subjectAltName=DNS:unifi.local\n")):
+    (d / "child.cnf").write_text("[req]\ndistinguished_name=dn\nprompt=no\n[dn]\nCN=behind.unifi.local\n")
+    for name, issuer, ext, cnf in (("fac1_child", "fac1", "", "child.cnf"),
+                                   ("leaf_ip", "root", "subjectAltName=IP:127.0.0.1\n" + LEAF_IDS, "plain.cnf"),
+                                   ("leaf_name", "root", "subjectAltName=DNS:unifi.local\n" + LEAF_IDS, "plain.cnf")):
         (d / f"{name}.ext").write_text(ext + "basicConstraints=CA:FALSE\n")
         _openssl("req", "-new", "-newkey", "rsa:2048", "-nodes", "-keyout", f"{name}.key", "-out", f"{name}.csr",
-                 "-config", "plain.cnf", cwd=d)
+                 "-config", cnf, cwd=d)
         _openssl("x509", "-req", "-in", f"{name}.csr", "-CA", f"{issuer}.pem", "-CAkey", f"{issuer}.key",
                  "-CAcreateserial", "-out", f"{name}.pem", "-days", "2", "-extfile", f"{name}.ext", cwd=d)
     (d / "two.pem").write_text((d / "fac1.pem").read_text() + (d / "other.pem").read_text())
@@ -779,7 +791,7 @@ class ProbeFamilies(Case):
     def test_an_https_probe_whose_lookup_lost_the_a_record_still_connects_over_ipv4(self):
         d = pathlib.Path(self.h.tmp.name)
         certs = make_certs(d)
-        (d / "dual.ext").write_text(f"subjectAltName=DNS:{self.HOST}\nbasicConstraints=CA:FALSE\n")
+        (d / "dual.ext").write_text(f"subjectAltName=DNS:{self.HOST}\nbasicConstraints=CA:FALSE\n" + LEAF_IDS)
         _openssl("req", "-new", "-newkey", "rsa:2048", "-nodes", "-keyout", "dual.key", "-out", "dual.csr",
                  "-config", "plain.cnf", cwd=d)
         _openssl("x509", "-req", "-in", "dual.csr", "-CA", "root.pem", "-CAkey", "root.key", "-CAcreateserial",
