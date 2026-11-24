@@ -85,7 +85,7 @@ Configuration (environment)
   CHAMBER_BRIDGE_IN_APP=1          say in the start line that the credential is inside app
   CHAMBER_ALLOW_INSECURE_HTTP=1    accept an http:// server (the controls' fake only)
 """
-import http.server, json, os, re, signal, socketserver, ssl, stat, sys, threading, time
+import http.client, http.server, json, os, re, signal, socket, socketserver, ssl, stat, sys, threading, time
 import urllib.error, urllib.parse, urllib.request
 
 SEG = r"[^/?#]+"
@@ -125,6 +125,59 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
     to whatever host the answer names."""
     def redirect_request(self, *a, **k):
         return None
+
+
+def connect_v4(address, timeout=socket._GLOBAL_DEFAULT_TIMEOUT, source_address=None, **_):
+    """socket.create_connection, over IPv4 only (k8scc#127). On jg-jiahd a
+    lookup with no address family sometimes answered AAAA only for the
+    server's name; the node has no IPv6 route, so the connect failed at once
+    (ENETUNREACH) and about one status line in five was not server=ok
+    (fleet-ops-02, jg-jiahd#6; the same shape as netdev's probes, k8scc#115).
+    An A lookup cannot return that. A server with no IPv4 address is
+    unreachable to the bridge, and an IPv6 literal in CHAMBER_URL is too."""
+    host, port = address
+    err = None
+    for family, kind_, proto, _name, sa in socket.getaddrinfo(host, port, socket.AF_INET, socket.SOCK_STREAM):
+        sock = None
+        try:
+            sock = socket.socket(family, kind_, proto)
+            if timeout is not socket._GLOBAL_DEFAULT_TIMEOUT:
+                sock.settimeout(timeout)
+            if source_address:
+                sock.bind(source_address)
+            sock.connect(sa)
+            return sock
+        except OSError as e:
+            err = e
+            if sock is not None:
+                sock.close()
+    raise err if err is not None else OSError("no IPv4 address")
+
+
+class V4HTTPConnection(http.client.HTTPConnection):
+    def __init__(self, *a, **k):
+        super().__init__(*a, **k)
+        self._create_connection = connect_v4    # what connect() dials with; the name still goes out as Host
+
+
+class V4HTTPSConnection(http.client.HTTPSConnection):
+    def __init__(self, *a, **k):
+        super().__init__(*a, **k)
+        self._create_connection = connect_v4    # the name is still the SNI and what the certificate is checked against
+
+
+class V4HTTPHandler(urllib.request.HTTPHandler):
+    def http_open(self, req):
+        return self.do_open(V4HTTPConnection, req)
+
+
+class V4HTTPSHandler(urllib.request.HTTPSHandler):
+    def __init__(self, context):
+        super().__init__(context=context)
+        self.v4_context = context
+
+    def https_open(self, req):
+        return self.do_open(V4HTTPSConnection, req, context=self.v4_context)
 
 
 def upstream(method, path, body=None, timeout=70):
@@ -633,7 +686,7 @@ def main():
     URL, TOK, ACCOUNT, MODE = cfg["url"], cfg["tok"], cfg["account"], cfg["mode"]
     sock, state_dir, insecure = cfg["sock"], cfg["state_dir"], cfg["insecure"]
     CTX = ssl.create_default_context(cafile=cfg["ca"]) if URL.startswith("https://") else None
-    handlers = [NoRedirect()] + ([urllib.request.HTTPSHandler(context=CTX)] if CTX else [])
+    handlers = [NoRedirect(), V4HTTPHandler()] + ([V4HTTPSHandler(CTX)] if CTX else [])
     OPENER = urllib.request.build_opener(*handlers)
 
     log("chamber-bridge: started — mode=%s account=%s socket=%s — %s%s" % (
