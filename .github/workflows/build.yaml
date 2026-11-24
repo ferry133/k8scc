@@ -71,6 +71,8 @@ jobs:
       # same / absent / unknown against a throwaway git history.
       - name: Check the bump-order controls
         run: python3 test/test_bump_order.py
+      - name: Check the written-pin cross-check controls
+        run: test/bump-pin-check-controls.sh
 
       # talos_mcp_server.py is imported for real against the same mcp pin the
       # Dockerfile installs (read from it, not copied here), with fake talosctl
@@ -568,26 +570,14 @@ jobs:
         working-directory: jg-base
         env:
           BUILT_DIGEST: ${{ needs.build-and-push.outputs.base-digest }}
+        # The check is a script with controls of its own (k8scc#130): inline,
+        # it read every digest in the file and failed every bump once jg-base
+        # pinned another image there. It reads only this commit's three sites.
         run: |
           set -euo pipefail
-          # Two empty values compare equal and prove nothing. The gate's
-          # skip path is exactly where this one could arrive empty, so it is
-          # checked before it is compared rather than after it misleads.
-          if [ -z "${BUILT_DIGEST}" ]; then
-            echo "::error::no base digest: neither a fresh push nor the gate's already-published lookup produced one"
-            exit 1
-          fi
-          F=kubernetes/apps/base/claudecode/claude-code/im/enabled/helmrelease.yaml
-          WRITTEN=$(grep -oE 'sha256:[0-9a-f]{64}' "$F" | sort -u)
-          echo "written : ${WRITTEN}"
-          echo "built   : ${BUILT_DIGEST}"
-          if [ "$(printf '%s\n' "${WRITTEN}" | wc -l)" -ne 1 ]; then
-            echo "::error::the three sites disagree on the digest"; exit 1
-          fi
-          if [ "${WRITTEN}" != "${BUILT_DIGEST}" ]; then
-            echo "::error::GHCR resolved ${WRITTEN} but this build pushed ${BUILT_DIGEST}"
-            exit 1
-          fi
+          bash ../k8scc/.github/scripts/check_written_pin.sh \
+            kubernetes/apps/base/claudecode/claude-code/im/enabled/helmrelease.yaml \
+            "${GITHUB_SHA:0:7}" "${BUILT_DIGEST}"
 
       # No diff is the normal outcome of a re-run, not an error.
       - name: Open or update the PR
