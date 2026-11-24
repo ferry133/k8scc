@@ -12,6 +12,8 @@
 # 6. exec tmux → claude (detached, without the greeting, when session-keep runs it)
 #    (The inbox notice that was step 6 is retired with inbox-watch, k8scc#103:
 #    assignments arrive through chamber; ~/workspace/inbox/ keeps im's reports.)
+# With CLAUDE_SESSION_SETUP_ONLY=1 (entrypoint.sh, at pod start) it stops after
+# 5: no memory registration, no greeting, no session.
 # CLAUDE_USER_ID is set by the pod environment (oauth2-proxy handles auth externally)
 
 # HOME is /home/claude in the image (Dockerfile pins it); the fallback only
@@ -319,7 +321,10 @@ fi
 # name is rejected as a malformed KEY=value (confirmed live 2026-09-06,
 # CLI 2.1.228). Add errors go to mcp-add.log and flag the terminal --
 # a swallowed failure here reads identically to success.
-if [ -n "${DATABASE_URL}" ]; then
+# Not at pod start (CLAUDE_SESSION_SETUP_ONLY): the registration keeps the
+# CLAUDE_USER_ID of whoever it was made for, and at pod start nobody is at the
+# terminal yet, so it would be made for the fallback name and never redone.
+if [ -n "${DATABASE_URL}" ] && [ "${CLAUDE_SESSION_SETUP_ONLY:-}" != 1 ]; then
     if ! claude mcp get memory >/dev/null 2>&1; then
         if ! claude mcp add --scope local memory \
             -e DATABASE_URL="${DATABASE_URL}" \
@@ -391,6 +396,15 @@ if [ -n "${CHAMBER_URL:-}" ]; then
     if ! merge_permissions "${CLAUDE_HOME}/.claude/settings.json" "${CHAMBER_ALLOW[@]}" "${KUBECTL_ALLOW[@]}"; then
         echo "⚠ settings.json 的 chamber send／kubectl permission 設定沒有寫入（見上一行）——回覆房間或照房間指令動作時可能被擋" >&2
     fi
+fi
+
+# entrypoint.sh runs everything above once at pod start (k8scc#122): the
+# permission profile is on the PVC and was merged only here, so a pod on a new
+# image kept the previous image's rules until someone opened the terminal, and
+# a headless `claude -p` before that ran without them (jg-jcc2, 2026-11-24:
+# 12 rules, 13 after the first ttyd session). No session, no greeting.
+if [ "${CLAUDE_SESSION_SETUP_ONLY:-}" = 1 ]; then
+    exit 0
 fi
 
 # session-keep starts the session with nobody at a terminal (openspec

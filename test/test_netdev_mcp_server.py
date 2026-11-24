@@ -283,7 +283,12 @@ class FakeController:
 
 class FakeFAC:
     """GitHub's issues API, the part the server uses. pre_ack / post_ack decide
-    what FAC comments; post_ack appears only after `after` says the write happened."""
+    what FAC comments. FAC's comments are real ones, kept in the order they
+    were left, as GitHub lists them (k8scc#126): the pre-ack at the first read
+    once pre_ack is set; the post-ack at the first read after `after` says the
+    write happened, or, with post_ack = "early", right behind the pre-ack,
+    before anything was applied. fail_comment makes one of the server's own
+    comments fail: the one whose text contains it."""
 
     def __init__(self):
         self.issues = {}            # number -> {"title", "body", "state", "comments": [{"id", "body"}]}
@@ -292,6 +297,8 @@ class FakeFAC:
         self.post_ack = False
         self.after = lambda: True
         self.fail = False
+        self.fail_comment = None
+        self.no_id_for = None       # a server comment containing this is stored, and answered without an id
         fake = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -322,17 +329,28 @@ class FakeFAC:
                     return self._send(201, {"number": n})
                 n = int(parts[5])
                 issue = fake.issues[n]
+                def next_id():
+                    return 1000 + sum(len(i["comments"]) for i in fake.issues.values())
                 if parts[6:] == ["comments"] and self.command == "POST":
-                    cid = 1000 + sum(len(i["comments"]) for i in fake.issues.values())
+                    if fake.fail_comment and fake.fail_comment in body["body"]:
+                        return self._send(502, {"message": "forced for this comment"})
+                    cid = next_id()
                     issue["comments"].append({"id": cid, "body": body["body"]})
+                    if fake.no_id_for and fake.no_id_for in body["body"]:
+                        return self._send(201, {"body": body["body"]})
                     return self._send(201, {"id": cid})
                 if parts[6:] == ["comments"] and self.command == "GET":
-                    out = list(issue["comments"])
+                    def fac_says(kind, text):
+                        if kind not in issue.setdefault("fac", set()):
+                            issue["fac"].add(kind)
+                            issue["comments"].append({"id": next_id(), "body": text, "fac": True})
                     if fake.pre_ack:
-                        out.append({"id": 1, "body": "pre-ack: fleet-ops-65 [69d6d7] reached the cluster from outside"})
-                    if fake.post_ack and fake.after():
-                        out.append({"id": 2, "body": "post-ack: fleet-ops-65 [69d6d7] still reach it"})
-                    return self._send(200, out)
+                        fac_says("pre", "pre-ack: fleet-ops-65 [69d6d7] reached the cluster from outside")
+                    if fake.post_ack == "early" and "pre" in issue.get("fac", ()):
+                        fac_says("post", "post-ack: fleet-ops-65 [69d6d7] still reach it")
+                    elif fake.post_ack is True and fake.after():
+                        fac_says("post", "post-ack: fleet-ops-65 [69d6d7] still reach it")
+                    return self._send(200, [{"id": c["id"], "body": c["body"]} for c in issue["comments"]])
                 if self.command == "PATCH":
                     issue["state"] = body["state"]
                     return self._send(200, {"number": n, "state": issue["state"]})
@@ -350,7 +368,11 @@ class FakeFAC:
 
     def posted(self, n):
         """The comments the server itself posted on issue n."""
-        return [c["body"] for c in self.issues[n]["comments"]]
+        return [c["body"] for c in self.issues[n]["comments"] if not c.get("fac")]
+
+    def thread(self, n):
+        """Every comment on issue n in order, as ('fac' | 'server', first line)."""
+        return [("fac" if c.get("fac") else "server", c["body"].split("\n")[0]) for c in self.issues[n]["comments"]]
 
 
 class Probe:
@@ -690,6 +712,13 @@ def _openssl(*args, cwd):
         raise AssertionError(f"harness, not guard: openssl {' '.join(args)}: {r.stderr.strip()}")
 
 
+# What a CA writes into the leaves it signs. Without the authority key id the
+# strict check, on by default since Python 3.13, refuses the leaf before the
+# hostname is looked at ("Missing Authority Key Identifier", k8scc#119), and
+# the cell then measures the fixture, not the server.
+LEAF_IDS = "subjectKeyIdentifier=hash\nauthorityKeyIdentifier=keyid:always\n"
+
+
 def make_certs(d: pathlib.Path) -> dict:
     """Certificates shaped like the ones that matter:
     - fac1: FAC1's factory certificate as fleet-ops-b0 read it (2026-11-14):
@@ -697,8 +726,11 @@ def make_certs(d: pathlib.Path) -> dict:
       no basicConstraints, no SKI/AKI. Its SANs minus IP:127.0.0.1, which is
       where the fake listens: with it a hostname check would pass and the
       control below would stop discriminating (fleet-ops-b0).
-    - fac1_child: signed by fac1's key. OpenSSL counts fac1 as a CA, so this
-      chains to it; only the identity check refuses it.
+    - fac1_child: signed by fac1's key, under a name of its own. OpenSSL
+      counts fac1 as a CA, so this chains to it; only the identity check
+      refuses it. With fac1's own name as its subject it looked self-issued,
+      and OpenSSL 4.1 refused it as "self-signed certificate" before the
+      identity check was reached (k8scc#119).
     - plain: self-signed CN=unifi.local with no extensions besides SKI.
     - other: another such certificate, a stranger's.
     - root + leaf_ip / leaf_name: a customer's own CA (CA:TRUE) and two leaves
@@ -712,15 +744,17 @@ def make_certs(d: pathlib.Path) -> dict:
         "subjectAltName=DNS:unifi.local,DNS:localhost,DNS:[::1],IP:FE80::1\n"
         "subjectKeyIdentifier=none\nauthorityKeyIdentifier=none\n")
     (d / "ca.cnf").write_text("[req]\ndistinguished_name=dn\nprompt=no\nx509_extensions=v3\n[dn]\nCN=Customer Root CA\n"
-                              "[v3]\nbasicConstraints=critical,CA:TRUE\nkeyUsage=keyCertSign,cRLSign\n")
+                              "[v3]\nbasicConstraints=critical,CA:TRUE\nkeyUsage=keyCertSign,cRLSign\nsubjectKeyIdentifier=hash\n")
     for name, cnf in (("fac1", "fac1.cnf"), ("plain", "plain.cnf"), ("other", "plain.cnf"), ("root", "ca.cnf")):
         _openssl("req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", f"{name}.key", "-out", f"{name}.pem",
                  "-days", "2", "-config", cnf, cwd=d)
-    for name, issuer, ext in (("fac1_child", "fac1", ""), ("leaf_ip", "root", "subjectAltName=IP:127.0.0.1\n"),
-                              ("leaf_name", "root", "subjectAltName=DNS:unifi.local\n")):
+    (d / "child.cnf").write_text("[req]\ndistinguished_name=dn\nprompt=no\n[dn]\nCN=behind.unifi.local\n")
+    for name, issuer, ext, cnf in (("fac1_child", "fac1", "", "child.cnf"),
+                                   ("leaf_ip", "root", "subjectAltName=IP:127.0.0.1\n" + LEAF_IDS, "plain.cnf"),
+                                   ("leaf_name", "root", "subjectAltName=DNS:unifi.local\n" + LEAF_IDS, "plain.cnf")):
         (d / f"{name}.ext").write_text(ext + "basicConstraints=CA:FALSE\n")
         _openssl("req", "-new", "-newkey", "rsa:2048", "-nodes", "-keyout", f"{name}.key", "-out", f"{name}.csr",
-                 "-config", "plain.cnf", cwd=d)
+                 "-config", cnf, cwd=d)
         _openssl("x509", "-req", "-in", f"{name}.csr", "-CA", f"{issuer}.pem", "-CAkey", f"{issuer}.key",
                  "-CAcreateserial", "-out", f"{name}.pem", "-days", "2", "-extfile", f"{name}.ext", cwd=d)
     (d / "two.pem").write_text((d / "fac1.pem").read_text() + (d / "other.pem").read_text())
@@ -779,7 +813,7 @@ class ProbeFamilies(Case):
     def test_an_https_probe_whose_lookup_lost_the_a_record_still_connects_over_ipv4(self):
         d = pathlib.Path(self.h.tmp.name)
         certs = make_certs(d)
-        (d / "dual.ext").write_text(f"subjectAltName=DNS:{self.HOST}\nbasicConstraints=CA:FALSE\n")
+        (d / "dual.ext").write_text(f"subjectAltName=DNS:{self.HOST}\nbasicConstraints=CA:FALSE\n" + LEAF_IDS)
         _openssl("req", "-new", "-newkey", "rsa:2048", "-nodes", "-keyout", "dual.key", "-out", "dual.csr",
                  "-config", "plain.cnf", cwd=d)
         _openssl("x509", "-req", "-in", "dual.csr", "-CA", "root.pem", "-CAkey", "root.key", "-CAcreateserial",
@@ -1589,6 +1623,88 @@ class DeadMan(WriteCase):
         self.assertEqual((res["result"], res["fac_witness"], res["outbound"]), ("reverted", "lost", "ok"))
         self.assertIn("fac_witness: lost", self.last_comment())
         self.assertIn("post-ack", " ".join(res["failed"]))
+
+    def test_a_post_ack_left_before_the_change_is_applied_is_not_a_witness(self):
+        # k8scc#126 (fleet-ops-1e): FAC could not see from the ticket that the
+        # change had been applied, and a post-ack left before it counted
+        self.h.fac.pre_ack, self.h.fac.post_ack = True, "early"
+        self.read()
+        res = self.write("set_dhcp_reservation")
+        self.assertEqual((res["result"], res["fac_witness"], res["outbound"]), ("reverted", "lost", "ok"), res)
+        self.assertIn("post-ack", " ".join(res["failed"]))
+        thread = self.h.fac.thread(1)
+        self.assertEqual(thread[:3], [("fac", "pre-ack: fleet-ops-65 [69d6d7] reached the cluster from outside"),
+                                      ("fac", "post-ack: fleet-ops-65 [69d6d7] still reach it"),
+                                      ("server", "netdev-mcp applying")], "the harness: the post-ack really is before it")
+        with self.subTest(control="the same post-ack left after the applying comment is one"):
+            self.h.fac.post_ack = True
+            self.h.fac.after = lambda: len(self.h.fake.puts()) >= 3      # this second write's own PUT
+            self.m._LAST_WRITE.clear()
+            self.read()
+            res = self.write("set_dhcp_reservation")
+            self.assertEqual((res["result"], res["fac_witness"]), ("applied", "ok"), res)
+            kinds = self.h.fac.thread(2)
+            self.assertLess(kinds.index(("server", "netdev-mcp applying")),
+                            kinds.index(("fac", "post-ack: fleet-ops-65 [69d6d7] still reach it")))
+
+    def test_a_post_ack_counts_for_nothing_when_the_applying_comment_is_not_listed(self):
+        # the listing is the only order there is: an anchor that is not in it
+        # (a page that does not reach it, an id GitHub never lists) places nothing
+        self.h.fac.pre_ack = self.h.fac.post_ack = True
+        self.h.fac.after = lambda: bool(self.h.fake.puts())
+        self.read()
+        self.assertEqual(self.write("set_dhcp_reservation")["result"], "applied")
+        own = [c["id"] for c in self.h.fac.issues[1]["comments"] if c["body"].startswith("netdev-mcp applying")]
+        self.assertEqual(len(own), 1)
+        self.assertTrue(self.m.TICKETS.witnessed(1, "post-ack:", after=own[0]), "control: behind the real anchor it counts")
+        self.assertTrue(self.m.TICKETS.witnessed(1, "post-ack:"), "control: with no anchor asked for it counts")
+        self.assertFalse(self.m.TICKETS.witnessed(1, "post-ack:", after=987654321))
+
+    def test_the_ticket_says_applying_before_the_write_is_sent(self):
+        seen = []
+        self.h.fake.on_write = lambda m, p, b: seen.append(list(self.h.fac.posted(1)))
+        self.read()
+        res = self.write("set_dhcp_reservation")
+        self.assertEqual(res["result"], "applied", res)
+        self.assertEqual(len(seen), 1)
+        self.assertEqual([c.split("\n")[0] for c in seen[0]], ["netdev-mcp applying"], "on the ticket when the PUT arrived")
+        self.assertEqual([c.split("\n")[0] for c in self.h.fac.posted(1)], ["netdev-mcp applying", "netdev-mcp release"])
+        self.assertIn("post-ack:", seen[0][0])
+        self.assertIn("netdev-mcp applying", self.h.fac.issues[1]["body"], "the ticket tells FAC what to wait for")
+
+    def test_no_applying_comment_no_write(self):
+        self.h.fac.fail_comment = "netdev-mcp applying"
+        self.read()
+        res = self.write("set_dhcp_reservation")
+        self.assertEqual(res["result"], "aborted", res)
+        self.assertIn("nothing was written", res["reason"])
+        self.assertEqual(self.h.fake.mutations(), [])
+        self.assertEqual(self.phases("users/u-tv"), ["token", "aborted"])
+        self.assertIn("result: aborted", self.last_comment())
+        with self.subTest(control="with the comment accepted the same write goes out"):
+            self.h.fac.fail_comment = None
+            self.m._LAST_WRITE.clear()
+            self.read()
+            self.assertEqual(self.write("set_dhcp_reservation")["result"], "applied")
+            self.assertEqual(len(self.h.fake.mutations()), 1)
+
+    def test_an_applying_comment_without_an_id_is_no_write(self):
+        # with no id there is nothing to place a post-ack behind, and falling
+        # back to "any post-ack" is the hole of k8scc#126 again (fleet-ops-1e
+        # on #129: removing the check left every cell green)
+        self.h.fac.pre_ack, self.h.fac.post_ack = True, "early"
+        self.h.fac.no_id_for = "netdev-mcp applying"
+        self.read()
+        res = self.write("set_dhcp_reservation")
+        self.assertEqual(res["result"], "aborted", res)
+        self.assertIn("no comment id", res["reason"])
+        self.assertEqual(self.h.fake.mutations(), [])
+        with self.subTest(control="with an id in the answer the same write is sent"):
+            self.h.fac.no_id_for = None
+            self.m._LAST_WRITE.clear()
+            self.read()
+            self.assertNotEqual(self.write("set_dhcp_reservation")["result"], "aborted")
+            self.assertGreaterEqual(len(self.h.fake.mutations()), 1)
 
     def test_server_comments_never_count_as_witness(self):
         self.read()
