@@ -36,6 +36,7 @@ class Fake:
     """State of the fake server; one instance per listening port."""
     def __init__(self):
         self.seen = []                 # (method, path?query, Authorization)
+        self.hosts = []                # the Host header of each request
         self.user = "@im-test:fake"
         self.batches = []              # sync answers to hand out, in order
         self.n = 0
@@ -67,6 +68,7 @@ class H(http.server.BaseHTTPRequestHandler):
         body = self.rfile.read(n) if n else b""
         with f.lock:
             f.seen.append((self.command, self.path, self.headers.get("Authorization")))
+            f.hosts.append(self.headers.get("Host"))
         path, _, query = self.path.partition("?")
         if f.redirect_to and path == P + "/joined_rooms":
             return self.reply(302, {}, [("Location", f.redirect_to + path)])
@@ -759,6 +761,123 @@ check("K8 a name that does not resolve is told apart from a refused connection",
        "ConnectionRefusedError" in logged(LOG)))
 check("K9 no line carries the exception's text or the host", False, any(w in logged(LOG) for w in ("invalid", "Errno", "nodename", "Name or service", "resolution")))
 stop(p)
+
+print("the server is reached over IPv4 only (k8scc#127)")
+# jg-jiahd, 2026-11-24 (fleet-ops-02, jg-jiahd#6): a lookup with no address
+# family sometimes answered AAAA only for the server's name, the node has no
+# IPv6 route, and about one status line in five was not server=ok. Here the
+# lookup is faked inside the bridge's own process: the bridge file runs as
+# shipped, under a wrapper that replaces socket.getaddrinfo first. `v4v6.test`
+# answers a lookup with no family with an IPv6 address only (::1, where
+# nothing listens on that port), and an IPv4 lookup with 127.0.0.1, where the
+# fake server is. `v6only.test` has no IPv4 address at all.
+WRAP = os.path.join(T, "resolver-wrap.py")
+open(WRAP, "w").write("""import runpy, socket, sys
+real = socket.getaddrinfo
+def fake(host, port, family=0, type=0, proto=0, flags=0):
+    if host in ("v4v6.test", "v6only.test"):
+        if family == socket.AF_INET:
+            if host == "v6only.test":
+                raise socket.gaierror(socket.EAI_NONAME, "no A record")
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", port))]
+        return [(socket.AF_INET6, socket.SOCK_STREAM, 6, "", ("::1", port, 0, 0))]
+    return real(host, port, family, type, proto, flags)
+socket.getaddrinfo = fake
+sys.argv = [sys.argv[1]]
+runpy.run_path(sys.argv[0], run_name="__main__")
+""")
+
+
+def start_wrapped(name, url):
+    d = os.path.join(T, name)
+    os.makedirs(d, exist_ok=True)
+    env = {"PATH": os.environ["PATH"], "HOME": T, "CHAMBER_URL": url, "CHAMBER_ACCOUNT": "im-test",
+           "CHAMBER_TOKEN_FILE": os.path.join(T, "tok"), "CHAMBER_SOCKET": os.path.join(d, "b.sock"),
+           "CHAMBER_BEAT": "0.3", "CHAMBER_ALLOW_INSECURE_HTTP": "1", "CHAMBER_URL_FILE": os.path.join(T, "no-url-file")}
+    logp = os.path.join(d, "log")
+    p = subprocess.Popen([sys.executable, "-I", WRAP, BRIDGE], env=env, stdout=open(logp, "a"), stderr=subprocess.STDOUT, cwd=T)
+    procs.append(p)
+    return p, env["CHAMBER_SOCKET"], logp
+
+
+v4, v4_fake, V4_URL = fake_server()
+v4_fake.rooms = ["!r1:fake"]
+v4_fake.room_name = "cust-a"
+port = V4_URL.rsplit(":", 1)[1]
+# the harness itself: the fake resolver is in force, and ::1 on that port is closed
+r = subprocess.run([sys.executable, "-I", "-c", "import socket,sys,runpy\nsys.argv=['x','/dev/null']\n" + open(WRAP).read().split("sys.argv = ")[0] +
+                    "print(socket.getaddrinfo('v4v6.test', %s)[0][4][0], socket.getaddrinfo('v4v6.test', %s, socket.AF_INET)[0][4][0])\n"
+                    "try:\n    socket.create_connection(('v4v6.test', %s), timeout=5); print('connected')\nexcept OSError as e:\n    print('refused')\n" % (port, port, port)],
+                   capture_output=True, text=True, timeout=30)
+check("V0 control: with no family the fake name gives ::1 only, and the plain connect fails there", "::1 127.0.0.1\nrefused", r.stdout.strip())
+p, SOCK, LOG = start_wrapped("v4v6", "http://v4v6.test:" + port)
+check("V1 a name whose plain lookup is AAAA only is still reached", True,
+      until(lambda: "server=ok rooms=cust-a" in logged(LOG), 15))
+check("V2 and never once read as unreachable", False, "unreachable" in logged(LOG) or "cannot be reached" in logged(LOG))
+check("V3 the client through the bridge ⇒ 0", 0, client(SOCK, "whoami")[0])
+check("V4 the name went out as Host, not the address", True, any("v4v6.test" in (h or "") for h in v4_fake.hosts))
+stop(p)
+p, SOCK, LOG = start_wrapped("v6only", "http://v6only.test:" + port)
+check("V5 a name with no IPv4 address is unreachable, IPv6 is not tried", (True, False),
+      (until(lambda: "chamber-bridge: the server cannot be reached (URLError/gaierror)" in logged(LOG), 15),
+       "ConnectionRefusedError" in logged(LOG)))
+check("V6 its status line says unreachable", True, until(lambda: "server=unreachable rooms=unmeasured online=unmeasured" in logged(LOG)))
+stop(p)
+p, SOCK, LOG = start_wrapped("v4plain", V4_URL)
+check("V7 control: under the same wrapper an address is reached as before", True, until(lambda: "server=ok rooms=cust-a" in logged(LOG), 15))
+stop(p)
+v4.shutdown()
+
+# The same over https, which is what a pod uses: the address is dialled, the
+# name is still the SNI and what the certificate is checked against.
+import ssl
+
+
+def tls_server(cn):
+    """A fake server over TLS with a certificate for `cn` made now. -> (server, fake, port, certificate path)"""
+    d = os.path.join(T, "tls-" + cn)
+    os.makedirs(d, exist_ok=True)
+    r = subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", "k.pem", "-out", "c.pem", "-days", "2",
+                        "-subj", "/CN=" + cn, "-addext", "subjectAltName=DNS:" + cn], cwd=d, capture_output=True, text=True)
+    if r.returncode:
+        raise SystemExit("CANNOT MEASURE: openssl could not make the certificate: " + r.stderr.strip()[:300])
+    s_ = S(("127.0.0.1", 0), H)
+    s_.fake = Fake()
+    s_.fake.rooms = ["!r1:fake"]
+    s_.fake.room_name = "cust-a"
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ctx.load_cert_chain(os.path.join(d, "c.pem"), os.path.join(d, "k.pem"))
+    s_.socket = ctx.wrap_socket(s_.socket, server_side=True)
+    threading.Thread(target=s_.serve_forever, daemon=True).start()
+    return s_, s_.fake, s_.server_address[1], os.path.join(d, "c.pem")
+
+
+def start_tls(name, url, ca):
+    d = os.path.join(T, name)
+    os.makedirs(d, exist_ok=True)
+    env = {"PATH": os.environ["PATH"], "HOME": T, "CHAMBER_URL": url, "CHAMBER_ACCOUNT": "im-test", "CHAMBER_CA": ca,
+           "CHAMBER_TOKEN_FILE": os.path.join(T, "tok"), "CHAMBER_SOCKET": os.path.join(d, "b.sock"),
+           "CHAMBER_BEAT": "0.3", "CHAMBER_URL_FILE": os.path.join(T, "no-url-file")}
+    logp = os.path.join(d, "log")
+    p = subprocess.Popen([sys.executable, "-I", WRAP, BRIDGE], env=env, stdout=open(logp, "a"), stderr=subprocess.STDOUT, cwd=T)
+    procs.append(p)
+    return p, env["CHAMBER_SOCKET"], logp
+
+
+t1, t1_fake, t1_port, t1_ca = tls_server("v4v6.test")
+p, SOCK, LOG = start_tls("tls-ok", "https://v4v6.test:%d" % t1_port, t1_ca)
+check("V8 https: a name whose plain lookup is AAAA only is reached, its certificate accepted", True,
+      until(lambda: "server=ok rooms=cust-a" in logged(LOG), 15))
+check("V9 https: never once read as unreachable", False, "cannot be reached" in logged(LOG))
+stop(p)
+t2, t2_fake, t2_port, t2_ca = tls_server("another.test")
+p, SOCK, LOG = start_tls("tls-name", "https://v4v6.test:%d" % t2_port, t2_ca)
+check("V10 control: a trusted certificate for another name is refused (the name is checked, not the address)", True,
+      until(lambda: "cannot be reached (URLError/SSLCertVerificationError)" in logged(LOG), 15))
+check("V11 and nothing was sent to that server", [], [x for x in t2_fake.seen])
+stop(p)
+t1.shutdown()
+t2.shutdown()
 
 print("the credential is someone else's")
 with fake.lock:
