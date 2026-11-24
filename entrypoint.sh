@@ -92,6 +92,51 @@ if [ -n "${TTYD_AUTH_HEADER}" ]; then
     TTYD_ARGS+=("--auth-header" "${TTYD_AUTH_HEADER}")
 fi
 
+# --- session set-up at pod start (k8scc#122) -----------------------------------
+# claude-session registers the MCP sidecars and merges the permission profile
+# into settings.json, which is on the PVC. It used to run only when someone
+# opened the terminal, so a pod on a new image kept the previous image's rules
+# until then, and a headless `claude -p` ran without the new ones. Run that
+# part once here, before ttyd and the watchers, so nothing writes the same
+# files at the same time. A failure or a timeout stops nothing: the terminal
+# session does it again. One `entrypoint:` line either way.
+# The limit has to stay under the liveness probe's patience: ttyd does not
+# listen until this returns, and jg-base's probe on `app` (read on jg-jcc2,
+# 2026-11-24: first at 15 s, every 30 s, three failures) restarts the container
+# at about 75 s. A set-up that hung for longer would restart it for ever.
+# test/entrypoint-controls.sh extracts this function; keep the markers.
+session_setup() {
+    local out log rc t="${SESSION_SETUP_TIMEOUT:-40}"
+    if ! command -v claude-session >/dev/null 2>&1; then
+        echo "entrypoint: session set-up: claude-session is not on PATH, nothing set up before the first terminal session" >&2
+        return 0
+    fi
+    # -k: a set-up that ignores TERM is killed 5 s later (rc 137). Without it
+    # `timeout` waits for as long as the process likes, which is the restart
+    # loop again (fleet-ops-1e on #125, measured in a pod).
+    # Its output goes to a file, not through $(…): a pipe is read until every
+    # process holding it has ended, so a child the killed set-up left behind
+    # can keep this waiting for as long as that child lives. The first CI run
+    # of the TERM-deaf cell took 30 s for a limit of 1 s and 1 s-plus with the
+    # file; that the pipe was the cause is inferred from that, and fleet-ops-1e
+    # did not reproduce the 30 s in a pod (6 s with either form).
+    log=$(mktemp) || { echo "entrypoint: session set-up: no temp file, nothing set up before the first terminal session" >&2; return 0; }
+    CLAUDE_SESSION_SETUP_ONLY=1 timeout -k 5 "$t" claude-session </dev/null >"$log" 2>&1 && rc=0 || rc=$?
+    out=$(tail -n 8 "$log"); rm -f "$log"
+    if [ "$rc" -eq 0 ]; then
+        echo "entrypoint: session set-up: done at pod start (MCP registrations and permission profile; memory waits for a terminal)" >&2
+    elif [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
+        echo "entrypoint: session set-up: NOT finished within ${t}s, stopped; the first terminal session does it again" >&2
+    else
+        echo "entrypoint: session set-up: FAILED (exit $rc); the first terminal session does it again" >&2
+    fi
+    # its own warnings, made printable
+    [ -z "$out" ] || printf '%s\n' "$out" | LC_ALL=C tr -c '[:print:]\n\200-\377' '?' | sed 's/^/entrypoint:   | /' >&2
+    return 0
+}
+# --- end session set-up at pod start -------------------------------------------
+session_setup
+
 # Tell the claude already running in tmux about inbox files that arrive while
 # its session is open (k8scc#59). claude-session's notice reaches only the
 # person at a terminal that is just connecting. Runs for the pod's lifetime;
