@@ -111,10 +111,13 @@ session_setup() {
         echo "entrypoint: session set-up: claude-session is not on PATH, nothing set up before the first terminal session" >&2
         return 0
     fi
-    out=$(CLAUDE_SESSION_SETUP_ONLY=1 timeout "$t" claude-session </dev/null 2>&1) && rc=0 || rc=$?
+    # -k: a set-up that ignores TERM is killed 5 s later (rc 137). Without it
+    # `timeout` waits for as long as the process likes, which is the restart
+    # loop again (fleet-ops-1e on #125, measured in a pod).
+    out=$(CLAUDE_SESSION_SETUP_ONLY=1 timeout -k 5 "$t" claude-session </dev/null 2>&1) && rc=0 || rc=$?
     if [ "$rc" -eq 0 ]; then
         echo "entrypoint: session set-up: done at pod start (MCP registrations and permission profile; memory waits for a terminal)" >&2
-    elif [ "$rc" -eq 124 ]; then
+    elif [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
         echo "entrypoint: session set-up: NOT finished within ${t}s, stopped; the first terminal session does it again" >&2
     else
         echo "entrypoint: session set-up: FAILED (exit $rc); the first terminal session does it again" >&2

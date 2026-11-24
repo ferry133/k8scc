@@ -117,6 +117,8 @@ case "${FAKE_SETUP:-ok}" in
   warn) echo "⚠ settings.json 的 netdev permission 設定沒有寫入"; exit 0 ;;
   fail) echo "boom: cannot write"; exit 3 ;;
   hang) sleep 30 ;;
+  deaf) trap '' TERM; sleep 30 & wait; sleep 30 ;;
+  stdin) if read -r -t 1 line; then echo "read a line from stdin"; exit 4; fi; exit 0 ;;
 esac
 SH
   chmod +x "$tmp/sbin/claude-session"
@@ -141,6 +143,15 @@ SH
   has "$o" "NOT finished within 1s" "hang"
   has "$o" "survived" "hang: the container goes on"
   hasnt "$o" "done at pod start" "a timeout is not read as done"
+  # a set-up that ignores TERM is killed, not waited for (fleet-ops-1e on #125)
+  t0=$(date +%s); o=$(srun deaf "" 1); took=$(( $(date +%s) - t0 ))
+  has "$o" "NOT finished within 1s" "deaf to TERM"
+  has "$o" "survived" "deaf to TERM: the container goes on"
+  if [ "$took" -le 15 ]; then ok; else bad "deaf to TERM: took ${took}s, the kill did not come"; fi
+  # its stdin is not the entrypoint's: with a line waiting there, it reads none
+  o=$(echo "a line on the entrypoint's stdin" | srun stdin)
+  has "$o" "session set-up: done at pod start" "stdin is /dev/null"
+  hasnt "$o" "read a line from stdin" "stdin is /dev/null"
   o=$(srun ok "$tbin:/usr/bin:/bin")
   has "$o" "claude-session is not on PATH" "absent"
   has "$o" "survived" "absent"
