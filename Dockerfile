@@ -35,7 +35,12 @@ RUN apt-get update && apt-get install -y \
     gnome-keyring \
     python3 python3-pip \
     tmux \
-    && rm -rf /var/lib/apt/lists/*
+    tini \
+    && rm -rf /var/lib/apt/lists/* \
+    && tini --version
+# tini: entrypoint.sh execs it as PID 1 in front of ttyd, so that an ended tmux
+# server and its claude are waited on instead of staying as zombies (k8scc#133).
+# The build fails here if it does not run.
 
 # tmux keeps `claude` alive across ttyd reconnects -- ttyd forks a brand-new
 # child process per WebSocket connection with no session persistence of its
