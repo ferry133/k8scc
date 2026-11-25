@@ -246,7 +246,7 @@ The cooldown is per target, so a tool and its opposite share it. While a target'
 
 ### Requirement: An unblock may address a client that left the client listing
 
-`unblock_client`, and no other tool, SHALL also accept a MAC that is absent from the cached client listing when a `users` read in this session returned that MAC with `blocked: true` (k8scc#137: on FAC1 a blocked wired client is not in `stat/sta`). The snapshot SHALL then be the users row, and the target SHALL remain `clients/<mac>`. A user not read, or read as not blocked, SHALL be refused, and the refusal SHALL name the reader to call.
+`unblock_client`, and no other tool, SHALL also accept a MAC that is absent from the cached client listing when a `users` read in this session returned that MAC with `blocked: true` (k8scc#137: on FAC1 a blocked wired client is not in `stat/sta`). The snapshot SHALL then be the users row, and the target SHALL remain `clients/<mac>`. A user not read, or read as not blocked, SHALL be refused, and the refusal SHALL name the reader to call. That reader, `get_dhcp_reservations`, SHALL list every users row with `blocked: true` beside the reservations, so the row an unblock addresses is one im was shown.
 
 #### Scenario: A block taken off after the client left the listing
 - **WHEN** the controller drops a blocked client from its client listing, a client is blocked, and after a `get_clients` and a `get_dhcp_reservations` the same MAC is unblocked inside the cooldown
