@@ -109,8 +109,8 @@
 - [ ] 7.2 偽造簽章、清單外的金鑰、過期指令、用過的指令、`transcript:` 指標：`directive-verify` 各回 1／1／1／1／2，im 都不動作
   - **兩格量了（`fleet-ops-02 [e3795b]`，jg-jcc2，映像 `aaae5d4`，2026-11-24 06:32–06:39，每格事前寫預期；讀數全文在 k8scc#70 的留言）**：清單外的金鑰在 pod 裡回 1（同一份位元組在清單含那把金鑰的 Mac 上回 0）；`transcript:` 指標回 2。偽造簽章（T3）與用過的（S4）先前已有。**過期那一格沒量**（要 ferry133 簽）。R21 之後「im 都不動作」只在結果是 1 時成立
 - [ ] 7.3 一般訊息與直接指令都不喚起（4.4）
-- [x] 7.4 `observe` → `deliver` 的切換與退回：退回後行為與切換前逐格相同
-  - **量了（`fleet-ops-02 [e3795b]`，jg-jcc2，映像 `aaae5d4`，2026-11-24 06:32–06:39，每格事前寫預期；讀數全文在 k8scc#70 的留言）**：deliver → observe → deliver，五個容器的映像摘要三次都相同；observe 時 pod 裡 `send` 回 1（403 `CHAMBER_OBSERVE`）、收得到；退回後 `send` 回 3，與切換前相同。**切換時 pod 裡沒有 session**，有 session 時的切換沒量
+- [ ] 7.4 `observe` → `deliver` 的切換與退回：退回後行為與切換前逐格相同
+  - **量了（`fleet-ops-02 [e3795b]`，jg-jcc2，映像 `aaae5d4`，2026-11-24 06:32–06:39，每格事前寫預期；讀數全文在 k8scc#70 的留言）**：deliver → observe → deliver，五個容器的映像摘要三次都相同；observe 時 pod 裡 `send` 回 1（403 `CHAMBER_OBSERVE`）、收得到；退回後 `send` 回 3，與切換前相同。**切換時 pod 裡沒有 session**，有 session 時的切換沒量；所以不勾（fleet-ops-02 驗收 #134 時要求：兩邊都沒有 session，「相同」比的是兩個 `online=no`）
 
 ## 8. 收尾
 
