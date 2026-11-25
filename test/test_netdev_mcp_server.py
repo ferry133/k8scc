@@ -2580,6 +2580,37 @@ class WatchUndoToken(WriteCase):
         self.assertEqual(self.h.fake.puts(), [])
 
 
+    def test_a_delete_token_is_bound_to_the_object_it_read(self):
+        """fleet-ops-1e on PR #144: nothing else checks a delete against what im was shown."""
+        self.read()
+        tok = self.token("delete_port_forward")["token"]
+        pf = next(p for p in self.h.fake.data["portforwards"] if p["_id"] == "pf-1")
+        was = pf.get("fwd_port")
+        pf["fwd_port"] = "9999"                      # someone edited it after im read will_change
+        self.read("get_port_forwards")
+        out = self.run_tool("delete_port_forward", reason="x", confirm=tok, **ARGS["delete_port_forward"])
+        self.assertIn("will_change is no longer", out)
+        self.assertEqual(self.h.fake.mutations(), [], "the edited object was deleted")
+        with self.subTest(control="re-read and unchanged, the delete goes through"):
+            pf["fwd_port"] = was
+            if was is None:
+                del pf["fwd_port"]
+            self.read("get_port_forwards")
+            tok = self.token("delete_port_forward")["token"]
+            self.read("get_port_forwards")
+            self.assertEqual(self.confirm("delete_port_forward", tok)["result"], "applied")
+
+    def test_a_dns_clear_token_is_bound_to_the_forward_it_read(self):
+        self.read("get_dns_records")
+        tok = self.token("clear_dns_forward")["token"]
+        rec = next(r for r in self.h.fake.data["dnsrecords"] if r.get("key") == "lab.test")
+        rec["value"] = "10.9.9.250"
+        self.read("get_dns_records")
+        out = self.run_tool("clear_dns_forward", reason="x", confirm=tok, **ARGS["clear_dns_forward"])
+        self.assertIn("will_change is no longer", out)
+        self.assertEqual(self.h.fake.mutations(), [])
+
+
 class OneWriteAtATime(WriteCase):
     """k8scc#132, 1: a write that waits must not stop the others being served."""
 

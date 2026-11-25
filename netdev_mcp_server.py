@@ -1588,11 +1588,16 @@ def _binding(plan: Plan) -> dict:
     get_clients, because the row's counters had moved (k8scc#142). Since #132
     other sessions are served during the token wait, so this needs no mistake
     of im's own. That the object's own fields did not move on the controller
-    is the snapshot's check at execute, as before."""
+    is the snapshot's check at execute, as before.
+
+    A delete is bound to the whole object it read (stripped): what is being
+    changed there is all of it, and the snapshot's check covers only create
+    and put. Without this a port forward or a DNS forward edited after im read
+    will_change would still be deleted (fleet-ops-1e on PR #144)."""
     before = plan.before or {}
     return {"tool": plan.tool, "target": plan.target, "kind": plan.kind, "collection": plan.collection,
             "obj_id": plan.obj_id, "fields": plan.fields, "was": {f: before.get(f) for f in plan.fields},
-            "command": plan.command}
+            "command": plan.command, "deleted": plan.before if plan.kind == "delete" else None}
 
 
 def _digest(data: bytes) -> str:

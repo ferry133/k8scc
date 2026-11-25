@@ -282,9 +282,12 @@ The undo accepted inside the cooldown SHALL NOT be refused because outside probe
 
 ### Requirement: A token is bound to the change, not to the cached object
 
-The digest a token is bound to SHALL be taken over the tool, the target, the kind, the changed fields with the values they had, and the command, and SHALL NOT include any other field of the cached object. A command's `will_change` SHALL show only the fields that identify its target.
+The digest a token is bound to SHALL be taken over the tool, the target, the kind, the changed fields with the values they had, and the command, and SHALL NOT include any other field of the cached object; for a delete it SHALL include the whole object as read, stripped. A command's `will_change` SHALL show only the fields that identify its target.
 
 #### Scenario: A read between the phases keeps the token
 - **WHEN** a client row's counters, or a user's `last_seen`, change and the reader is called between a token and its confirm
 - **THEN** the confirm is applied (control: other arguments, or a changed field that moved on the controller, are refused)
 
+#### Scenario: A delete token does not outlive an edit of its object
+- **WHEN** a port forward, or a DNS forward, is edited on the controller and read again between a delete's token and its confirm
+- **THEN** the confirm is refused and nothing is sent to the controller (control: read again and unchanged, a fresh token deletes it)
