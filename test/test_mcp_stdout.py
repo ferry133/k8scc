@@ -145,5 +145,74 @@ class Stdout(unittest.TestCase):
             h.close()
 
 
+class SecondSession(unittest.TestCase):
+    """k8scc#132: while one session's write waits (here for a pre-ack that
+    never comes), a second session is served. fleet-ops-1e measured the
+    opposite on jg-jcc2 (2026-11-25): a second session's `initialize` had no
+    answer 15 s into a confirm, which reads the same as a dead sidecar. The
+    server runs as shipped, as a real process, with two SSE sessions."""
+
+    WAIT = 4.0
+
+    def test_netdev_serves_a_second_session_while_a_write_waits(self):
+        h = netdev_controls.Harness()
+        try:
+            h.load(write=True, NETDEV_WITNESS_WAIT=str(self.WAIT))
+            module, port_env, shims = SERVERS["netdev"]
+            port = free_port()
+            env = dict(os.environ)
+            env["PATH"] = f"{shims}{os.pathsep}{env.get('PATH', '')}"
+            env["PYTHONUNBUFFERED"] = "1"
+            env[port_env] = str(port)
+            proc = subprocess.Popen([sys.executable, str(ROOT / f"{module}.py")], cwd=ROOT, env=env,
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            took = {}
+
+            async def writer():
+                async with sse_client(f"http://127.0.0.1:{port}/sse") as (read, write):
+                    async with ClientSession(read, write) as session:
+                        await session.initialize()
+                        await session.call_tool("get_clients", {})
+                        took["write_from"] = time.monotonic()
+                        result = await session.call_tool("block_client", {"mac": netdev_controls.PHONE, "reason": "noisy"})
+                        took["write"] = time.monotonic() - took["write_from"]
+                        return "".join(getattr(c, "text", "") for c in result.content)
+
+            async def second():
+                while "write_from" not in took:
+                    await asyncio.sleep(0.05)
+                await asyncio.sleep(1.0)
+                start = time.monotonic()
+                async with sse_client(f"http://127.0.0.1:{port}/sse") as (read, write):
+                    async with ClientSession(read, write) as session:
+                        await session.initialize()
+                        took["initialize"] = time.monotonic() - start
+                        result = await session.call_tool("get_clients", {})
+                        took["read"] = time.monotonic() - start
+                        took["read_done_after_write_began"] = time.monotonic() - took["write_from"]
+                        return "".join(getattr(c, "text", "") for c in result.content)
+
+            async def both():
+                return await asyncio.gather(writer(), second())
+
+            try:
+                wait_listening(proc, port, "netdev")
+                token, read = asyncio.run(asyncio.wait_for(both(), 60))
+            finally:
+                proc.terminate()
+                out, err = proc.communicate(timeout=10)
+            self.assertIn("write tools: registered", err)
+            self.assertIn("netdev-mcp: open tickets: 0 of this cluster's", err, "start-up did not look at the tickets")
+            self.assertIn('"token"', token, token)
+            self.assertGreater(took["write"], self.WAIT - 0.5, "control: the write did wait for the witness")
+            self.assertTrue(read.startswith("[via "), read)
+            self.assertLess(took["initialize"], 2.0, took)
+            self.assertLess(took["read_done_after_write_began"], self.WAIT - 0.5,
+                            f"the second session was answered only when the write was done: {took}")
+            self.assertEqual([json.loads(l)["phase"] for l in out.splitlines()], ["token"])
+        finally:
+            h.close()
+
+
 if __name__ == "__main__":
     unittest.main()

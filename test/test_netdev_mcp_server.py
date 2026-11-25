@@ -299,6 +299,7 @@ class FakeFAC:
         self.fail = False
         self.fail_comment = None
         self.no_id_for = None       # a server comment containing this is stored, and answered without an id
+        self.fail_listing = False   # GET issues (what start-up reads) answers 502
         fake = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -323,6 +324,11 @@ class FakeFAC:
                     return self._send(500, {"message": "forced"})
                 parts = urlsplit(self.path).path.split("/")   # '', repos, owner, repo, issues, [n], [comments]
                 body = self._body() if self.command in ("POST", "PATCH") else None
+                if parts[4:] == ["issues"] and self.command == "GET":
+                    if fake.fail_listing:
+                        return self._send(502, {"message": "forced for the listing"})
+                    return self._send(200, [{"number": n, "title": i["title"], "body": i["body"], "state": i["state"]}
+                                            for n, i in fake.issues.items() if i["state"] == "open"])
                 if parts[4:] == ["issues"] and self.command == "POST":
                     n = len(fake.issues) + 1
                     fake.issues[n] = {"title": body["title"], "body": body["body"], "state": "open", "comments": []}
@@ -1589,7 +1595,7 @@ class DeadMan(WriteCase):
         self.assertIn("result: reverted", self.last_comment())
         self.assertIn("outbound: lost", self.last_comment())
         self.assertEqual(self.h.fac.issues[1]["state"], "closed")
-        self.assertEqual(self.phases("users/u-tv"), ["token", "execute", "reverted"])
+        self.assertEqual(self.phases("users/u-tv"), ["token", "applying", "execute", "reverted"])
 
     def test_probes_kept_up_applies_without_revert(self):
         self.h.fac.pre_ack = self.h.fac.post_ack = True
@@ -1598,7 +1604,7 @@ class DeadMan(WriteCase):
         res = self.write("set_dhcp_reservation")
         self.assertEqual((res["result"], res["outbound"], res["fac_witness"]), ("applied", "ok", "ok"))
         self.assertEqual(len(self.h.fake.puts()), 1, "no snapshot PUT")
-        self.assertEqual(self.phases("users/u-tv"), ["token", "execute"])
+        self.assertEqual(self.phases("users/u-tv"), ["token", "applying", "execute"])
 
     def test_one_probe_lost_is_degraded_not_reverted(self):
         def hook(m, path, body):
@@ -1914,14 +1920,15 @@ class DeadMan(WriteCase):
         self.read()
         self.write("set_dhcp_reservation", reason="pin the tv")
         lines = [a for a in self.audit if a["target"] == "users/u-tv"]
-        self.assertEqual([a["phase"] for a in lines], ["token", "execute", "reverted"])
+        self.assertEqual([a["phase"] for a in lines], ["token", "applying", "execute", "reverted"])
         self.assertEqual({a["stated_reason"] for a in lines}, {"pin the tv"})
         files = list(self.h.snapshots.iterdir())
         self.assertEqual(len(files), 1)
         digest = hashlib.sha256(files[0].read_bytes()).hexdigest()
-        self.assertEqual([a["snapshot_digest"] for a in lines[1:]], [digest, digest])
+        self.assertEqual([a["snapshot_digest"] for a in lines[1:]], [digest, digest, digest])
         self.assertEqual(lines[0]["health"], [])
-        for a in lines[1:]:
+        self.assertEqual(lines[1]["health"], [], "applying is written before any health round")
+        for a in lines[2:]:
             self.assertLessEqual({"controller", "apiserver", "readback"}, set(a["health"]))
             self.assertNotIn("probes", a["health"])
         self.assertEqual(len({a["diff_digest"] for a in lines}), 1)
@@ -2108,7 +2115,7 @@ class DnsForwards(WriteCase):
                                                                  "value": self.TARGET, "port": 0, "enabled": True})])
         self.assertIn("home.test", self.h.dns.asked(self.TARGET), "the target was asked before the token")
         self.assertIn("home.test", self.h.dns.asked(GATEWAY_RESOLVER), "the LAN resolver was asked in health")
-        self.assertEqual(self.phases("dnsrecords/home.test"), ["token", "execute"])
+        self.assertEqual(self.phases("dnsrecords/home.test"), ["token", "applying", "execute"])
         with self.subTest(control="every write went to v2, none to a legacy rest path"):
             self.assertFalse([p for _, p, _ in self.h.fake.mutations() if p.startswith(LEGACY + "/rest/")])
 
@@ -2181,7 +2188,7 @@ class DnsForwards(WriteCase):
         self.assertEqual([m for m, _, _ in self.dns_writes()], ["POST", "DELETE"])
         self.assertEqual(self.dns_writes()[1][1], f"{DNS_PATH}/new-1")
         self.assertEqual([r["_id"] for r in self.h.fake.data["dnsrecords"]], ["dns-a-nas", "dns-fwd-lab"])
-        self.assertEqual(self.phases("dnsrecords/home.test"), ["token", "execute", "reverted"])
+        self.assertEqual(self.phases("dnsrecords/home.test"), ["token", "applying", "execute", "reverted"])
 
     def test_cleared_forward_recreated_when_the_lan_resolver_fails(self):
         self.h.fake.on_write = lambda m, p, b: self.h.dns.modes.__setitem__(GATEWAY_RESOLVER, "refused")
@@ -2340,11 +2347,303 @@ class DnsForwards(WriteCase):
             self.assertIn("token", self.token("set_dns_forward"))
 
     def test_one_cooldown_for_set_and_clear_of_one_domain(self):
+        """One cooldown per domain; the only way through it is taking the last
+        write back, once (k8scc#132). The first version of this cell asserted
+        the word "cooldown", which a token's `cooldown_after` also carries."""
         self.takes_effect("lab.test", None)
         self.read("get_dns_records")
         self.assertEqual(self.write("clear_dns_forward")["result"], "applied")
         self.read("get_dns_records")
-        self.assertIn("cooldown", self.run_tool("set_dns_forward", reason="x", domain="lab.test", target=self.NEW))
+        again = self.run_tool("clear_dns_forward", reason="x", domain="lab.test")
+        self.assertTrue(again.startswith("refused: "), again)   # nothing left to clear, or the cooldown: not a token
+        self.takes_effect("lab.test", self.NEW)
+        back = self.write("set_dns_forward", domain="lab.test", target=self.NEW)
+        self.assertEqual(back["result"], "applied", back)
+        self.read("get_dns_records")
+        for tool, args in (("clear_dns_forward", {"domain": "lab.test"}),
+                           ("set_dns_forward", {"domain": "lab.test", "target": "10.9.9.201"})):
+            out = self.run_tool(tool, reason="x", **args)
+            self.assertRegex(out, r"^refused: dnsrecords/lab\.test was written \d+ s ago; cooldown is 600 s", tool)
+            self.assertNotIn("the one exception", out)
+
+
+class OneWriteAtATime(WriteCase):
+    """k8scc#132, 1: a write that waits must not stop the others being served."""
+
+    def slow_health(self):
+        """A confirm whose health loop runs its whole window: the witness is
+        armed and FAC never post-acks."""
+        self.h.fac.pre_ack = True
+        self.m.HEALTH_TIMEOUT = 2.0
+        self.read()
+        return self.token("set_dhcp_reservation")["token"]
+
+    def test_a_read_is_answered_while_a_write_is_in_its_health_loop(self):
+        tok = self.slow_health()
+        done = {}
+
+        async def call(name, args, delay=0.0):
+            await asyncio.sleep(delay)
+            await self.m.app.call_tool(name, args)
+            done[name] = time.monotonic()
+
+        async def both():
+            await asyncio.gather(
+                call("set_dhcp_reservation", {**ARGS["set_dhcp_reservation"], "reason": "x", "confirm": tok}),
+                call("get_clients", {}, delay=0.3))
+
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            started = time.monotonic()
+            asyncio.run(both())
+        phases = [json.loads(l)["phase"] for l in buf.getvalue().splitlines()]
+        self.assertEqual(phases, ["applying", "execute", "reverted"], "control: the write did run its window")
+        self.assertGreater(done["set_dhcp_reservation"] - started, 1.9, "control: the write took the health window")
+        self.assertLess(done["get_clients"] - started, 1.5, "the read waited for the write")
+        self.assertLess(done["get_clients"], done["set_dhcp_reservation"])
+
+    def test_every_tool_is_registered_as_a_coroutine_with_its_own_arguments(self):
+        tools = {t.name: t for t in asyncio.run(self.m.app.list_tools())}
+        self.assertEqual(set(tools), READ_TOOLS | WRITE_TOOLS)
+        for name, tool in tools.items():
+            registered = self.m.app._tool_manager.get_tool(name)
+            self.assertTrue(registered.is_async, name)
+        self.assertEqual(set(tools["set_dhcp_reservation"].inputSchema["properties"]), {"mac", "ip", "reason", "confirm"})
+        self.assertEqual(set(tools["get_clients"].inputSchema["properties"]), set())
+        self.assertIn("DHCP", tools["set_dhcp_reservation"].description)
+
+    def test_a_second_write_is_refused_at_once_and_says_who_is_running(self):
+        tok = self.slow_health()
+        self.read("get_clients")
+        first = {}
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            t = threading.Thread(target=lambda: first.update(out=self.m.set_dhcp_reservation(
+                reason="x", confirm=tok, **ARGS["set_dhcp_reservation"])))
+            t.start()
+            time.sleep(0.4)
+            started = time.monotonic()
+            second = self.m.block_client(reason="noisy", **ARGS["block_client"])
+            took = time.monotonic() - started
+            read = self.m.get_clients()
+            t.join()
+        self.assertRegex(second, r"^refused: another write is in progress \(set_dhcp_reservation users/\S+, confirm phase, "
+                                 r"started \d+ s ago\)")
+        self.assertLess(took, 0.5, "the second write waited instead of being refused")
+        self.assertTrue(read.startswith("[via "), read)
+        self.assertEqual(json.loads(first["out"])["result"], "reverted")
+        lines = [json.loads(l) for l in buf.getvalue().splitlines()]   # every line whole, though two threads wrote
+        self.assertEqual([(a["tool"], a["phase"]) for a in lines],
+                         [("set_dhcp_reservation", "applying"), ("block_client", "refused"),
+                          ("set_dhcp_reservation", "execute"), ("set_dhcp_reservation", "reverted")])
+        self.assertEqual(len(self.h.fac.issues), 1, "the refused write opened no ticket")
+        with self.subTest(control="once the first has returned, the same call gets its token"):
+            self.assertIn("token", self.token("block_client"))
+
+    def test_a_write_that_raises_still_frees_the_next_one(self):
+        self.read()
+        tok = self.token("set_dhcp_reservation")["token"]
+        def boom(*a, **k):
+            raise RuntimeError("forced")
+        health, self.m._health = self.m._health, boom
+        with self.assertRaises(RuntimeError):
+            self.run_tool("set_dhcp_reservation", reason="x", confirm=tok, **ARGS["set_dhcp_reservation"])
+        self.m._health = health
+        self.assertIn("token", self.token("block_client"))
+
+
+class Interrupted(WriteCase):
+    """k8scc#132, 2: the record at apply time, and what start-up does with the
+    tickets a stopped sidecar left open."""
+
+    def die_in_health(self, tool="set_dhcp_reservation"):
+        """A confirm that gets as far as health and then stops like a killed
+        process: nothing after _apply runs."""
+        self.read()
+        tok = self.token(tool)["token"]
+        class Killed(BaseException):
+            pass
+        def kill(*a, **k):
+            raise Killed()
+        self.m._health = kill
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf), self.assertRaises(Killed):
+            getattr(self.m, tool)(reason="the customer asked", confirm=tok, **ARGS[tool])
+        return [json.loads(l) for l in buf.getvalue().splitlines()]
+
+    def restart(self):
+        self.m = self.h.load(write=True)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            lines = self.m._recover_tickets()
+        return lines, [json.loads(l) for l in buf.getvalue().splitlines()]
+
+    def test_the_applying_line_is_written_before_the_change_is_sent(self):
+        seen = {}
+        self.read()
+        tok = self.token("set_dhcp_reservation")["token"]
+        self.h.fake.on_write = lambda m, path, body: seen.setdefault("at_put", [a["phase"] for a in self.audit_now()])
+        buf = self._buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            self.m.set_dhcp_reservation(reason="pin the tv", confirm=tok, **ARGS["set_dhcp_reservation"])
+        lines = self.audit_now()
+        self.assertEqual(seen["at_put"], ["applying"], "the line was not on stdout when the PUT arrived")
+        line = lines[0]
+        self.assertEqual((line["tool"], line["target"], line["stated_reason"], line["ticket"]),
+                         ("set_dhcp_reservation", "users/u-tv", "pin the tv", 1))
+        self.assertEqual(line["snapshot_digest"], lines[1]["snapshot_digest"])
+        self.assertRegex(line["snapshot_digest"], r"^[0-9a-f]{64}$")
+        self.assertEqual(line["diff_digest"], lines[1]["diff_digest"])
+
+    def audit_now(self):
+        return [json.loads(l) for l in self._buf.getvalue().splitlines()]
+
+    def test_a_write_the_controller_refuses_has_applying_then_aborted(self):
+        self.read()
+        tok = self.token("set_dhcp_reservation")["token"]
+        apply_, self.m._apply = self.m._apply, lambda plan, snap: ("", "api.err.Invalid", False)
+        res = self.confirm("set_dhcp_reservation", tok)
+        self.m._apply = apply_
+        self.assertEqual(res["result"], "aborted")
+        self.assertEqual(self.phases("users/u-tv"), ["token", "applying", "aborted"])
+
+    def test_a_killed_write_is_found_at_startup_and_left_for_a_person(self):
+        audit = self.die_in_health()
+        self.assertEqual([a["phase"] for a in audit], ["applying"])
+        self.assertEqual([h for _, h in self.h.fac.thread(1)], ["netdev-mcp applying"])
+        self.assertEqual(len(self.h.fake.puts()), 1, "control: the change did reach the controller")
+        lines, audit = self.restart()
+        self.assertEqual(lines[0], "open tickets: 1 of this cluster's")
+        self.assertRegex(lines[1], r"^ticket #1 \(set_dhcp_reservation users/u-tv\): INTERRUPTED write, said so on the "
+                                   r"ticket, left open; users/u-tv is in cooldown$")
+        self.assertEqual([h for _, h in self.h.fac.thread(1)], ["netdev-mcp applying", "netdev-mcp interrupted"])
+        self.assertIn("result: interrupted", self.last_comment())
+        self.assertEqual(self.h.fac.issues[1]["state"], "open")
+        self.assertEqual([(a["phase"], a["tool"], a["target"], a["ticket"], a["stated_reason"]) for a in audit],
+                         [("interrupted", "set_dhcp_reservation", "users/u-tv", 1, "the customer asked")])
+        self.assertEqual(self.h.fake.mutations(), [], "start-up sent something to the controller")
+        self.read()
+        out = self.run_tool("set_dhcp_reservation", reason="again", **ARGS["set_dhcp_reservation"])
+        self.assertRegex(out, r"^refused: users/u-tv was written \d+ s ago; cooldown is 600 s")
+        self.assertNotIn("the one exception", out)
+        self.assertIn("refused: users/u-tv", self.run_tool("clear_dhcp_reservation", reason="undo", mac=TV))
+        with self.subTest(control="another target is not in cooldown"):
+            self.assertIn("token", self.token("block_client"))
+        with self.subTest("a second start says so and comments nothing more"):
+            n = len(self.h.fac.issues[1]["comments"])
+            lines, audit = self.restart()
+            self.assertIn("open with a `interrupted` comment, left as it is", lines[1])
+            self.assertEqual(len(self.h.fac.issues[1]["comments"]), n)
+            self.assertEqual(audit, [])
+
+    def test_a_token_lost_in_the_restart_is_released_as_not_executed(self):
+        self.read()
+        self.token("set_dhcp_reservation")
+        self.assertEqual(self.h.fac.issues[1]["state"], "open")
+        lines, audit = self.restart()
+        self.assertIn("ticket #1 (set_dhcp_reservation users/u-tv): a token lost in the restart, released as not-executed",
+                      lines)
+        self.assertEqual(self.h.fac.issues[1]["state"], "closed")
+        self.assertIn("result: not-executed", self.last_comment())
+        self.assertIn("the sidecar restarted", self.last_comment())
+        self.assertEqual(audit, [])
+        self.read()
+        self.assertIn("token", self.token("set_dhcp_reservation"), "a lost token must not start a cooldown")
+
+    def test_startup_leaves_every_other_ticket_alone(self):
+        fac = self.h.fac
+        def issue(title, state="open", comments=()):
+            n = len(fac.issues) + 1
+            fac.issues[n] = {"title": title, "body": "stated_reason: x", "state": state,
+                             "comments": [{"id": 5000 + n * 10 + i, "body": b} for i, b in enumerate(comments)]}
+            return n
+        other = issue("[netdev] another-cluster block_client clients/aa", comments=["netdev-mcp applying"])
+        longer = issue("[netdev] jg-test-2 block_client clients/aa", comments=["netdev-mcp applying"])
+        closed = issue("[netdev] jg-test block_client clients/bb", state="closed", comments=["netdev-mcp applying"])
+        failed = issue("[netdev] jg-test restart_device devices/cc",
+                       comments=["netdev-mcp applying", "netdev-mcp revert-failed\nresult: revert-failed"])
+        person = issue("a question from a person", comments=["netdev-mcp applying"])
+        quoted = issue("[netdev] jg-test block_client clients/dd",
+                       comments=["pre-ack: fleet-ops-1e", "FAC here, I saw: netdev-mcp applying"])
+        before = json.dumps(fac.issues, sort_keys=True, default=sorted)
+        lines, audit = self.restart()
+        after = fac.issues
+        for n in (other, longer, closed, failed, person):
+            self.assertEqual(json.dumps(after[n], sort_keys=True, default=sorted),
+                             json.dumps(json.loads(before)[str(n)], sort_keys=True), n)
+        self.assertEqual(lines[0], "open tickets: 2 of this cluster's")
+        self.assertIn("ticket #%d (restart_device devices/cc): open with a `revert-failed` comment, left as it is" % failed, lines)
+        # a comment that only quotes the words is not the server's: this one is a lost token
+        self.assertEqual(after[quoted]["state"], "closed")
+        self.assertEqual(audit, [])
+
+    def test_an_unreadable_listing_is_said_and_stops_nothing(self):
+        self.die_in_health()
+        self.h.fac.fail_listing = True
+        lines, audit = self.restart()
+        self.assertEqual(len(lines), 1)
+        self.assertRegex(lines[0], r"^open tickets: unreadable \(.*502.*\); a write interrupted before this start was not looked for$")
+        self.assertEqual(audit, [])
+        self.assertNotIn(TICKET_TOKEN, lines[0])
+
+    def test_reader_only_looks_for_nothing(self):
+        self.m = self.h.load(write=True, UNIFI_OPERATOR_FILE=None)
+        self.h.fac.tokens.clear()
+        self.assertEqual(self.m._recover_tickets(), [])
+        self.assertEqual(self.h.fac.tokens, [])
+
+
+class UndoInsideTheCooldown(WriteCase):
+    """k8scc#132, 3: a set and its clear share one cooldown; the last applied
+    write may be taken back once inside it."""
+
+    def test_a_reservation_can_be_taken_back_once(self):
+        self.read()
+        self.assertEqual(self.write("set_dhcp_reservation")["result"], "applied")
+        self.read()
+        again = self.run_tool("set_dhcp_reservation", reason="x", mac=TV, ip="10.9.9.132")
+        self.assertRegex(again, r"^refused: users/u-tv was written \d+ s ago; cooldown is 600 s, \d+ s left; the one "
+                                r"exception is taking that write back: clear_dhcp_reservation, once$")
+        res = self.write("clear_dhcp_reservation", mac=TV)
+        self.assertEqual(res["result"], "applied", res)
+        self.assertEqual(len(self.h.fac.issues), 2, "the undo is a write with its own ticket")
+        self.assertEqual(self.phases("users/u-tv"),
+                         ["token", "applying", "execute", "refused", "token", "applying", "execute"])
+        self.read()
+        for tool, args in (("set_dhcp_reservation", ARGS["set_dhcp_reservation"]), ("clear_dhcp_reservation", {"mac": TV})):
+            out = self.run_tool(tool, reason="x", **args)
+            self.assertTrue(out.startswith("refused: "), out)
+            self.assertNotIn("the one exception", out)
+        self.assertNotIn("token", self.run_tool("set_dhcp_reservation", reason="x", **ARGS["set_dhcp_reservation"]))
+
+    def test_the_undo_counts_against_the_hourly_ceiling(self):
+        self.m.WRITES_PER_HOUR = 1
+        self.read()
+        self.assertEqual(self.write("set_dhcp_reservation")["result"], "applied")
+        self.read()
+        self.assertIn("hourly ceiling reached", self.run_tool("clear_dhcp_reservation", reason="undo", mac=TV))
+
+    def test_a_reverted_write_opens_no_exception(self):
+        self.lose_two_probes_on("PUT")
+        self.read()
+        self.assertEqual(self.write("clear_dhcp_reservation")["result"], "reverted")
+        self.read()
+        out = self.run_tool("set_dhcp_reservation", reason="undo", mac=PHONE, ip="10.9.9.140")
+        self.assertRegex(out, r"^refused: users/u-phone was written \d+ s ago; cooldown is 600 s, \d+ s left$")
+        with self.subTest(control="without the cooldown the same call gets as far as the probes (two are still down)"):
+            self.m._LAST_WRITE.clear()
+            self.assertIn("refused: baseline unhealthy",
+                          self.run_tool("set_dhcp_reservation", reason="undo", mac=PHONE, ip="10.9.9.140"))
+
+    def test_block_and_unblock_are_a_pair_and_restart_has_none(self):
+        self.read()
+        self.assertEqual(self.write("block_client")["result"], "applied")
+        self.read()
+        self.assertEqual(self.write("unblock_client")["result"], "applied")
+        self.assertEqual(self.write("restart_device")["result"], "applied")
+        self.read()
+        out = self.run_tool("restart_device", reason="again", **ARGS["restart_device"])
+        self.assertRegex(out, r"cooldown is 600 s, \d+ s left$")
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
