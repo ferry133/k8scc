@@ -20,9 +20,12 @@
 - [x] 2.1 `chamber/chamber`、`chamber/directive-verify` 進 repo；`Dockerfile` COPY 到 `/usr/local/bin/`
   - **做了（2026-11-19 06:43，`k8scc-0f [7c5b85]`）**：以 Mac 側當下的位元組進 repo——`chamber` sha256 `6f7ce8a2d00f9e19…`、`directive-verify` `a58e8189b42f7670…`（兩側各量一次，`fleet-ops-98 [047e9c]` 06:42 量到相同）。**沒有在檔頭加來源註記**：正本裁定住這裡（2.4），加了就不再逐位元組相同，而雜湊已記在這一行。`test/chamber-controls.sh` 20 格（出貨、起得來、用戶端的 1 與 2 分得開、固定 sk-ecdsa 向量的 0／1／2），四個變異各自轉紅（拿掉 COPY；驗不過當通過；沒有清單當失敗；連不上當失敗）。向量在 `test/chamber-vectors/sk-ecdsa/`
   - **沒量**：映像還沒建，所以「在映像裡起得來」這次沒量（tasks 1.1 量的是以 stdin 帶進 pod 的同一份 `directive-verify`；`chamber` 在 pod 裡沒跑過）
-- [ ] 2.2 對照測試進 `test/`（用戶端 20 格、驗章 24 格＋只用一次 13 格、變異各一支）；CI 對一台本機拋棄式伺服器跑。伺服器起不來 ⇒ 那幾格是「量不到」，CI 不算綠
+- [x] 2.2 對照測試進 `test/`（用戶端 20 格、驗章 24 格＋只用一次 13 格、變異各一支）；CI 對一台本機拋棄式伺服器跑。伺服器起不來 ⇒ 那幾格是「量不到」，CI 不算綠
   - **範圍寫明（`fleet-ops-98 [047e9c]` 驗收 #74 時指出，2026-11-19）**：`test/chamber-controls.sh` 的 20 格裡 `--relayed` 與撤銷清單是 0 格、`--use` 只有 1 格。那些格（以及 `transcript:` 的 28 格）現在只在 Mac 側的 bench。搬過來時要改兩處：它們載入 `directive-sign`（不在本 repo，也不該進映像），而且測試字串裡有叢集名（本 repo 是公開的）
   - **驗章的那一半做了（2026-11-25，`k8scc-bf [97703c]`）；這一項不勾，用戶端對真伺服器的 20 格還沒有**。`test/test_chamber_tools.py` 多 40 格：D1–D17（簽章形式，搬自 Mac 側的 `directive-test.py`，多一格 `CHAMBER_ACCOUNT`）、R1–R4（撤銷清單，#74 驗收時指出是 0 格）、O1–O7c（只用一次，搬自 `once-test.py`）。金鑰在測試時產生；header 是 `directive-sign` 格式的第二份定義（D1 是它的正對照）；測試字串不含叢集名。十四個變異各紅一次（Mac 側原有的九加三，另加「不讀 `CHAMBER_ACCOUNT`」「不用撤銷清單」）
+  - **用戶端的那一半做了（2026-11-25，`k8scc-bf [97703c]`），據此勾**。`test/test_chamber_client_server.py`：測試時產生一台拋棄式 Synapse（loopback、http、五個帳號、三間房，跑完全刪），對它跑出貨的 `chamber/chamber`，20 格，搬自 Mac 側的 `chamber-test.py`。帳號改名（不含人名與叢集名），伺服器在測試裡自己建，不掛 guard 模組（那是生產伺服器的邀請規則，不是用戶端的）。三種結果：0／1／2，起不來是 2，CI 當紅。兩個 workflow 都跑，釘 `matrix-synapse==1.165.0`（Mac 側 bench 的版本）。讀數：本機 Synapse 1.143.0 上 20/20；CI 上 1.165.0 上 20/20
+  - **變異**：`test/chamber-client-mutate.py`（六個，搬自 `chamber-mutate.py`；不進 CI，每個變異起一台伺服器）。第一輪在兩個版本上都有一個存活：「`wait` 又相信 initial sync 的位置」。成因是那一格之前沒有人做過 initial sync，所以沒有快取的舊位置可以錯；在過期訊息之前加一個 1 秒的 `wait` 之後，六個在本機（1.143.0）與 CI（1.165.0，臨時步驟，合併前拿掉）都被抓到
+  - **沒量**：https（伺服器只聽 loopback 的 http）；bridge 的 socket 形式對真的伺服器；`members`、`--unanswered`；生產的 Synapse 版本是不是 1.165.0 沒有查
   - **沒搬的**：固定的 sk-ecdsa 向量（已在 `test/chamber-controls.sh`）、經真房間來回的 19a／19b、`directive-sign` 自己的拒絕（那支不在本 repo）、`transcript:` 的 28 格（這裡只有 T1–T8 與 O7）。**用戶端 20 格要一台拋棄式伺服器，CI 裡還沒有**；現有的用戶端格都對手寫的假伺服器
 - [x] 2.3 `directive-verify` 在映像裡的預設：公鑰清單讀 `CHAMBER_SIGNERS_DIR`；`transcript:` 指標一律回 2（映像裡沒有別人的 transcript——確認不是剛好找不到，是不找）
   - **做了（2026-11-19 06:50，`k8scc-0f [7c5b85]`）**：`CHAMBER_SIGNERS_DIR` 有值時預設清單是 `<dir>/allowed_signers`（`--signers` 仍然贏；撤銷清單照舊是清單旁的 `revoked_signers`）。`CHAMBER_TRANSCRIPTS=off` 時每個指標回 2，在找任何檔之前就回，訊息說的是「這台主機不讀」而不是「找不到」。`Dockerfile` 以 `ENV` 設這兩個。`test/test_chamber_tools.py` V1–V5、T1–T8、I1–I2
