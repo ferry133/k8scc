@@ -2,3 +2,6 @@
 
 # Claude Code local permissions: per machine, never shared (k8scc#110)
 .claude/settings.local.json
+
+# Python bytecode from running the controls (three of these were committed by mistake in PR #141)
+__pycache__/
