@@ -111,6 +111,10 @@ SNAPSHOT_DIR = os.environ.get("NETDEV_SNAPSHOT_DIR", "").strip()
 SNAPSHOT_KEEP = int(os.environ.get("NETDEV_SNAPSHOT_KEEP", "50"))
 HEALTH_TIMEOUT = float(os.environ.get("NETDEV_HEALTH_TIMEOUT", "120"))
 HEALTH_INTERVAL = float(os.environ.get("NETDEV_HEALTH_INTERVAL", "10"))
+# How long after the apply a passing health round first counts (k8scc#142).
+# 30 is a margin, not a measurement: the one reading is a Wi-Fi block that
+# bit 3 s after it was sent (fleet-ops-1e, FAC1, 2026-11-25).
+HEALTH_MIN = float(os.environ.get("NETDEV_HEALTH_MIN", "30"))
 WRITES_PER_HOUR = int(os.environ.get("NETDEV_WRITES_PER_HOUR", "12"))
 WITNESS_WAIT = float(os.environ.get("NETDEV_WITNESS_WAIT", "120"))
 WITNESS_POLL = float(os.environ.get("NETDEV_WITNESS_POLL", "5"))
@@ -1294,8 +1298,13 @@ def _probe(p: Probe) -> str:
     return "" if resp.status_code // 100 in (2, 3) else f"{p.raw}: answered {resp.status_code}"
 
 
+def _probes_down() -> dict:
+    """probe (as configured) -> why it did not answer; empty when all did."""
+    return {p.raw: why for p, why in ((p, _probe(p)) for p in PROBES) if why}
+
+
 def _probes_lost() -> list[str]:
-    return [why for why in (_probe(p) for p in PROBES) if why]
+    return list(_probes_down().values())
 
 
 def _outbound(lost: list) -> str:
@@ -1560,8 +1569,30 @@ def _will_change(plan: Plan) -> dict:
         return {"before": None, "after": dict(plan.fields), "changed": sorted(plan.fields)}
     if plan.kind == "delete":
         return {"before": plan.before, "after": None, "changed": ["(deleted)"]}
-    return {"before": plan.before, "after": None, "command": plan.command,
+    # A command shows what identifies its target, not the whole cached row: a
+    # stat/sta row carries counters (uptime, bytes), and will_change is a
+    # statement about the change, not a reading of the client (k8scc#142).
+    shown = {k: plan.before[k] for k in COMMAND_SHOWS if k in (plan.before or {})}
+    return {"before": shown, "after": None, "command": plan.command,
             "undo": plan.inverse or "none: this cannot be undone"}
+
+
+COMMAND_SHOWS = ("_id", "id", "mac", "macAddress", "name", "hostname", "ip", "ipAddress", "blocked", "type", "model")
+
+
+def _binding(plan: Plan) -> dict:
+    """What a token is bound to: the tool, the target, and the change itself
+    (each changed field with the value it had), never the rest of the cached
+    object. The digest used to be taken over will_change, which holds the whole
+    row: fleet-ops-1e's block token was voided by another session's
+    get_clients, because the row's counters had moved (k8scc#142). Since #132
+    other sessions are served during the token wait, so this needs no mistake
+    of im's own. That the object's own fields did not move on the controller
+    is the snapshot's check at execute, as before."""
+    before = plan.before or {}
+    return {"tool": plan.tool, "target": plan.target, "kind": plan.kind, "collection": plan.collection,
+            "obj_id": plan.obj_id, "fields": plan.fields, "was": {f: before.get(f) for f in plan.fields},
+            "command": plan.command}
 
 
 def _digest(data: bytes) -> str:
@@ -1973,10 +2004,20 @@ class Health:
     dns_effect: str = ""   # DNS forwards only: 'in effect' or 'unmeasured: …' (k8scc#112)
 
 
-def _health(plan: Plan, created_id: str, number: int, witness: str, applying=None) -> Health:
+def _health(plan: Plan, created_id: str, number: int, witness: str, applying=None, tolerate=()) -> Health:
     """Every HEALTH_INTERVAL until HEALTH_TIMEOUT: the first round in which every
-    check passes ends it. A breakage that shows only after that round is not
-    seen here — that is what FAC's post-ack is for."""
+    check passes, HEALTH_MIN or more after the apply, ends it. A breakage that
+    shows only after that is not seen here — that is what FAC's post-ack is for.
+
+    The minimum is k8scc#142: with no witness armed nothing made the loop wait,
+    the first round passed about a second after the request, and a block that
+    bit two seconds later ended `applied` with every probe down.
+
+    `tolerate`: the probes that were already down when this write's token was
+    issued (only an undo gets a token then). Such a write fails the probe
+    check only when a probe outside that set is lost, so it is never reverted
+    back into the change it is taking back for the outage it started from."""
+    since_apply = _clock()
     if plan.dns_domain:
         # the forward lands ~30 s late and the gateway's resolver reloads
         # (k8scc#67 finding 8): a round before that would pass on the old state
@@ -2007,9 +2048,15 @@ def _health(plan: Plan, created_id: str, number: int, witness: str, applying=Non
                     failed.append(f"dns: not in effect: {detail}")
                 else:
                     effect = f"unmeasured: {detail}"   # neither a pass nor a failure
-        lost = _probes_lost()
+        down = _probes_down()
+        lost = list(down.values())
         outbound = _outbound(lost)
-        (failed.append("probes: " + "; ".join(lost)) if len(lost) >= 2 else passed.append("probes"))
+        if tolerate:
+            worse = [why for raw, why in down.items() if raw not in tolerate]
+            (failed.append("probes: lost since this undo's baseline: " + "; ".join(worse)) if worse
+             else passed.append("probes (no worse than at the baseline)"))
+        else:
+            (failed.append("probes: " + "; ".join(lost)) if len(lost) >= 2 else passed.append("probes"))
         seen = witness
         if witness == "armed":
             try:
@@ -2018,9 +2065,9 @@ def _health(plan: Plan, created_id: str, number: int, witness: str, applying=Non
                 acked = False
             seen = "ok" if acked else "lost"
             (passed.append("post-ack") if acked else failed.append("post-ack: not (yet) on the ticket"))
-        if not failed:
+        if not failed and (_clock() - since_apply >= HEALTH_MIN or _clock() >= deadline):
             return Health(True, passed, failed, outbound, seen, effect)
-        if _clock() >= deadline:
+        if failed and _clock() >= deadline:
             return Health(False, passed, failed, outbound, seen, effect)
         _sleep(HEALTH_INTERVAL)
 
@@ -2209,12 +2256,19 @@ def _write_one(tool: str, hint: str, reason: str, confirm: str, build) -> str:
         return refuse(f"class A: {why} — im is the only agent that can revert from inside the LAN, and this "
                       "would lock it out", target)
     change = _will_change(plan)
-    diff_digest = _digest(_canonical(change))
+    diff_digest = _digest(_canonical(_binding(plan)))
 
     if not confirm:
         # W1: a healthy baseline, and the ticket out of the LAN, before any token
-        lost = _probes_lost()
-        if lost:
+        down = _probes_down()
+        lost = list(down.values())
+        # The one write that may start from an unhealthy baseline is the undo
+        # of an applied write (k8scc#142): fleet-ops-1e's block took the probes
+        # down, and the unblock was then refused because the probes were down.
+        # It still needs its ticket; when the applied write cut the way out,
+        # the ticket cannot be opened and there is still no path. Whether an
+        # undo may run without a ticket is not decided here.
+        if lost and not undo:
             return refuse("baseline unhealthy, not writing: outside probe(s) not answering: " + "; ".join(lost),
                           target, outbound=_outbound(lost), diff_digest=diff_digest)
         deadline = now + WITNESS_WAIT + TOKEN_TTL + HEALTH_TIMEOUT
@@ -2223,23 +2277,28 @@ def _write_one(tool: str, hint: str, reason: str, confirm: str, build) -> str:
                                   _ticket_body(plan, _strip(change), stated, deadline))
         except TicketError as exc:
             return refuse(f"could not open the ticket on the im→FAC channel, not writing: {exc}", target,
-                          outbound="ok", diff_digest=diff_digest)
+                          outbound=_outbound(lost), diff_digest=diff_digest)
         # W3: a witness if FAC is there; its absence is a reading, not a gate
         witness = _wait_pre_ack(number)
         now = _now()
         token = secrets.token_urlsafe(24)
         _TOKENS[token] = {"tool": tool, "target": target, "diff": diff_digest, "expires": now + TOKEN_TTL,
-                          "ticket": number, "witness": witness}
-        _audit(tool, target, "token", stated, diff_digest=diff_digest, outbound="ok", fac_witness=witness, ticket=number)
+                          "ticket": number, "witness": witness, "tolerate": sorted(down)}
+        _audit(tool, target, "token", stated, diff_digest=diff_digest, outbound=_outbound(lost), fac_witness=witness,
+               ticket=number)
         _expire_later(token)
         _prune_tokens(now, keep=token)
         return _respond({
             "token": token, "target": target, "expires_in": TOKEN_TTL, "cooldown_after": WRITE_COOLDOWN,
             "ticket": number, "fac_witness": witness, "will_change": _strip(change),
+            **({"baseline": ("outside probe(s) not answering now: " + "; ".join(lost) + ". This write takes the last "
+                             "one back, so it is allowed to start from here; afterwards the probes must be no worse.")}
+               if lost else {}),
             "note": ("No change was made. Re-read will_change against your reason; if it still holds, call "
                      f"{tool} again with the same arguments and confirm=<token> within {TOKEN_TTL} s. The token is "
                      "single-use and bound to this target and this will_change. At execute the server snapshots "
-                     f"the object, applies, and checks health for up to {int(HEALTH_TIMEOUT)} s; if the controller, "
+                     f"the object, applies, and checks health for at least {int(min(HEALTH_MIN, HEALTH_TIMEOUT))} s and up "
+                     f"to {int(HEALTH_TIMEOUT)} s; if the controller, "
                      "the API server, the read-back, two of the three outside probes"
                      + (" or FAC's post-ack" if witness == "armed" else "")
                      + " fail, it puts the snapshot back from inside the LAN."),
@@ -2308,7 +2367,7 @@ def _write_one(tool: str, hint: str, reason: str, confirm: str, build) -> str:
                          **({"release_not_posted": note} if note else {})})
 
     # ⑥ health, then revert from inside on any failure
-    h = _health(plan, created_id, number, witness, applying)
+    h = _health(plan, created_id, number, witness, applying, tolerate=entry.get("tolerate") or ())
     readings = {"outbound": h.outbound, "fac_witness": h.witness}
     _audit(tool, target, "execute", stated, rc=rc, health=h.passed, **readings, **common)
     if h.ok:
