@@ -63,7 +63,7 @@ ENV_KEYS = ["UNIFI_CONTROLLER_URL", "UNIFI_SITE", "UNIFI_CA_FILE", "UNIFI_READER
             "UNIFI_OPERATOR_FILE",
             "NETDEV_ALLOW_INSECURE_HTTP", "NETDEV_READ_TIMEOUT", "POD_IP", "IM_FAC_TICKET_REPO",
             "IM_FAC_TICKET_TOKEN_FILE", "IM_FAC_TICKET_API", "NETDEV_OUTSIDE_PROBES", "NETDEV_SNAPSHOT_DIR",
-            "NETDEV_SNAPSHOT_KEEP", "NETDEV_HEALTH_TIMEOUT", "NETDEV_HEALTH_INTERVAL", "NETDEV_WRITES_PER_HOUR",
+            "NETDEV_SNAPSHOT_KEEP", "NETDEV_HEALTH_TIMEOUT", "NETDEV_HEALTH_MIN", "NETDEV_HEALTH_INTERVAL", "NETDEV_WRITES_PER_HOUR",
             "NETDEV_WITNESS_WAIT", "NETDEV_WITNESS_POLL", "NETDEV_PROBE_TIMEOUT", "CLUSTER_NAME", "CLAUDE_USER_ID",
             "NETDEV_DNS_SETTLE", "NETDEV_DNS_PROTECT",
             "KUBERNETES_SERVICE_HOST", "NETDEV_SHIM_READYZ", "NETDEV_SHIM_ENDPOINTS_FAIL", "NETDEV_SHIM_APISERVER"]
@@ -552,7 +552,7 @@ class Harness:
                    "NETDEV_SNAPSHOT_DIR": str(self.snapshots), "NETDEV_WITNESS_WAIT": "0.3",
                    "NETDEV_WITNESS_POLL": "0.05", "NETDEV_HEALTH_TIMEOUT": "0.6", "NETDEV_HEALTH_INTERVAL": "0.05",
                    "NETDEV_PROBE_TIMEOUT": "0.5", "CLUSTER_NAME": "jg-test", "CLAUDE_USER_ID": "im-test",
-                   "NETDEV_DNS_SETTLE": "0.05"}
+                   "NETDEV_DNS_SETTLE": "0.05", "NETDEV_HEALTH_MIN": "0"}
             env.update({k: v for k, v in over.items() if v is not None})
             for k in [k for k, v in over.items() if v is None]:
                 env.pop(k, None)
@@ -2435,6 +2435,180 @@ class UnblockWhatWasBlocked(WriteCase):
             self.read("get_dhcp_reservations")
             self.assertIn("token", self.token("unblock_client"))
         self.assertEqual(len(self.h.fac.issues), 2, "a refused unblock opened a ticket")
+
+
+class WatchUndoToken(WriteCase):
+    """k8scc#142, three readings from fleet-ops 6.5's drill on FAC1 (2026-11-25)."""
+
+    def bite_later(self, after=0.2):
+        """The change takes effect a while after the controller accepted it:
+        two probes stop answering `after` seconds later (the drill: 3 s)."""
+        def hook(m, path, body):
+            if m == "POST" and path.endswith("/cmd/stamgr"):
+                t = threading.Timer(after, lambda: (self.h.probes[0].stop(), self.h.probes[1].stop()))
+                t.daemon = True
+                t.start()
+        self.h.fake.on_write = hook
+
+    # 1. the minimum watch
+    def test_a_change_that_bites_after_the_first_round_is_caught(self):
+        self.m.HEALTH_MIN, self.m.HEALTH_TIMEOUT = 0.8, 1.6
+        self.bite_later()
+        self.read()
+        res = self.write("block_client")
+        self.assertEqual(res["result"], "reverted", res)
+        self.assertIn("probes", " ".join(res["failed"]))
+        self.assertEqual(self.h.fake.mutations()[-1][2], {"cmd": "unblock-sta", "mac": PHONE})
+
+    def test_control_without_the_minimum_the_same_change_ends_applied(self):
+        """What the drill measured on 77649db: applied, with the probes down a moment later."""
+        self.m.HEALTH_MIN, self.m.HEALTH_TIMEOUT = 0, 1.6
+        self.bite_later()
+        self.read()
+        self.assertEqual(self.write("block_client")["result"], "applied")
+        time.sleep(0.4)
+        self.assertEqual(len(self.m._probes_lost()), 2, "control: the probes did go down afterwards")
+
+    def test_a_clean_write_is_watched_for_the_minimum_and_no_longer(self):
+        self.m.HEALTH_MIN, self.m.HEALTH_TIMEOUT = 0.5, 3.0
+        self.read()
+        tok = self.token("block_client")["token"]
+        t0 = time.monotonic()
+        res = self.confirm("block_client", tok)
+        took = time.monotonic() - t0
+        self.assertEqual(res["result"], "applied", res)
+        self.assertGreaterEqual(took, 0.5)
+        self.assertLess(took, 1.5, "a passing write waited for the timeout, not the minimum")
+
+    def test_a_minimum_longer_than_the_timeout_ends_at_the_timeout(self):
+        self.m.HEALTH_MIN, self.m.HEALTH_TIMEOUT = 30.0, 0.4
+        self.read()
+        tok = self.token("block_client")["token"]
+        t0 = time.monotonic()
+        self.assertEqual(self.confirm("block_client", tok)["result"], "applied")
+        self.assertLess(time.monotonic() - t0, 2.0)
+
+    def test_the_default_minimum_and_what_the_token_says(self):
+        os.environ.pop("NETDEV_HEALTH_MIN", None)
+        m = importlib.reload(self.m)
+        self.assertEqual(m.HEALTH_MIN, 30.0)
+        self.m = self.h.load(write=True, NETDEV_HEALTH_MIN="7", NETDEV_HEALTH_TIMEOUT="20")
+        self.read()
+        self.assertIn("checks health for at least 7 s and up to 20 s", self.token("block_client")["note"])
+
+    # 2. the undo may start from an unhealthy baseline
+    def blocked_then_probes_down(self, stop):
+        self.read()
+        self.assertEqual(self.write("block_client")["result"], "applied")
+        for i in stop:
+            self.h.probes[i].stop()
+        self.read()
+
+    def test_an_undo_is_not_refused_for_the_outage_it_takes_back(self):
+        self.blocked_then_probes_down((0, 1, 2))
+        other = self.run_tool("set_dhcp_reservation", reason="x", **ARGS["set_dhcp_reservation"])
+        self.assertIn("refused: baseline unhealthy", other, "control: any other write is still refused")
+        tok = self.token("unblock_client")
+        self.assertIn("outside probe(s) not answering now", tok["baseline"])
+        self.assertEqual([a["outbound"] for a in self.audit if a["phase"] == "token"][-1], "lost")
+        res = self.confirm("unblock_client", tok["token"])
+        self.assertEqual(res["result"], "applied", res)
+        self.assertIn("probes (no worse than at the baseline)", res["health"])
+        self.assertEqual(res["outbound"], "lost", "the reading itself is not prettied up")
+        self.assertEqual(self.h.fake.mutations()[-1][2], {"cmd": "unblock-sta", "mac": PHONE})
+
+    def test_a_healthy_baseline_gives_no_tolerance(self):
+        self.read()
+        self.assertEqual(self.write("block_client")["result"], "applied")
+        self.read()
+        tok = self.token("unblock_client")
+        self.assertNotIn("baseline", tok)
+        self.lose_two_probes_on("POST")
+        res = self.confirm("unblock_client", tok["token"])
+        self.assertEqual(res["result"], "reverted", res)
+
+    def test_an_undo_that_loses_another_probe_is_still_reverted(self):
+        self.blocked_then_probes_down((0,))
+        tok = self.token("unblock_client")
+        def hook(m, path, body):
+            if m == "POST" and body.get("cmd") == "unblock-sta" and self.h.probes[1].up:
+                self.h.probes[1].stop()
+        self.h.fake.on_write = hook
+        res = self.confirm("unblock_client", tok["token"])
+        self.assertEqual(res["result"], "reverted", res)
+        self.assertIn("lost since this undo's baseline", " ".join(res["failed"]))
+
+    def test_an_undo_still_needs_its_ticket(self):
+        self.blocked_then_probes_down((0, 1, 2))
+        self.h.fac.fail = True
+        out = self.run_tool("unblock_client", reason="take it back", mac=PHONE)
+        self.assertIn("refused: could not open the ticket", out)
+        self.assertEqual(self.audit[-1]["outbound"], "lost")
+
+    # 3. a read between the phases does not void the token
+    def test_a_read_between_the_phases_keeps_a_block_token(self):
+        row = next(c for c in self.h.fake.data["clients"] if c["mac"] == PHONE)
+        row.update(uptime=100, rx_bytes=5000)
+        self.read()
+        tok = self.token("block_client")
+        self.assertNotIn("uptime", tok["will_change"]["before"])
+        self.assertEqual(tok["will_change"]["before"]["mac"], PHONE)
+        self.assertLessEqual(set(tok["will_change"]["before"]), set(self.m.COMMAND_SHOWS))
+        row.update(uptime=223, rx_bytes=912345)
+        self.assertEqual(next(c for c in body(self.run_tool("get_clients")) if c["mac"] == PHONE)["uptime"], 223,
+                         "control: the cached row did change")
+        self.assertEqual(self.confirm("block_client", tok["token"])["result"], "applied")
+
+    def test_a_read_between_the_phases_keeps_a_reservation_token(self):
+        self.read()
+        tok = self.token("set_dhcp_reservation")["token"]
+        next(u for u in self.h.fake.data["users"] if u["_id"] == "u-tv")["last_seen"] = 1761489999
+        self.read("get_dhcp_reservations")
+        self.assertEqual(self.confirm("set_dhcp_reservation", tok)["result"], "applied")
+
+    def test_the_token_is_still_bound_to_the_change(self):
+        self.read()
+        tok = self.token("set_dhcp_reservation")["token"]
+        out = self.run_tool("set_dhcp_reservation", reason="x", confirm=tok, mac=TV, ip="10.9.9.199")
+        self.assertIn("will_change is no longer", out)
+        tok = self.token("set_dhcp_reservation")["token"]
+        tv = next(u for u in self.h.fake.data["users"] if u["_id"] == "u-tv")
+        tv["use_fixedip"], tv["fixed_ip"] = True, "10.9.9.150"     # someone else set it meanwhile
+        self.read("get_dhcp_reservations")
+        out = self.run_tool("set_dhcp_reservation", reason="x", confirm=tok, **ARGS["set_dhcp_reservation"])
+        self.assertIn("will_change is no longer", out)
+        self.assertEqual(self.h.fake.puts(), [])
+
+
+    def test_a_delete_token_is_bound_to_the_object_it_read(self):
+        """fleet-ops-1e on PR #144: nothing else checks a delete against what im was shown."""
+        self.read()
+        tok = self.token("delete_port_forward")["token"]
+        pf = next(p for p in self.h.fake.data["portforwards"] if p["_id"] == "pf-1")
+        was = pf.get("fwd_port")
+        pf["fwd_port"] = "9999"                      # someone edited it after im read will_change
+        self.read("get_port_forwards")
+        out = self.run_tool("delete_port_forward", reason="x", confirm=tok, **ARGS["delete_port_forward"])
+        self.assertIn("will_change is no longer", out)
+        self.assertEqual(self.h.fake.mutations(), [], "the edited object was deleted")
+        with self.subTest(control="re-read and unchanged, the delete goes through"):
+            pf["fwd_port"] = was
+            if was is None:
+                del pf["fwd_port"]
+            self.read("get_port_forwards")
+            tok = self.token("delete_port_forward")["token"]
+            self.read("get_port_forwards")
+            self.assertEqual(self.confirm("delete_port_forward", tok)["result"], "applied")
+
+    def test_a_dns_clear_token_is_bound_to_the_forward_it_read(self):
+        self.read("get_dns_records")
+        tok = self.token("clear_dns_forward")["token"]
+        rec = next(r for r in self.h.fake.data["dnsrecords"] if r.get("key") == "lab.test")
+        rec["value"] = "10.9.9.250"
+        self.read("get_dns_records")
+        out = self.run_tool("clear_dns_forward", reason="x", confirm=tok, **ARGS["clear_dns_forward"])
+        self.assertIn("will_change is no longer", out)
+        self.assertEqual(self.h.fake.mutations(), [])
 
 
 class OneWriteAtATime(WriteCase):
