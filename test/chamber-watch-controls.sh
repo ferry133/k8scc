@@ -142,6 +142,17 @@ for pair in "PERMISSION:dialog" "MENU_NOPHRASE:menu below the prompt" "TRUST_REA
   check "$name: the log names a reason"             grep -q '^chamber-watch: no alive signal: ' "$work/p-$name/stderr"
   [ -n "$why" ] && check "$name: the reason is the gate's ($why)" grep -q "no alive signal: $why" "$work/p-$name/stderr"
 done
+# k8scc#70, jcom 2026-11-25: an expired login read as online
+for name in NOT_LOGGED_IN_REAL LOGIN_EXPIRED_NEAR; do
+  setup "l-$name"; printf '%s' "${!name}" > "$work/l-$name/fake/pane"; run "l-$name"
+  check "$name: no signal"                          [ "$(beats "l-$name")" = 0 ]
+  check "$name: the reason is 'not logged in'"      grep -q '^chamber-watch: no alive signal: not logged in' "$work/l-$name/stderr"
+done
+check "control: in the capture the 'Login expired' line is outside the last 15 lines" [ "$(printf '%s' "$NOT_LOGGED_IN_REAL" | tail -n 15 | grep -c 'Login expired')" = 0 ]
+for name in LOGGED_IN_SAME_PANE TALKS_ABOUT_LOGIN; do
+  setup "l-$name"; printf '%s' "${!name}" > "$work/l-$name/fake/pane"; run "l-$name"
+  check "control, $name: one signal"                [ "$(beats "l-$name")" = 1 ]
+done
 setup nosession; rm "$work/nosession/fake/session"; run nosession
 check "no session: no signal"                       [ "$(beats nosession)" = 0 ]
 check "no session: says so"                         grep -q 'no alive signal: no session' "$work/nosession/stderr"
@@ -209,11 +220,11 @@ setup annfail; printf '1 cust-a\n' > "$work/annfail/fake/pending"; touch "$work/
 check "the bridge cannot be told: said, so a repeat is expected" grep -q 'the bridge could not be told; they will be announced again' "$work/annfail/stderr"
 # k8scc#103: these were inbox-watch's typing cells; the gate is the same file
 echo "the announcement: the pane gate"
-for name in IDLE_BOX IDLE_RULE IDLE_REAL; do
+for name in IDLE_BOX IDLE_RULE IDLE_REAL LOGGED_IN_SAME_PANE TALKS_ABOUT_LOGIN; do
   setup "a-$name"; printf '1 cust-a\n' > "$work/a-$name/fake/pending"; printf '%s' "${!name}" > "$work/a-$name/fake/pane"; run "a-$name"
   check "$name, a message waiting: typed" [ "$(sends "a-$name")" = 1 ]
 done
-for name in TYPED_REAL TRUST_REAL PERMISSION MENU_NOPHRASE HALF_TYPED SLASH BUSY PROMPT_HIGH; do
+for name in TYPED_REAL TRUST_REAL PERMISSION MENU_NOPHRASE HALF_TYPED SLASH BUSY PROMPT_HIGH NOT_LOGGED_IN_REAL LOGIN_EXPIRED_NEAR; do
   setup "n-$name"; printf '1 cust-a\n' > "$work/n-$name/fake/pending"; printf '%s' "${!name}" > "$work/n-$name/fake/pane"; run "n-$name"
   check "$name, a message waiting: no key at all" [ "$(grep -c '^send-keys' "$work/n-$name/fake/tmux.log")" = 0 ]
   check "… $name: the bridge is not told" [ ! -s "$work/n-$name/fake/announced" ]

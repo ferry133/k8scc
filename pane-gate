@@ -18,6 +18,7 @@
 #   pane in a mode | mode unreadable | tmux did not answer
 #   | capture-pane failed | empty pane | turn running | dialog | history search
 #   | no empty prompt | empty prompt not at the bottom | menu below the prompt
+#   | not logged in
 # pane_screen is the same reading without the mode check: what the program in
 # the pane shows. `turn running` is the only failing reason that also means
 # "a session that can act".
@@ -67,6 +68,18 @@ SGR="(${E}\\[[0-9;]*m)*"
 EMPTY_PROMPT_BARE="^${SGR}( |│|┃)*${SGR}(>|❯)${SGR}( |${NBSP}|│|┃|${E}\\[[0-9;]*m)*\$"
 EMPTY_PROMPT_DIM="^${SGR}( |│|┃)*${SGR}(>|❯)( |${NBSP})*${E}\\[2m"
 MENU_OPTION='^( |│|┃)*(❯|>)?( )*[0-9]+\. '
+# A session whose login has expired sits at an idle, empty prompt and answers
+# everything typed into it with "Login expired · Please run /login". Read on
+# jcom (production, Claude Code 2.1.261, 2026-11-25, fleet-ops-02, k8scc#70
+# issuecomment-7166698330): the bridge said online=yes and `chamber send`
+# returned 0 for an im that could not act. The pane's tail then carries a
+# right-aligned status line "Not logged in · Run /login" directly above the
+# prompt box; the "Login expired" answer was higher up, outside the tail, but
+# is matched too for the beat in which it is still near. The dot is U+00B7,
+# written as bytes. Whole phrases, so a session merely talking about /login is
+# not taken for one.
+MIDDOT=$'\xc2\xb7'
+NOT_LOGGED_IN="Not logged in ${MIDDOT} Run /login|Login expired ${MIDDOT} Please run /login"
 
 # pane_idle: succeed only when the pane is in no mode and its tail is the
 # idle, empty prompt. On failure prints the reason (no pane text) and returns
@@ -92,6 +105,8 @@ pane_screen() {
     first=$(( last > tail ? last - tail + 1 : 1 ))
     tail_lines=$(printf '%s\n' "$plain" | sed -n "${first},${last}p")
     tail_raw=$(printf '%s\n' "$raw" | sed -n "${first},${last}p")
+    # before "turn running": a session that cannot log in is not one that can act
+    if grep -qE "$NOT_LOGGED_IN" <<<"$tail_lines"; then echo "not logged in"; return 1; fi
     if grep -qiE 'esc to interrupt' <<<"$tail_lines"; then echo "turn running"; return 1; fi
     if grep -qiE 'Do you want to|Would you like to' <<<"$tail_lines"; then echo "dialog"; return 1; fi
     if grep -qiE 'reverse-i-search' <<<"$tail_lines"; then echo "history search"; return 1; fi
