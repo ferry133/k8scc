@@ -80,6 +80,7 @@ printf '%s %s sock=%s\n' "$method" "$url" "$sock" >> "$FAKE_DIR/curl.log"
 [ -f "$FAKE_DIR/bridgedown" ] && exit 7
 case "$method $url" in
   "POST http://bridge/bridge/beat") echo deliver ;;
+  "POST http://bridge/bridge/gone") echo deliver ;;
   "GET http://bridge/bridge/pending") cat "$FAKE_DIR/pending" 2>/dev/null ;;
   "POST http://bridge/bridge/announced")
     [ -f "$FAKE_DIR/announcefail" ] && exit 22
@@ -122,6 +123,7 @@ beats()  { grep -c '^POST http://bridge/bridge/beat ' "$work/$1/fake/curl.log"; 
 sends()  { grep -c '^send-keys -t =claude: -l ' "$work/$1/fake/tmux.log"; }
 enters() { grep -c '^send-keys -t =claude: Enter$' "$work/$1/fake/tmux.log"; }
 calls()  { wc -l < "$work/$1/fake/curl.log" | tr -d ' '; }
+gones()  { grep -c '^POST http://bridge/bridge/gone ' "$work/$1/fake/curl.log"; }
 
 echo "the alive signal: a session that can act"
 setup idle; run idle
@@ -156,10 +158,19 @@ done
 setup nosession; rm "$work/nosession/fake/session"; run nosession
 check "no session: no signal"                       [ "$(beats nosession)" = 0 ]
 check "no session: says so"                         grep -q 'no alive signal: no session' "$work/nosession/stderr"
+check "no session: the bridge is told it is gone (k8scc#146)" [ "$(gones nosession)" = 1 ]
 check "no session: nothing is started (tmux was only asked whether it exists)" [ "$(grep -vc '^has-session ' "$work/nosession/fake/tmux.log")" = 0 ]
 setup shell; echo bash > "$work/shell/fake/cmd"; run shell
 check "the pane's process is a shell, the screen still shows an idle prompt: no signal" [ "$(beats shell)" = 0 ]
 check "… and the log says which process"            grep -q "the pane's process is 'bash', not claude" "$work/shell/stderr"
+check "… and the bridge is told it is gone"         [ "$(gones shell)" = 1 ]
+check "not logged in: the bridge is told it is gone" [ "$(gones l-NOT_LOGGED_IN_REAL)" = 1 ]
+for c in p-PERMISSION p-HALF_TYPED p-SLASH; do
+  check "$c: silence, not 'gone' (a person at the ttyd must not flip it)" [ "$(gones "$c")" = 0 ]
+done
+check "control: an idle session is never called gone" [ "$(gones idle)" = 0 ]
+setup gone3; rm "$work/gone3/fake/session"; run gone3 CHAMBER_WATCH_TICKS=3
+check "no session for three beats: told on every beat, logged once" [ "$(gones gone3) $(grep -c 'no alive signal: no session' "$work/gone3/stderr")" = "3 1" ]
 setup capfail; touch "$work/capfail/fake/capfail"; run capfail
 check "the capture fails: no signal"                [ "$(beats capfail)" = 0 ]
 setup emptypane; : > "$work/emptypane/fake/pane"; run emptypane
@@ -219,6 +230,9 @@ setup noage; echo "not a number" > "$work/noage/fake/session"; run noage
 check "the session's age cannot be read: no signal (fail closed)" [ "$(beats noage)" = 0 ]
 setup settle0; date +%s > "$work/settle0/fake/session"; run settle0 CHAMBER_WATCH_SETTLE=0
 check "control: with a settle of 0 the same young session is alive" [ "$(beats settle0)" = 1 ]
+for c in capfail emptypane young noage; do
+  check "$c: silence, not 'gone'" [ "$(gones "$c")" = 0 ]
+done
 setup sendfail; printf '1 cust-a\n' > "$work/sendfail/fake/pending"; touch "$work/sendfail/fake/sendfail"; run sendfail CHAMBER_WATCH_TICKS=2
 check "a failed send marks nothing the first time"      [ "$(grep -c . "$work/sendfail/fake/announced")" = 1 ]
 check "… and is tried again on the next beat"           grep -q 'send-keys failed, will retry' "$work/sendfail/stderr"

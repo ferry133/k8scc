@@ -447,6 +447,9 @@ stop(p)
 print("deliver mode")
 with fake.lock:
     fake.room_name = "cust-a"            # a name that may be typed; "room one" above may not
+    # cleared before the start, not at A-1: since k8scc#146 the first "offline"
+    # is set before the first status line, not one round later
+    fake.presence_puts.clear()
 p, SOCK, LOG = start("deliver", CHAMBER_MODE="deliver", CHAMBER_BRIDGE_IN_APP="1")
 until(lambda: os.path.exists(SOCK) and "the server confirms the account" in logged(LOG))
 check("D1 the start line says the credential is inside app when told so", True, "the credential is inside app (no sidecar)" in logged(LOG))
@@ -478,8 +481,6 @@ check("D5 control: a send within the limit reaches the server", (200, 1),
       (raw(SOCK, "PUT", P + "/rooms/!r1:fake/send/m.room.message/3", body=b"{}")[0], count("PUT") - before_put))
 
 print("deliver: online only while the alive signal arrives (tasks 4.1)")
-with fake.lock:
-    fake.presence_puts.clear()
 check("A-1 no signal yet: the bridge says not online, once", (True, ["offline"]),
       (until(lambda: "not online — no alive signal yet" in logged(LOG)), (time.sleep(1.0), list(fake.presence_puts))[1]))
 check("A-2 the status line reads the server: online=no", True, until(lambda: logged(LOG).splitlines()[-1].endswith("online=no")))
@@ -505,6 +506,35 @@ check("A-7 the signal stops: within three beats (plus one round) the bridge sets
       until(lambda: fake.presence_puts[-1] == "offline" and "no alive signal for three beats" in logged(LOG), 4))
 check("A-8 … and the status line: online=no", True, until(lambda: logged(LOG).splitlines()[-1].endswith("online=no")))
 check("A-9 the local paths never reach the server", 0, count(None, "/bridge/"))
+
+print("deliver: the watcher says the session is gone (k8scc#146)")
+# its own bridge with a 2 s beat: three beats are 6 s, so "at once" and "after
+# the tolerance" are seconds apart, not a race
+gone_srv, gone_fake, GONE_URL = fake_server()
+gp, GSOCK, GLOG = start("gone", CHAMBER_URL=GONE_URL, CHAMBER_MODE="deliver", CHAMBER_BEAT="2")
+check("G0 the first status line already says online=no: presence is set before it is read", True,
+      until(lambda: any(l.startswith("chamber-status ") for l in logged(GLOG).splitlines()), 10)
+      and [l for l in logged(GLOG).splitlines() if l.startswith("chamber-status ")][0].endswith("online=no"))
+check("G0b … and not online was still said once", 1, logged(GLOG).count("chamber-bridge: not online"))
+raw(GSOCK, "POST", "/bridge/beat")
+check("G1 control: a signal, and the im is shown online", True, until(lambda: gone_fake.presence_puts[-1:] == ["online"], 6))
+t0 = time.time()
+check("G2 gone is accepted on the socket and answers the mode", (200, b"deliver\n"), raw(GSOCK, "POST", "/bridge/gone")[:2])
+went = until(lambda: gone_fake.presence_puts[-1:] == ["offline"], 5)
+check("G3 the im is set offline within one round, not after three beats", (True, True), (went, time.time() - t0 < 4.5))
+check("G4 … and the reason is the watcher's word, not silence", (True, False),
+      ("not online — the watcher says there is no session that can act" in logged(GLOG),
+       "no alive signal for three beats" in logged(GLOG)))
+raw(GSOCK, "POST", "/bridge/beat")
+check("G5 a signal after gone: online again", True, until(lambda: gone_fake.presence_puts[-1:] == ["online"], 6))
+t0 = time.time()
+stayed = not until(lambda: gone_fake.presence_puts[-1:] == ["offline"], 3.5)
+check("G6 control: silence alone keeps it online for longer than gone did", True, stayed)
+check("G7 … and ends it after three beats, with the other reason", True,
+      until(lambda: gone_fake.presence_puts[-1:] == ["offline"] and "no alive signal for three beats" in logged(GLOG), 8))
+check("G8 gone never reaches the server, and a GET of it is 404", (0, 404),
+      (sum(1 for m, p, a in gone_fake.seen if "/bridge/" in p), raw(GSOCK, "GET", "/bridge/gone")[0]))
+stop(gp)
 
 print("deliver: what waits for the session (tasks 5.2)")
 check("Q1 nothing has arrived: the list is empty", (200, b""), raw(SOCK, "GET", "/bridge/pending")[:2])
