@@ -256,3 +256,35 @@ The cooldown is per target, so a tool and its opposite share it. While a target'
 - **WHEN** the MAC is absent from the client listing and the users row was not read, or is not blocked, or the tool is `block_client`
 - **THEN** the call is refused and no ticket is opened
 
+### Requirement: A passing health round counts only after a minimum watch
+
+A health round in which every check passes SHALL end the check only when `NETDEV_HEALTH_MIN` seconds (default 30) have passed since the apply, or the health timeout has been reached; before that, passing rounds SHALL be repeated (k8scc#142: with no witness armed, a block was released `applied` one second after it was sent and bit two seconds later).
+
+#### Scenario: A change that bites after the first round
+- **WHEN** two probes stop answering 0.2 s after the controller accepted a block, with a minimum of 0.8 s
+- **THEN** the write ends `reverted` (control: with a minimum of 0 the same write ends `applied` and the probes are down afterwards)
+
+#### Scenario: A clean write waits the minimum and no longer
+- **WHEN** nothing fails and the minimum is 0.5 s under a timeout of 3 s
+- **THEN** the confirm returns `applied` after at least 0.5 s and well before the timeout
+
+### Requirement: The undo of an applied write may start from an unhealthy baseline, with its ticket
+
+The undo accepted inside the cooldown SHALL NOT be refused because outside probes do not answer at its token; every other write SHALL be. Its token SHALL carry the probes that were down, its health SHALL fail the probe check only when a probe outside that set is lost, and `outbound` SHALL report what was read. It SHALL still be refused when its ticket cannot be opened.
+
+#### Scenario: An undo is not refused for the outage it takes back
+- **WHEN** a block is applied, all three probes then stop answering, and the unblock is called
+- **THEN** it gets a token naming the baseline, is applied with `probes (no worse than at the baseline)` and `outbound: lost` (control: another write at that moment is refused `baseline unhealthy`)
+
+#### Scenario: An undo that loses another probe is reverted
+- **WHEN** one probe is down at the undo's token and a second stops at its apply
+- **THEN** the undo ends `reverted`, naming the probe lost since its baseline
+
+### Requirement: A token is bound to the change, not to the cached object
+
+The digest a token is bound to SHALL be taken over the tool, the target, the kind, the changed fields with the values they had, and the command, and SHALL NOT include any other field of the cached object. A command's `will_change` SHALL show only the fields that identify its target.
+
+#### Scenario: A read between the phases keeps the token
+- **WHEN** a client row's counters, or a user's `last_seen`, change and the reader is called between a token and its confirm
+- **THEN** the confirm is applied (control: other arguments, or a changed field that moved on the controller, are refused)
+
