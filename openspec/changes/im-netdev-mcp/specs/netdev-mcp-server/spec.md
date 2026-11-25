@@ -243,3 +243,16 @@ The cooldown is per target, so a tool and its opposite share it. While a target'
 #### Scenario: A reverted write opens no exception
 - **WHEN** a clear ends `reverted` and the set for the same target is called inside the cooldown
 - **THEN** it is refused for the cooldown
+
+### Requirement: An unblock may address a client that left the client listing
+
+`unblock_client`, and no other tool, SHALL also accept a MAC that is absent from the cached client listing when a `users` read in this session returned that MAC with `blocked: true` (k8scc#137: on FAC1 a blocked wired client is not in `stat/sta`). The snapshot SHALL then be the users row, and the target SHALL remain `clients/<mac>`. A user not read, or read as not blocked, SHALL be refused, and the refusal SHALL name the reader to call.
+
+#### Scenario: A block taken off after the client left the listing
+- **WHEN** the controller drops a blocked client from its client listing, a client is blocked, and after a `get_clients` and a `get_dhcp_reservations` the same MAC is unblocked inside the cooldown
+- **THEN** the unblock is applied, the controller received `block-sta` then `unblock-sta` for that MAC, and the snapshot holds the users row (control: before the users read, the unblock is refused naming `get_dhcp_reservations`)
+
+#### Scenario: Only a user read as blocked, and only for an unblock
+- **WHEN** the MAC is absent from the client listing and the users row was not read, or is not blocked, or the tool is `block_client`
+- **THEN** the call is refused and no ticket is opened
+
