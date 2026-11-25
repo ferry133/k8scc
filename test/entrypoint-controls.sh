@@ -166,7 +166,7 @@ SH
   at()  { grep -n -m1 -E "$1" entrypoint.sh | cut -d: -f1; }
   call=$(at '^session_setup$')
   if [ -n "$call" ]; then ok; else bad "entrypoint.sh never calls session_setup"; call=0; fi
-  for later in '^[[:space:]]*chamber-watch &' '^[[:space:]]*session-keep &' '^exec ttyd '; do
+  for later in '^[[:space:]]*chamber-watch &' '^[[:space:]]*session-keep &' '^launch "'; do
     l=$(at "$later")
     if [ -n "$l" ] && [ "$call" -gt 0 ] && [ "$call" -lt "$l" ]; then ok; else bad "session_setup (line $call) is not before '$later' (line ${l:-none})"; fi
   done
@@ -186,6 +186,44 @@ SH
   rm -rf "$tmp/rhome"; mkdir -p "$tmp/rhome"
   o=$(rrun NETDEV_MCP_URL=)
   if grep -q 'lan-inventory-check' "$tmp/rhome/.claude/settings.json" 2>/dev/null; then bad "control: the rule is written without the sidecar env"; else ok; fi
+fi
+
+# --- PID 1 (k8scc#133): tini in front of ttyd, and a pod that still starts without it
+echo "pid 1"
+lfn="$tmp/launch.sh"
+sed -n '/^# --- pid 1 (k8scc#133)/,/^# --- end pid 1/p' entrypoint.sh > "$lfn"
+if ! grep -q '^launch()' "$lfn"; then
+  bad "could not extract launch from entrypoint.sh"
+else
+  mkdir -p "$tmp/lbin" "$tmp/lbin2"
+  # each fake prints its own name and every argument on a line of its own
+  for b in tini ttyd; do printf '#!/bin/sh\necho "%s"; for a in "$@"; do echo "  [$a]"; done\n' "$b" > "$tmp/lbin/$b"; done
+  cp "$tmp/lbin/ttyd" "$tmp/lbin2/ttyd"
+  chmod +x "$tmp/lbin/tini" "$tmp/lbin/ttyd" "$tmp/lbin2/ttyd"
+  # only the fakes and the shell's own directory, so a tini on the host does not count
+  shdir=$(dirname "$(command -v bash)")
+  lrun() { env -i PATH="$1:$shdir:/usr/bin:/bin" bash -c 'set -e; . "$0"; launch -W -t "a b" /usr/local/bin/claude-session; echo "came back"' "$lfn" 2>&1; }
+  if [ -n "$(PATH="$tmp/lbin2:$shdir:/usr/bin:/bin" command -v tini)" ]; then
+    echo "  CANNOT MEASURE: a tini in /usr/bin or /bin; the cell without tini cannot tell the two apart"; fail=$((fail + 1))
+  else
+    want=$(printf 'tini\n  [--]\n  [ttyd]\n  [-W]\n  [-t]\n  [a b]\n  [/usr/local/bin/claude-session]')
+    o=$(lrun "$tmp/lbin")
+    if [ "$o" = "$want" ]; then ok; else bad "with tini: expected tini -- ttyd and the arguments one by one, got: $o"; fi
+    has_not() { case "$1" in *"$2"*) bad "$3: found '$2'";; *) ok;; esac; }
+    has_not "$o" "came back" "with tini: launch is an exec"
+    has_not "$o" "not installed" "with tini"
+    o=$(lrun "$tmp/lbin2")
+    has "$o" "tini is not installed, PID 1 is ttyd" "without tini"
+    wantb=$(printf 'ttyd\n  [-W]\n  [-t]\n  [a b]\n  [/usr/local/bin/claude-session]')
+    if [ "$(printf '%s\n' "$o" | sed 1d)" = "$wantb" ]; then ok; else bad "without tini: ttyd is not started with the same arguments, got: $o"; fi
+    has_not "$o" "came back" "without tini: launch is an exec"
+  fi
+  # the script ends by calling it with ttyd's arguments, and nothing else execs ttyd
+  if [ "$(tail -n 1 entrypoint.sh)" = 'launch "${TTYD_ARGS[@]}" /usr/local/bin/claude-session' ]; then ok; else bad "entrypoint.sh does not end by calling launch with TTYD_ARGS"; fi
+  n=$(grep -c 'exec .*ttyd' entrypoint.sh)
+  if [ "$n" -eq 2 ]; then ok; else bad "entrypoint.sh has $n exec lines for ttyd, expected the two inside launch"; fi
+  # the image installs it and runs it at build
+  if grep -q '^    tini \\$' Dockerfile && grep -q '&& tini --version$' Dockerfile; then ok; else bad "the Dockerfile does not install tini and run it at build"; fi
 fi
 
 echo "passed=$pass failed=$fail"

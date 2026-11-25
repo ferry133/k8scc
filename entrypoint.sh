@@ -151,4 +151,21 @@ if command -v session-keep >/dev/null 2>&1; then
     session-keep &
 fi
 
-exec ttyd "${TTYD_ARGS[@]}" /usr/local/bin/claude-session
+# --- pid 1 (k8scc#133) ---------------------------------------------------------
+# Whatever this script execs is the container's PID 1, and PID 1 inherits every
+# orphan. tmux's server puts itself in the background, so it is not ttyd's
+# child; when it ended (and the claude under it), ttyd as PID 1 never waited on
+# it and both stayed as zombies, one pair per ended session (fleet-ops-02,
+# jg-jcc2, 2026-11-25, with session-keep restarting the session). tini waits on
+# everything it inherits, passes signals on to ttyd and exits with ttyd's
+# status. Without it the pod still starts, and says so.
+launch() {
+    if command -v tini >/dev/null 2>&1; then
+        exec tini -- ttyd "$@"
+    fi
+    echo "entrypoint: tini is not installed, PID 1 is ttyd and ended sessions stay as zombies (k8scc#133)" >&2
+    exec ttyd "$@"
+}
+# --- end pid 1 -------------------------------------------------------------------
+
+launch "${TTYD_ARGS[@]}" /usr/local/bin/claude-session
