@@ -21,7 +21,8 @@ M = [
  ("offline never reported", '        if any(p == "offline" for p in states.values()):', '        if False:', ["4"]),
 ]
 src = SRC.read_text(); bad = 0
-for name, old, new, expect in M:
+only = os.environ.get('ONLY')
+for name, old, new, expect in [m for m in M if not only or only in m[0]]:
     n = src.count(old)
     if n != 1:
         print("NOT APPLIED  %-48s (old text found %d times)" % (name, n), flush=True); bad += 1; continue

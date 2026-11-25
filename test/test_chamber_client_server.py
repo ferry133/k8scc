@@ -235,6 +235,12 @@ def main():
         check("7a recipient connected -> online", "rc0", (rc, (out.strip().splitlines() or [""])[-1].strip()), rc == 0)
         check("7b the waiting recipient receives it", "wait rc0 with the text",
               (w.returncode, "T7 while online" in wo.decode()), w.returncode == 0 and "T7 while online" in wo.decode())
+        # An initial sync just before the stale message: a server that answers the next
+        # initial sync from its cache hands back this older position, and a wait that
+        # trusted it would replay the stale message (the client's own comment: measured
+        # on Synapse 1.165.0, 2026-11-15).
+        w = bg(IMA, "wait", "cust-a", "1")
+        w.communicate(timeout=20)
         ch(FO, "send", "cust-a", "--to", IMA, "T8 stale, sent before the wait began")   # must NOT be replayed below
         w = bg(IMA, "wait", "cust-a", "8")
         time.sleep(3)
