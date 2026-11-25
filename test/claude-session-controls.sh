@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # Controls for claude-session: the Talos permission profile, the apps-repo
-# write path, the Home Assistant MCP registration, the netdev sidecar, and the inbox notice. The script is run AS SHIPPED, with HOME redirected to a scratch
+# write path, the Home Assistant MCP registration, the netdev sidecar, and that the retired inbox notice stays gone. The script is run AS SHIPPED, with HOME redirected to a scratch
 # directory and fake `claude` / `tmux` binaries ahead of the real ones on
 # PATH -- the final `exec tmux` lands on the fake, which prints its argv and
 # exits. Nothing here is a copy of claude-session; a copy would keep passing
@@ -408,42 +408,21 @@ check_not "control: the sse entry reads as sse" [ "$(ha_entry "$h/.claude.json")
 run_session "$h" HA_MCP_URL=$HAURL HA_MCP_TOKEN_FILE="$h/etc-ha/token" >/dev/null
 check "transport: an sse entry from the old image is rewritten to http" [ "$(ha_entry "$h/.claude.json")" = "$(want_entry "$HAURL" "$TOK")" ]
 
-echo "inbox notice"
-h="$work/inbox-unread"
+echo "inbox notice retired (k8scc#103)"
+# assignments arrive through chamber; the directory keeps only im's reports.
+# An unread file that the retired notice would have counted is printed by
+# nothing, and the session starts with no pause.
+h="$work/inbox-retired"
 mkdir -p "$h/workspace/inbox"
-touch "$h/workspace/inbox/2026-10-11-break-glass.md" "$h/workspace/inbox/old.read"
-out=$(run_session "$h")
-check "one unread: the line"                        grep -q '^📥 inbox: 1 file(s) — read ~/workspace/inbox/ before anything else$' <<<"$out"
-check_not "one unread: contents never printed" grep -q 'break-glass' <<<"$out"
-check "one unread: before tmux"                     bash -c 'grep -q "inbox" <<<"$1" && grep -q "^tmux " "$2"' _ "$out" "$h/fake.log"
-touch "$h/workspace/inbox/second.txt"
-out=$(run_session "$h")
-check "two unread: count is 2"                      grep -q '^📥 inbox: 2 file(s)' <<<"$out"
-
-h="$work/inbox-reports"
-mkdir -p "$h/workspace/inbox"
-touch "$h/workspace/inbox/2026-11-11-iot-inventory-jcom-report.md" "$h/workspace/inbox/done.read"
-out=$(run_session "$h")
-check_not "only im's reports and .read: nothing (k8scc#65)" grep -q 'inbox' <<<"$out"
-touch "$h/workspace/inbox/2026-11-12-report-request.md"
-out=$(run_session "$h")
-check "control: an assignment beside the report: count is 1" grep -q '^📥 inbox: 1 file(s)' <<<"$out"
-
-h="$work/inbox-read"
-mkdir -p "$h/workspace/inbox"
-touch "$h/workspace/inbox/done.read"
-out=$(run_session "$h")
-check_not "only .read files: nothing" grep -q 'inbox' <<<"$out"
-
-h="$work/inbox-empty"
-mkdir -p "$h/workspace/inbox"
-out=$(run_session "$h")
-check_not "empty dir: nothing" grep -q 'inbox' <<<"$out"
-
-h="$work/inbox-absent"
-out=$(run_session "$h")
-check_not "absent dir: nothing" grep -q 'inbox' <<<"$out"
-check "absent dir: session still starts"            grep -q '^tmux ' "$h/fake.log"
+touch "$h/workspace/inbox/2026-10-11-break-glass.md" "$h/workspace/inbox/2026-11-11-iot-inventory-jcom-report.md"
+t0=$(date +%s); out=$(run_session "$h"); t1=$(date +%s)
+check "control: the directory holds a file the old notice counted" [ -e "$h/workspace/inbox/2026-10-11-break-glass.md" ]
+check_not "an unread file: no inbox line"           grep -q 'inbox' <<<"$out"
+check_not "… and no pause prompt"                   grep -q '按 Enter 繼續' <<<"$out"
+check "… no pause"                                  [ $((t1 - t0)) -lt 6 ]
+check "… the session starts"                        grep -q '^tmux ' "$h/fake.log"
+check "… the files are left as they were"           [ "$(ls "$h/workspace/inbox" | wc -l | tr -d ' ')" = 2 ]
+check_not "claude-session carries no inbox notice"  grep -qE 'inbox_notice|📥' claude-session
 
 echo "netdev sidecar"
 NDURL=http://127.0.0.1:8766/sse

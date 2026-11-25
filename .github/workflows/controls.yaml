@@ -43,10 +43,6 @@ jobs:
         run: python3 test/test_mcp_stdout.py
       - name: Check the claude-session controls
         run: test/claude-session-controls.sh
-      # was in build.yaml only until 2026-11-19, so a PR touching inbox-watch
-      # had its controls run after the merge
-      - name: Check the inbox-watch controls
-        run: test/inbox-watch-controls.sh
       - name: Check the im policy controls
         run: test/im-policy-controls.sh
       - name: Check the chamber tool controls

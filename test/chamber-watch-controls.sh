@@ -7,9 +7,10 @@
 # does with the signal) is in test/test_chamber_bridge.py, and one cell there
 # runs this script against the real bridge.
 #
-# The pane fixtures are the ones test/inbox-watch-controls.sh uses, extracted
-# from that file, not copied: the two watchers must be judged on the same
-# screens.
+# The pane fixtures are in test/pane-fixtures.sh (sourced; they lived in the
+# inbox-watch controls until inbox-watch was retired, k8scc#103). The typing
+# half of the gate those controls covered is under "the announcement: the
+# pane gate" below.
 #
 # Each case carries a control: the opposite input must not give the same
 # reading.
@@ -95,10 +96,9 @@ bad() { fail=$((fail + 1)); echo "  FAIL: $*"; }
 check()     { local d="$1"; shift; if "$@"; then ok; else bad "$d"; fi; }
 check_not() { local d="$1"; shift; if "$@"; then bad "$d"; else ok; fi; }
 
-# the pane fixtures of the inbox-watch controls, extracted
-fixtures=$(sed -n '/^IDLE_BOX=/,/^# setup <case>/p' test/inbox-watch-controls.sh | sed '$d')
-eval "$fixtures"
-check "control: the fixtures could be extracted" [ -n "${IDLE_BOX:-}" ]
+# the pane fixtures, shared with test/pane-gate-real-tmux.sh's idle prompt
+. test/pane-fixtures.sh
+check "control: the fixtures could be read" [ -n "${IDLE_BOX:-}" ]
 check "control: … including the real-capture ones" [ -n "${IDLE_REAL:-}" ]
 
 old=$(( $(date +%s) - 3600 ))
@@ -207,6 +207,22 @@ setup two2; printf '1 cust-a\n3 company\n' > "$work/two2/fake/pending"; run two2
 check "control: with the pane staying idle both lines are typed" [ "$(sends two2)" = 2 ]
 setup annfail; printf '1 cust-a\n' > "$work/annfail/fake/pending"; touch "$work/annfail/fake/announcefail"; run annfail
 check "the bridge cannot be told: said, so a repeat is expected" grep -q 'the bridge could not be told; they will be announced again' "$work/annfail/stderr"
+# k8scc#103: these were inbox-watch's typing cells; the gate is the same file
+echo "the announcement: the pane gate"
+for name in IDLE_BOX IDLE_RULE IDLE_REAL; do
+  setup "a-$name"; printf '1 cust-a\n' > "$work/a-$name/fake/pending"; printf '%s' "${!name}" > "$work/a-$name/fake/pane"; run "a-$name"
+  check "$name, a message waiting: typed" [ "$(sends "a-$name")" = 1 ]
+done
+for name in TYPED_REAL TRUST_REAL PERMISSION MENU_NOPHRASE HALF_TYPED SLASH BUSY PROMPT_HIGH; do
+  setup "n-$name"; printf '1 cust-a\n' > "$work/n-$name/fake/pending"; printf '%s' "${!name}" > "$work/n-$name/fake/pane"; run "n-$name"
+  check "$name, a message waiting: no key at all" [ "$(grep -c '^send-keys' "$work/n-$name/fake/tmux.log")" = 0 ]
+  check "… $name: the bridge is not told" [ ! -s "$work/n-$name/fake/announced" ]
+done
+for k in emptyann capann; do
+  setup "$k"; printf '1 cust-a\n' > "$work/$k/fake/pending"
+  if [ "$k" = emptyann ]; then : > "$work/$k/fake/pane"; else touch "$work/$k/fake/capfail"; fi
+  run "$k"; check "$k: no key at all" [ "$(grep -c '^send-keys' "$work/$k/fake/tmux.log")" = 0 ]
+done
 setup junk; printf 'x cust-a\n0 cust-b\n\n2\n' > "$work/junk/fake/pending"; run junk
 check "lines that are not '<count> <room>' type nothing" [ "$(sends junk)" = 0 ]
 
