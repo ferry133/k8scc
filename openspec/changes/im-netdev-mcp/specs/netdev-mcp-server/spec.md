@@ -158,11 +158,15 @@ At each write the server SHALL compute from the session's reader data the networ
 
 ### Requirement: Every write phase leaves one audit line on stdout
 
-For every write call the server SHALL write one JSON line to stdout with `ts`, `tool`, `target`, `phase` (`token`, `execute`, `refused`, `reverted`, `revert-failed`, `aborted`), `stated_reason`, `reason` or `rc`, `user`, `snapshot_digest`, `diff_digest`, `health` (the list of health checks that passed; empty before any check ran), `outbound`, `fac_witness` and `ticket`, and SHALL write nothing else to stdout — the HTTP server's access log included.
+For every write call the server SHALL write one JSON line to stdout with `ts`, `tool`, `target`, `phase` (`token`, `applying`, `execute`, `refused`, `reverted`, `revert-failed`, `aborted`, and `interrupted` at start-up), `stated_reason`, `reason` or `rc`, `user`, `snapshot_digest`, `diff_digest`, `health` (the list of health checks that passed; empty before any check ran), `outbound`, `fac_witness` and `ticket`, and SHALL write nothing else to stdout — the HTTP server's access log included.
 
 #### Scenario: Lines match phases
 - **WHEN** a write goes token → execute → reverted on the fake controller because two probes were lost
-- **THEN** stdout holds exactly three JSON lines for that target with those phases, identical `stated_reason`, `snapshot_digest` equal to the sha256 of the snapshot file, `health` empty on the `token` line and listing `controller`, `apiserver`, `readback` but not `probes` on the `execute` and `reverted` lines
+- **THEN** stdout holds exactly four JSON lines for that target, `token`, `applying`, `execute`, `reverted`, with identical `stated_reason`, `snapshot_digest` equal to the sha256 of the snapshot file on the last three, `health` empty on the `token` and `applying` lines and listing `controller`, `apiserver`, `readback` but not `probes` on the `execute` and `reverted` lines
+
+#### Scenario: The applying line is on stdout before the change is sent
+- **WHEN** a confirmed write reaches the controller
+- **THEN** at the moment the controller receives the request, stdout already holds that write's `applying` line, with its ticket, `snapshot_digest` and `diff_digest` (k8scc#132: `execute` is written after health, and a sidecar killed in between left a change with no audit line)
 
 #### Scenario: The access log does not reach stdout
 - **WHEN** the server runs as its container does and receives HTTP requests
@@ -195,3 +199,47 @@ For every write call the server SHALL write one JSON line to stdout with `ts`, `
 #### Scenario: A name on im's path is never under the forward
 - **WHEN** `NETDEV_DNS_PROTECT` holds `chamber.home.test` and the domain is `home.test`
 - **THEN** class A refuses it naming that host (negative controls: `other.test` reaches the token; `ome.test` and `chamber.home.test.evil` cover nothing)
+
+### Requirement: A write that waits does not stop the others being served, and writes run one at a time
+
+Every tool SHALL run off the server's event loop, so that while one session's write waits for its witness or its health rounds, another session's `initialize` and read tools are answered (k8scc#132; fleet-ops-1e measured a second session unanswered 15 s into a 133 s confirm on jg-jcc2, 2026-11-25). At most one write SHALL be in progress: a second write call, in either phase, SHALL be refused at once, naming the tool, target and phase of the one running, with an audit line and no ticket; it SHALL NOT queue.
+
+#### Scenario: A read is answered while a write is in its health loop
+- **WHEN** a confirmed write's health loop runs its whole window and a read tool is called 0.3 s into it
+- **THEN** the read returns before the write does (control: the write took the whole window)
+
+#### Scenario: A second session is served by the server as shipped
+- **WHEN** the server runs as its container does, one SSE session's write waits for a pre-ack that never comes, and a second SSE session initializes and reads 1 s later
+- **THEN** the second session's answer arrives before the first session's (control: the first waited the whole witness window)
+
+#### Scenario: A second write is refused at once
+- **WHEN** a write is called while another is in its health loop
+- **THEN** it is refused within half a second naming the running write, opens no ticket, and the same call gets its token once the first has returned
+
+### Requirement: Start-up reads the tickets a stopped sidecar left open
+
+With the write tools registered, the server SHALL read, once at start-up and before serving, the ticket repo's open issues whose title starts with this cluster's prefix. For one that carries the server's `applying` comment and no `release`, `revert-failed` or `interrupted` comment, it SHALL comment `netdev-mcp interrupted`, leave the ticket open, write one audit line with phase `interrupted`, and start that target's cooldown; it SHALL NOT send anything to the controller. For one that carries none of the server's comments it SHALL post the release `result: not-executed` and close it. Every other ticket SHALL be left as it is. Only a comment that starts with the server's mark counts. A listing that cannot be read SHALL be said in the start-up readings and stop nothing.
+
+#### Scenario: A killed write is found and left for a person
+- **WHEN** a sidecar stops after `applying` and the next one starts
+- **THEN** the ticket gets `netdev-mcp interrupted` and stays open, stdout gets one `interrupted` line carrying the ticket's tool, target and stated reason, the controller receives nothing, the target is refused for the cooldown, and a third start comments nothing more
+
+#### Scenario: A lost token's ticket is released
+- **WHEN** a sidecar stops after issuing a token and the next one starts
+- **THEN** the ticket is closed with `result: not-executed`, and the target is not in cooldown
+
+#### Scenario: Other tickets are untouched
+- **WHEN** the repo holds an open ticket of another cluster, one whose cluster name only begins with this one's, a closed ticket, a `revert-failed` ticket, and an issue a person opened
+- **THEN** none of them changes
+
+### Requirement: The last applied write of a target may be taken back once inside the cooldown
+
+The cooldown is per target, so a tool and its opposite share it. While a target's last write stands as `applied`, the tool that undoes it (`set_dhcp_reservation` ↔ `clear_dhcp_reservation`, `block_client` ↔ `unblock_client`, `set_dns_forward` ↔ `clear_dns_forward`) SHALL be accepted once inside the cooldown, as a full write with its own ticket, snapshot and health, counted against the hourly ceiling; after it both directions SHALL wait for the cooldown. A write that ended `reverted`, `revert-failed` or `aborted`, or was found `interrupted`, opens no such exception. The cooldown refusal SHALL name the exception while it is available.
+
+#### Scenario: A reservation taken back once
+- **WHEN** a reservation is set and applied, and 0 s later the same set, then the clear, then both again are called
+- **THEN** the set is refused naming `clear_dhcp_reservation, once`, the clear is applied under its own ticket, and both are refused afterwards without that sentence
+
+#### Scenario: A reverted write opens no exception
+- **WHEN** a clear ends `reverted` and the set for the same target is called inside the cooldown
+- **THEN** it is refused for the cooldown

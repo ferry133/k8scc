@@ -68,6 +68,7 @@ ext://sys.stdout, resolved when uvicorn configures logging) and keeps the real
 stdout for _audit alone.
 """
 import datetime as _dt
+import functools
 import hashlib
 import ipaddress
 import json
@@ -85,6 +86,7 @@ import time
 from dataclasses import dataclass, field
 from urllib.parse import urlsplit
 
+import anyio
 import httpx
 from mcp.server.fastmcp import FastMCP
 
@@ -420,22 +422,30 @@ class Session:
         self._client = _controller_client({})
         self._csrf = ""
         self._logged_in = False
+        # tools run on worker threads (k8scc#132): one request at a time per
+        # account, so a re-login and the CSRF value it brings are not raced
+        self._lock = threading.RLock()
 
     def _take_csrf(self, resp: httpx.Response) -> None:
         self._csrf = resp.headers.get("X-Updated-CSRF-Token") or resp.headers.get("X-CSRF-Token") or self._csrf
 
     def login(self) -> None:
-        try:
-            resp = self._client.post(LOGIN_PATH, json={"username": self._user, "password": self._password})
-        except httpx.HTTPError as exc:
-            raise ControllerError(f"POST {LOGIN_PATH}: {type(exc).__name__}: {exc}") from None
-        if resp.status_code // 100 != 2:
-            raise ControllerError(f"POST {LOGIN_PATH}: controller refused the {self._role} login ({resp.status_code})",
-                                  answered=True)
-        self._take_csrf(resp)
-        self._logged_in = True
+        with self._lock:
+            try:
+                resp = self._client.post(LOGIN_PATH, json={"username": self._user, "password": self._password})
+            except httpx.HTTPError as exc:
+                raise ControllerError(f"POST {LOGIN_PATH}: {type(exc).__name__}: {exc}") from None
+            if resp.status_code // 100 != 2:
+                raise ControllerError(f"POST {LOGIN_PATH}: controller refused the {self._role} login ({resp.status_code})",
+                                      answered=True)
+            self._take_csrf(resp)
+            self._logged_in = True
 
     def send(self, method: str, path: str, body=None) -> httpx.Response:
+        with self._lock:
+            return self._send(method, path, body)
+
+    def _send(self, method: str, path: str, body=None) -> httpx.Response:
         if not self._logged_in:
             self.login()
         for attempt in (0, 1):
@@ -522,6 +532,11 @@ def _remember(collection: str, items) -> None:
     now = _now()
     if isinstance(items, list):
         _SEEN_AT[collection] = now
+        # A whole read replaces what was known: an object the controller no
+        # longer lists must not stay addressable. A forward cleared and read
+        # again was still planned as "exists", and the set that takes the
+        # clear back was aborted at its snapshot (found with k8scc#132's undo).
+        _SEEN[collection] = {}
     bucket = _SEEN.setdefault(collection, {})
     for obj in items if isinstance(items, list) else [items]:
         if isinstance(obj, dict):
@@ -561,6 +576,27 @@ def _collection_fresh(collection: str) -> bool:
 app = FastMCP("netdev", host="127.0.0.1", port=MCP_PORT)
 
 
+# --- every tool runs on a worker thread (k8scc#132) ------------------------------------
+# FastMCP 1.29.0 calls a plain function on the event loop itself
+# (func_metadata.py: `return fn(**arguments)`), and a write waits in
+# time.sleep for its witness and its health rounds. So for as long as one
+# write ran, no session was served: fleet-ops-1e measured a second session's
+# `initialize` unanswered 15 s into a 133 s confirm (jg-jcc2, 2026-11-25),
+# which reads the same as a dead sidecar. What is registered is therefore an
+# async wrapper that hands the call to a thread; the functions themselves stay
+# plain, and the controls call them directly.
+def _threaded(fn):
+    @functools.wraps(fn)
+    async def run(*args, **kwargs):
+        return await anyio.to_thread.run_sync(functools.partial(fn, *args, **kwargs))
+    return run
+
+
+def _tool(fn):
+    app.tool()(_threaded(fn))
+    return fn
+
+
 def _render(api: str, data) -> str:
     return f"[via {api}]\n" + json.dumps(data, indent=2, ensure_ascii=False, sort_keys=True)
 
@@ -582,62 +618,62 @@ def _read_one(collection: str, shape=None) -> str:
     return _render(api, clean)
 
 
-@app.tool()
+@_tool
 def get_controller_info() -> str:
     """UniFi Network 應用程式的版本與 controller 資訊（唯讀）。"""
     return _read_one("info")
 
 
-@app.tool()
+@_tool
 def get_sites() -> str:
     """controller 上的 site 清單（唯讀）。UNIFI_SITE 決定其他工具讀哪一個。"""
     return _read_one("sites")
 
 
-@app.tool()
+@_tool
 def get_devices() -> str:
     """UniFi 設備清單：gateway、交換器、AP（唯讀；MAC、IP、型號、狀態）。"""
     return _read_one("devices")
 
 
-@app.tool()
+@_tool
 def get_clients() -> str:
     """目前連線的 client 清單（唯讀；MAC、IP、名稱、接在哪個設備）。"""
     return _read_one("clients")
 
 
-@app.tool()
+@_tool
 def get_networks() -> str:
     """網段設定（networkconf：VLAN、子網、DHCP 範圍；唯讀）。"""
     return _read_one("networks")
 
 
-@app.tool()
+@_tool
 def get_port_forwards() -> str:
     """port forward 規則（唯讀）。"""
     return _read_one("portforwards")
 
 
-@app.tool()
+@_tool
 def get_dhcp_reservations() -> str:
     """DHCP 固定 IP 保留（設了 use_fixedip 的 client；唯讀）。"""
     return _read_one("users", shape=lambda users: [u for u in users if isinstance(u, dict) and u.get("use_fixedip")])
 
 
-@app.tool()
+@_tool
 def get_wlans() -> str:
     """無線網路設定（唯讀；passphrase 一律剝掉，顯示為 <stripped>）。"""
     return _read_one("wlans")
 
 
-@app.tool()
+@_tool
 def get_dns_records() -> str:
     """閘道的靜態 DNS 紀錄（v2 static-dns，唯讀）：A 紀錄與條件式轉發（record_type NS，
     key 是網域、value 是轉發目標）。set_dns_forward／clear_dns_forward 只認這裡讀過的。"""
     return _read_one("dnsrecords")
 
 
-@app.tool()
+@_tool
 def get_firewall_rules() -> str:
     """防火牆：舊式規則（rest/firewallrule）與 Network 9 以後的 zone-based policy
     （v2 firewall-policies），每條附上展開後的來源／目的位址（唯讀）。兩種都讀：
@@ -693,7 +729,7 @@ def _read_zones() -> "tuple[list | None, str]":
         return None, f"unreadable ({exc}); a side given only by its zone is shown unresolved"
 
 
-@app.tool()
+@_tool
 def get_lan_inventory() -> str:
     """controller 側的 LAN 清冊：設備與 client 合併成一張表（MAC、IP、名稱、種類、上聯）。
     nmap／arp-scan 那半邊由你在 app container 自己跑，再照 policy 合併。"""
@@ -1159,6 +1195,19 @@ class Tickets:
 
     def close(self, number: int) -> None:
         self._call("PATCH", f"/repos/{TICKET_REPO}/issues/{number}", {"state": "closed"})
+
+    def open_issues(self) -> list:
+        """The repo's open issues, one page of 100 (pull requests left out)."""
+        data = self._call("GET", f"/repos/{TICKET_REPO}/issues?state=open&per_page=100")
+        if not isinstance(data, list):
+            raise TicketError(f"GET issues: GitHub answered {type(data).__name__}, not a list")
+        return [i for i in data if isinstance(i, dict) and "pull_request" not in i]
+
+    def comments(self, number: int) -> list:
+        data = self._call("GET", f"/repos/{TICKET_REPO}/issues/{number}/comments?per_page=100")
+        if not isinstance(data, list):
+            raise TicketError(f"GET comments of #{number}: GitHub answered {type(data).__name__}, not a list")
+        return [c for c in data if isinstance(c, dict)]
 
 
 OPERATOR, OPERATOR_STATE = _operator_state()
@@ -1698,6 +1747,7 @@ def _class_a_refusal(plan: Plan, ctx: dict) -> str:
 # --- write side: audit, tickets, snapshot, apply, health, revert ----------------------------------
 
 _AUDIT_OUT = None   # the real stdout; __main__ points sys.stdout at stderr
+_AUDIT_LOCK = threading.Lock()   # tools run on threads: a line is written whole
 
 
 def _audit(tool: str, target: str, phase: str, stated: str, **fields: object) -> None:
@@ -1707,7 +1757,10 @@ def _audit(tool: str, target: str, phase: str, stated: str, **fields: object) ->
             "phase": phase, "stated_reason": stated, "user": USER_ID, "snapshot_digest": "", "diff_digest": "",
             "health": [], "outbound": "", "fac_witness": ""}
     line.update(fields)
-    print(json.dumps(line, ensure_ascii=False), file=_AUDIT_OUT or sys.stdout, flush=True)
+    out = _AUDIT_OUT or sys.stdout
+    with _AUDIT_LOCK:
+        out.write(json.dumps(line, ensure_ascii=False) + "\n")
+        out.flush()
 
 
 def _ticket_body(plan: Plan, change: dict, stated: str, deadline: float) -> str:
@@ -2016,6 +2069,31 @@ _TOKENS: dict[str, dict] = {}         # token -> {tool, target, diff, expires, t
 _TOKENS_LOCK = threading.Lock()       # the expiry timers below run on their own threads
 _LAST_WRITE: dict[str, float] = {}    # target -> _now() at its last execute (in memory, like reboot_node's)
 _WRITE_TIMES: list[float] = []        # _now() of every execute, for the hourly ceiling
+_LAST_DONE: dict[str, dict] = {}      # target -> {tool, result, undo} of its last execute
+TITLE_PREFIX = f"[netdev] {CLUSTER or '(CLUSTER_NAME unset)'} "
+
+# The cooldown is per target, so a set and its clear share it: 19 s after a
+# set, fleet-ops-1e's clear was refused with 580 s left (k8scc#132), and a
+# wrong reservation could not be taken back with the tool for ten minutes.
+# One exception: while the last write of a target stands as `applied`, the
+# tool that undoes it may run once inside the cooldown. That undo is a write
+# like any other (ticket, snapshot, health), counts against the hourly
+# ceiling, and after it both directions wait.
+UNDO_OF = {"set_dhcp_reservation": "clear_dhcp_reservation", "clear_dhcp_reservation": "set_dhcp_reservation",
+           "block_client": "unblock_client", "unblock_client": "block_client",
+           "set_dns_forward": "clear_dns_forward", "clear_dns_forward": "set_dns_forward"}
+
+# One write at a time (k8scc#132). The tools run on threads now, and two
+# writes side by side would each read the other's half-applied state as their
+# baseline. A second write is refused at once and told who is running; it does
+# not queue, since its will_change would be stale by the time it ran.
+_WRITE_BUSY = threading.Lock()
+_WRITE_NOW: dict = {}
+
+
+def _is_undo(tool: str, target: str) -> bool:
+    done = _LAST_DONE.get(target)
+    return bool(done and done["result"] == "applied" and not done["undo"] and UNDO_OF.get(done["tool"]) == tool)
 
 
 def _prune_tokens(now: float, keep: "str | None" = None) -> None:
@@ -2053,6 +2131,23 @@ INBOX_NOTE = ("Write ~/workspace/inbox/{date}-netdev-revert-failed-report.md NOW
 
 
 def _write(tool: str, hint: str, reason: str, confirm: str, build) -> str:
+    if not _WRITE_BUSY.acquire(blocking=False):
+        running = dict(_WRITE_NOW)
+        why = (f"another write is in progress ({running.get('tool')} {running.get('target')}, "
+               f"{'confirm' if running.get('confirm') else 'token'} phase, started "
+               f"{int(_now() - running.get('since', _now()))} s ago): one write at a time. The read tools still "
+               "answer; call this again when that one has returned")
+        _audit(tool, hint, "refused", (reason or "").strip(), reason=why)
+        return f"refused: {why}"
+    try:
+        _WRITE_NOW.update(tool=tool, target=hint, confirm=bool(confirm), since=_now())
+        return _write_one(tool, hint, reason, confirm, build)
+    finally:
+        _WRITE_NOW.clear()
+        _WRITE_BUSY.release()
+
+
+def _write_one(tool: str, hint: str, reason: str, confirm: str, build) -> str:
     stated = (reason or "").strip()
 
     def refuse(why: str, target: str = hint, **extra) -> str:
@@ -2070,9 +2165,15 @@ def _write(tool: str, hint: str, reason: str, confirm: str, build) -> str:
     now = _now()
     # ⑦ cooldown and hourly ceiling
     last = _LAST_WRITE.get(target)
-    if last is not None and now - last < WRITE_COOLDOWN:
+    undo = _is_undo(tool, target)
+    if last is not None and now - last < WRITE_COOLDOWN and not undo:
         left = int(WRITE_COOLDOWN - (now - last))
-        return refuse(f"{target} was written {int(now - last)} s ago; cooldown is {WRITE_COOLDOWN} s, {left} s left", target)
+        done = _LAST_DONE.get(target) or {}
+        back = UNDO_OF.get(done.get("tool", ""))
+        hint_undo = (f"; the one exception is taking that write back: {back}, once" if back and done.get("result") == "applied"
+                     and not done.get("undo") else "")
+        return refuse(f"{target} was written {int(now - last)} s ago; cooldown is {WRITE_COOLDOWN} s, {left} s left{hint_undo}",
+                      target)
     recent = [t for t in _WRITE_TIMES if now - t < 3600]
     if len(recent) >= WRITES_PER_HOUR:
         free_in = int(3600 - (now - min(recent)))
@@ -2097,7 +2198,7 @@ def _write(tool: str, hint: str, reason: str, confirm: str, build) -> str:
                           target, outbound=_outbound(lost), diff_digest=diff_digest)
         deadline = now + WITNESS_WAIT + TOKEN_TTL + HEALTH_TIMEOUT
         try:
-            number = TICKETS.open(f"[netdev] {CLUSTER or '(CLUSTER_NAME unset)'} {tool} {target}",
+            number = TICKETS.open(f"{TITLE_PREFIX}{tool} {target}",
                                   _ticket_body(plan, _strip(change), stated, deadline))
         except TicketError as exc:
             return refuse(f"could not open the ticket on the im→FAC channel, not writing: {exc}", target,
@@ -2144,6 +2245,7 @@ def _write(tool: str, hint: str, reason: str, confirm: str, build) -> str:
     _prune_tokens(now)
     _LAST_WRITE[target] = now
     _WRITE_TIMES.append(now)
+    _LAST_DONE[target] = {"tool": tool, "result": "", "undo": undo}
     number, witness = entry["ticket"], entry["witness"]
     common = {"diff_digest": diff_digest, "ticket": number}
 
@@ -2169,6 +2271,11 @@ def _write(tool: str, hint: str, reason: str, confirm: str, build) -> str:
         return _respond({"result": "aborted", "target": target, "ticket": number, "reason": why,
                          **({"release_not_posted": note} if note else {})})
 
+    # The record that a change is being sent, written before it is (k8scc#132).
+    # `execute` is written after health, up to NETDEV_HEALTH_TIMEOUT later; a
+    # sidecar killed in between used to leave a change on the controller with
+    # no audit line at all.
+    _audit(tool, target, "applying", stated, outbound="ok", fac_witness=witness, **common)
     if plan.dns_domain:
         plan.dns_baseline = _dns_soa(plan.dns_resolver, plan.dns_domain)[0]
     created_id, rc, maybe_applied = _apply(plan, snap)
@@ -2184,6 +2291,7 @@ def _write(tool: str, hint: str, reason: str, confirm: str, build) -> str:
     readings = {"outbound": h.outbound, "fac_witness": h.witness}
     _audit(tool, target, "execute", stated, rc=rc, health=h.passed, **readings, **common)
     if h.ok:
+        _LAST_DONE[target]["result"] = "applied"
         effect = [f"dns_effect: {h.dns_effect}"] if h.dns_effect else []
         note = _release(number, "applied", h.outbound, h.witness, ["health: " + ", ".join(h.passed), *effect,
                                                                     f"snapshot_digest: {snap.digest}"])
@@ -2219,6 +2327,77 @@ def _write(tool: str, hint: str, reason: str, confirm: str, build) -> str:
     if note:
         body["release_not_posted"] = note
     return _respond(body)
+
+
+# --- start-up: tickets a previous run left open (k8scc#132) ---------------------------------------
+
+INTERRUPTED = "interrupted"
+
+
+def _recover_tickets() -> list[str]:
+    """Read once at start-up, before any tool is served. Tokens, cooldowns and
+    a running health loop are all in memory, so a sidecar that stopped (the
+    128Mi limit killed one on jg-jcc2, 2026-11-25) leaves its tickets open and
+    nothing that will ever release them:
+      - `applying` and no release: the change may be on the controller, nobody
+        checked it, nobody reverted it. Say so on the ticket and in the audit
+        stream, leave the ticket open, put the target's cooldown back. Nothing
+        is reverted here: this process does not know what the controller holds
+        now, and a person decides.
+      - no `applying`: a token that died with the process. Released as
+        not-executed, or FAC reads the deadline passing as "escalate".
+    Assumes one sidecar per cluster at a time: a second one starting while the
+    first is mid-write would mark that write interrupted."""
+    if WRITE_BLOCKERS:
+        return []
+    try:
+        issues = TICKETS.open_issues()
+    except TicketError as exc:
+        return [f"open tickets: unreadable ({exc}); a write interrupted before this start was not looked for"]
+    mine = [i for i in issues if str(i.get("title") or "").startswith(TITLE_PREFIX)]
+    lines = [f"open tickets: {len(mine)} of this cluster's" + (" (the listing is one page of 100; there may be more)"
+                                                             if len(issues) >= 100 else "")]
+    for issue in mine:
+        number = issue.get("number")
+        tool, _, target = str(issue["title"])[len(TITLE_PREFIX):].partition(" ")
+        stated = next((ln[len("stated_reason: "):] for ln in str(issue.get("body") or "").split("\n")
+                       if ln.startswith("stated_reason: ")), "")
+        try:
+            heads = [str(c.get("body") or "").split("\n")[0].strip() for c in TICKETS.comments(number)]
+        except TicketError as exc:
+            lines.append(f"ticket #{number} ({tool} {target}): comments unreadable ({exc}), left as it is")
+            continue
+        heads = [h[len(SERVER_MARK):] for h in heads if h.startswith(SERVER_MARK)]
+        if "release" in heads or "revert-failed" in heads or INTERRUPTED in heads:
+            kind = next(h for h in ("revert-failed", INTERRUPTED, "release") if h in heads)
+            lines.append(f"ticket #{number} ({tool} {target}): open with a `{kind}` comment, left as it is")
+            continue
+        if "applying" in heads:
+            now = _now()
+            _LAST_WRITE[target] = now
+            _WRITE_TIMES.append(now)
+            why = ("the sidecar stopped after `applying` and before a release: the change may be on the controller, "
+                   "unchecked and not reverted")
+            _audit(tool, target, INTERRUPTED, stated, reason=why, ticket=number)
+            text = "\n".join([f"{SERVER_MARK}{INTERRUPTED}", f"result: {INTERRUPTED}",
+                              "found at start-up: this sidecar stopped after `applying` and before it released this "
+                              "ticket. The change may be on the controller; no health check finished and nothing was "
+                              "reverted. Nothing is reverted now either: a person decides. The snapshot is in the "
+                              "sidecar's snapshot directory, and its digest is on the `applying` audit line if that "
+                              "log survived. This ticket stays open."])
+            try:
+                TICKETS.comment(number, text)
+                lines.append(f"ticket #{number} ({tool} {target}): INTERRUPTED write, said so on the ticket, left open; "
+                             f"{target} is in cooldown")
+            except TicketError as exc:
+                lines.append(f"ticket #{number} ({tool} {target}): INTERRUPTED write, and the ticket could not be told "
+                             f"({exc}); {target} is in cooldown")
+            continue
+        note = _release(number, "not-executed", "unmeasured", "unmeasured",
+                        ["the sidecar restarted; the token issued for this ticket is gone"])
+        lines.append(f"ticket #{number} ({tool} {target}): a token lost in the restart, "
+                     + (f"release not posted ({note})" if note else "released as not-executed"))
+    return lines
 
 
 # --- write tools (registered only when every write input is usable) -----------------------------
@@ -2292,7 +2471,7 @@ WRITE_TOOLS = [set_dhcp_reservation, clear_dhcp_reservation, block_client, unblo
 # refuses for lack of configuration" state.
 if not WRITE_BLOCKERS:
     for _fn in WRITE_TOOLS:
-        app.tool()(_fn)
+        _tool(_fn)
 
 
 # --- startup readings ------------------------------------------------------------------
@@ -2356,6 +2535,6 @@ if __name__ == "__main__":
     # ext://sys.stdout — stderr instead.
     _AUDIT_OUT = sys.stdout
     sys.stdout = sys.stderr
-    for reading in _startup_readings():
+    for reading in _startup_readings() + _recover_tickets():
         print(f"netdev-mcp: {reading}", file=sys.stderr, flush=True)
     app.run(transport="sse")
