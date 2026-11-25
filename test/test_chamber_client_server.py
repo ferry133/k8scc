@@ -70,7 +70,6 @@ class Server:
                    probe.stderr)
         self.dir = tempfile.mkdtemp(prefix="chamber-synapse-")
         self.port = free_port()
-        self.unused_port = free_port()
         self.url = f"http://127.0.0.1:{self.port}"
         self.shared = secrets.token_hex(24)     # made here, dies with the directory
         self.tokens = {}
@@ -214,7 +213,7 @@ def main():
         check("3 send without --to is refused, nothing sent", "rc1, unchanged, says why",
               (rc, len(b(FO, "fac")) - n0, "without a recipient" in err),
               rc == 1 and len(b(FO, "fac")) == n0 and "without a recipient" in err)
-        rc, out, err = ch(FO, "send", "fac", "--to", PEER, "--ref", "047e9c", "T4 for peer")
+        rc, out, err = ch(FO, "send", "fac", "--to", PEER, "--ref", "abc123", "T4 for peer")
         check("4 recipient never connected -> left, offline", "rc3 and message is in the room",
               (rc, "T4 for peer" in b(FO, "fac")), rc == 3 and "T4 for peer" in b(FO, "fac"))
         rc, out, _ = ch(PEER, "read", "fac")
@@ -261,7 +260,7 @@ def main():
         rc, out, err = ch(IMA, "send", "fac", "--to", FO, "T10")
         check("10 sender not in that room", "rc1, not in the room", (rc, "T10" in b(FO, "fac")),
               rc == 1 and "T10" not in b(FO, "fac"))
-        rc, out, err = ch(FO, "send", "fac", "--to", PEER, "T11", url=f"http://127.0.0.1:{srv.unused_port}")
+        rc, out, err = ch(FO, "send", "fac", "--to", PEER, "T11", url=f"http://127.0.0.1:{free_port()}")   # a port nobody listens on, picked now
         check("11 server unreachable is NOT reported as offline", "rc2", rc, rc == 2)
         exact = "id: t1\nexpires: 2026-11-16\n---\n測試指令 trailing space \n-----SIGNATURE-----\nAAAA==\n"
         rc, out, err = ch(FO, "send", "fac", "--to", PEER, "-", stdin=exact.encode())
@@ -287,6 +286,9 @@ def main():
             time.sleep(3)
         check("16 recipient stops syncing -> shows offline", "offline within 90 s",
               (state, "%.0f s" % (time.time() - t0)), state == "offline")
+    except subprocess.TimeoutExpired as exc:
+        srv.stop()
+        cannot(f"a client call did not return within its time limit ({exc.cmd[-3:]}, {exc.timeout} s)")
     finally:
         srv.stop()
     print("\n%d/%d matched" % (sum(res), len(res)))

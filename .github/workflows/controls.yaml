@@ -53,6 +53,7 @@ jobs:
         # openspec im-chamber-client tasks 2.2 (k8scc#70). The test exits 2 when it
         # cannot start a server; that fails the job, since a run that measured
         # nothing is not a pass. 1.165.0 is what the operator side's bench ran.
+        # Only in this file, not in build.yaml: see the note there.
         run: |
           python3 -m venv "$RUNNER_TEMP/synapse-venv"
           "$RUNNER_TEMP/synapse-venv/bin/pip" install --quiet "matrix-synapse==1.165.0"
