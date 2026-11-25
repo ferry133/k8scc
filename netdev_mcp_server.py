@@ -530,19 +530,22 @@ _SEEN_AT: dict[str, float] = {}                        # collection -> when a re
 
 def _remember(collection: str, items) -> None:
     now = _now()
-    if isinstance(items, list):
-        _SEEN_AT[collection] = now
-        # A whole read replaces what was known: an object the controller no
-        # longer lists must not stay addressable. A forward cleared and read
-        # again was still planned as "exists", and the set that takes the
-        # clear back was aborted at its snapshot (found with k8scc#132's undo).
-        _SEEN[collection] = {}
-    bucket = _SEEN.setdefault(collection, {})
-    for obj in items if isinstance(items, list) else [items]:
+    whole = isinstance(items, list)
+    # A whole read replaces what was known: an object the controller no longer
+    # lists must not stay addressable. A forward cleared and read again was
+    # still planned as "exists", and the set that takes the clear back was
+    # aborted at its snapshot (found with k8scc#132's undo). The new bucket is
+    # filled first and put in place in one assignment, so a write planning on
+    # another thread never finds the collection empty in between.
+    bucket = {} if whole else _SEEN.setdefault(collection, {})
+    for obj in items if whole else [items]:
         if isinstance(obj, dict):
             key = obj.get("_id") or obj.get("id")
             if key:
                 bucket[str(key)] = (obj, now)
+    if whole:
+        _SEEN[collection] = bucket
+        _SEEN_AT[collection] = now
 
 
 def _seen(collection: str, key: str) -> "dict | None":
