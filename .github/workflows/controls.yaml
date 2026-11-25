@@ -49,6 +49,16 @@ jobs:
         run: test/chamber-controls.sh
       - name: Check the chamber socket and image-default controls
         run: python3 test/test_chamber_tools.py
+      - name: Check the chamber client against a real server (a throwaway Synapse)
+        # openspec im-chamber-client tasks 2.2 (k8scc#70). The test exits 2 when it
+        # cannot start a server; that fails the job, since a run that measured
+        # nothing is not a pass. 1.165.0 is what the operator side's bench ran.
+        run: |
+          python3 -m venv "$RUNNER_TEMP/synapse-venv"
+          "$RUNNER_TEMP/synapse-venv/bin/pip" install --quiet "matrix-synapse==1.165.0"
+          SYNAPSE_PYTHON="$RUNNER_TEMP/synapse-venv/bin/python" python3 test/test_chamber_client_server.py
+      - name: TEMPORARY - the six client mutations on this Synapse (removed before merge)
+        run: SYNAPSE_PYTHON="$RUNNER_TEMP/synapse-venv/bin/python" python3 test/chamber-client-mutate.py || true
       - name: Check the chamber-bridge controls
         run: python3 test/test_chamber_bridge.py
       - name: Check the chamber-watch controls
