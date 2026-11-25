@@ -135,6 +135,14 @@ session_state() {
     # empty line and rc 0 (measured for inbox-watch, k8scc#60)
     cmd=$(tmux_t display-message -p -t "=$session:" '#{pane_current_command}' 2>/dev/null)
     [ "$cmd" = claude ] || { echo "the pane's process is '${cmd}', not claude"; return 1; }
+    # A session younger than the settle is not judged at all (k8scc#70, jcom,
+    # 2026-11-26, fleet-ops-02): for the first beat after it started, a session
+    # whose login had expired showed a plain empty prompt, the "Not logged in"
+    # status line was drawn only by the next beat, and that one alive signal
+    # kept the bridge online for three beats. The same age rule already holds
+    # for typing. The price is that every im reads offline for its first
+    # ${settle} seconds.
+    old_enough || { echo "the session is younger than ${settle}s or its age cannot be read"; return 1; }
     if why=$(pane_screen); then echo idle; return 0; fi
     [ "$why" = "turn running" ] && { echo "turn running"; return 0; }
     echo "$why"; return 1
