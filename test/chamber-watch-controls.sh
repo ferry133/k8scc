@@ -205,8 +205,20 @@ run later CHAMBER_WATCH_TICKS=2
 check "… and it is typed on the first beat after the pane is idle" [ "$(sends later)" = 1 ]
 setup young; printf '1 cust-a\n' > "$work/young/fake/pending"; date +%s > "$work/young/fake/session"; run young
 check "a session younger than the settle time: nothing typed" [ "$(sends young)" = 0 ]
-check "… and said"                                      grep -q 'skipped (the session is younger than 30s' "$work/young/stderr"
-check "… but the signal is sent (the pane is judged, not the age)" [ "$(beats young)" = 1 ]
+# Until 2026-11-26 the signal was sent for a young session ("the pane is
+# judged, not the age"). On jcom that one signal kept an im whose login had
+# expired online for three beats: its status line was not drawn yet (k8scc#70).
+check "… and no signal either: a young session is not judged" [ "$(beats young)" = 0 ]
+check "… and said, once"                                [ "$(grep -c 'no alive signal: the session is younger than 30s or its age cannot be read' "$work/young/stderr")" = 1 ]
+setup grows; date +%s > "$work/grows/fake/session"
+echo "echo $(( $(date +%s) - 3600 )) > \"\$FAKE_DIR/session\"" > "$work/grows/fake/hook.1"
+run grows CHAMBER_WATCH_TICKS=3
+check "young for one beat, then old enough: the signal starts with the second beat" [ "$(beats grows)" = 2 ]
+check "… and the log says both"                         [ "$(grep -c 'no alive signal: the session is younger\|alive signal sent (idle)' "$work/grows/stderr")" = 2 ]
+setup noage; echo "not a number" > "$work/noage/fake/session"; run noage
+check "the session's age cannot be read: no signal (fail closed)" [ "$(beats noage)" = 0 ]
+setup settle0; date +%s > "$work/settle0/fake/session"; run settle0 CHAMBER_WATCH_SETTLE=0
+check "control: with a settle of 0 the same young session is alive" [ "$(beats settle0)" = 1 ]
 setup sendfail; printf '1 cust-a\n' > "$work/sendfail/fake/pending"; touch "$work/sendfail/fake/sendfail"; run sendfail CHAMBER_WATCH_TICKS=2
 check "a failed send marks nothing the first time"      [ "$(grep -c . "$work/sendfail/fake/announced")" = 1 ]
 check "… and is tried again on the next beat"           grep -q 'send-keys failed, will retry' "$work/sendfail/stderr"

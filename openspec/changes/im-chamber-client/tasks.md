@@ -14,6 +14,7 @@
   - **這一項不勾。沒量**：token 用量本身（量到的是「沒有任何一輪對話被寫下」，帳號那一側的用量讀不到，不經 transcript 的背景請求看不到）；全新的設定卷（這個卷以前登入過，11-19 的那個一次性對話框這次沒出現，哪一個設定關掉它沒查）；信任對話框；OAuth 過期時的畫面
 - [ ] 1.3 伺服器側多久把一個不再同步的帳號標成不在線（橋接程式被 `kill -9` 之後量）；據此定 `CHAMBER_BEAT`
 - [ ] 1.4 pane 的「登入畫面／信任對話框」長什麼樣（在映像上錄下來，像 `inbox-watch` 當初量 prompt 那樣）；D-c 的判斷式據此寫
+  - **錄到的（截至 2026-11-26）**：信任對話框（`TRUST_REAL`，jg-jcc2，2026-11-10）；登入過期後的 pane（`NOT_LOGGED_IN_REAL`，jcom，2026-11-25，Claude Code 2.1.261，`fleet-ops-02 [e3795b]` 貼在 k8scc#70 issuecomment-7166698330）。**沒有錄到**：第一次登入的畫面。所以不勾
 
 ## 2. 用戶端與驗章（root 6.2）
 
@@ -66,6 +67,9 @@
   - **沒量**：真的 tmux 與 Claude Code（`pane_current_command` 是 `claude` 這一點是 tasks 1.2 在 pod 上讀過一次的）；真的 Synapse 上 20 s 一輪夠不夠密；pod 裡 `app` 的 uid 開不開得了 bridge 建的 0600 socket（兩個 container 都是 uid 0 是 jg-base 側說的，沒量）
 - [ ] 4.2 controls（拋棄式叢集）：殺掉 `claude` ⇒ 三個間隔內顯示不在線、FAC 側 `chamber send` 回 3；session 回來 ⇒ 在線（正對照）；卡在登入畫面 ⇒ 不在線；只有橋接程式活著 ⇒ 不在線
   - **(a) 量了（`fleet-ops-02 [e3795b]`，jg-jcc2，映像 `aaae5d4`，2026-11-24 06:32–06:39，每格事前寫預期；讀數全文在 k8scc#70 的留言）**：`pkill -x claude` 後 bridge 在 +75 秒記 `online=no`，`fo` 側 +77 秒第一次讀到 offline；FAC 側 `send` 回 3，25 秒後 pod 裡沒有 `claude`。(b)、(d) 先前已有讀數。**(c) 卡在登入畫面沒量**（不登出造不出那個畫面），所以不勾
+  - **(c) 的一種量到了，不是原本寫的那一種（2026-11-25～26，`fleet-ops-02 [e3795b]`，jcom，生產）**：session 不是卡在登入畫面，而是登入過期後停在空提示。舊映像（`e6926e6`）上它報 `online=yes`、`send` 回 0，通知被打進去而沒有人處理。PR #143（`pane-gate` 認得 `Not logged in · Run /login` 與 `Login expired · Please run /login`，合併為 `5bc611d`）之後，在 `615cc51` 上讀到（issuecomment-7170188569）：chamber-watch 記 `no alive signal: not logged in`，bridge 轉 `online=no`，`send` 回 3，沒有東西被打進 pane；同一顆映像上已登入的 jg-jiahd、jg-jcc2 是 `online=yes`。狀態列在任何東西被打進去之前就在
+  - **開頭的窗口**：那次讀數裡，session 剛起來的第一拍狀態列還沒畫出來，被當成閒置送了一次在線訊號，bridge 因此在線了三拍（約一分鐘）。改法（2026-11-26，`k8scc-bf [97703c]`）：比 `CHAMBER_WATCH_SETTLE`（預設 30 秒）年輕的 session 不判斷、不送訊號，打字本來就有這條。代價是每一座 im 的 session 起來後前 30 秒讀起來不在線。只有那一個讀數；改法沒有在 pod 上跑過
+  - **這一項仍不勾**：第一次登入的畫面（沒有輸入框的那一種）沒有量；登入在 session 閒置中途過期沒有量
 - [ ] 4.3 `session-keep`（`SESSION_KEEP=1`）：pod 啟動時起、掉了重起、ttyd 接上同一個；起不來時 log 與在線讀數看得見。依 1.2 的讀數
   - **程式與假的對照做了（2026-11-19 08:31，`k8scc-0f [7c5b85]`）；這一項不勾，因為它的實質是 pod 上的讀數**。`session-keep`（`entrypoint.sh` 起，`SESSION_KEEP` 不是 `1` 就印一行結束——預設關，現有的 pod 只多一行 log）。session 不在時以 `CLAUDE_SESSION_DETACHED=1 claude-session` 起：`claude-session` 多一個模式，照常做 MCP 註冊與權限設定，然後 `tmux new-session -d -x 200 -y 50`，沒有歡迎詞、沒有 inbox 的 8 秒停頓；ttyd 之後連進來照舊 `-A` 接上同一個。已存在的 session 不動。起不來只說一次。**它不讀任何訊息**，也不判斷 session 有沒有到 prompt——那由 `chamber-watch` 的訊號與 log 顯示
   - controls：`test/session-keep-controls.sh` 36 格（跑的是真的 `claude-session`）。七個變異各自轉紅；**其中一個第一輪存活**（拿掉 `session-keep` 自己的「已存在就不動」）：「`claude-session` 完全沒被跑」那格在沒有 MCP 要註冊時分不出「沒跑」與「跑了但沒事做」，已改
@@ -73,6 +77,7 @@
   - **沒量（都要 pod）**：detached 起的 `claude` 到不到得了 prompt（1.2 量到它會停在一次性的對話框）；ttyd 連上之後畫面大小有沒有跟著改；閒置的用量；OAuth 過期時的樣子
   - **pod 上的讀數（2026-11-25，`fleet-ops-02 [e3795b]`，jg-jcc2，全文在 k8scc#70 issuecomment-7158510603）**：啟動時先印 `keeping the session 'claude' running, checked every 30s`，再印 `no session, started one (detached)`；用 Chrome 開頁接上的是同一個 session（created 與 pane pid 不變，attached 0→1，關掉分頁後回 0，session 與 online 都還在）；殺掉 `claude` 後 23 秒有新的 session 並再到空提示（映像 `17ce78a`）。那次留下兩個殭屍行程，是 k8scc#133；PR #136（tini 當 PID 1）合併為 `54da413`，在 `c3070f1` 上同一個動作 3 秒與 48 秒各讀到 0 個 defunct
   - **這一項不勾。沒量**：「起不來時 log 與在線讀數看得見」在 pod 上沒有出現過（每一次都起得來），那一格只有假的對照；生產上沒有開，開不開是 ferry133 的決定
+  - **生產上的讀數（2026-11-25 23:1x，`fleet-ops-02 [e3795b]`，映像 `e6926e6`；ferry133 當晚在它的 console 指示兩座生產 im 開 `SESSION_KEEP=1`，jcom `32b52c3`、jg-jiahd `90b1092`；全文在 k8scc#70 issuecomment-7166698330）**：兩座 pod 重建後 session 都自己起來，bridge `online=yes`，`chamber send` 回 0。**jg-jiahd：第一則被生產 im 處理的房間訊息**，23:12:09 送出，im 23:12:50 讀到，23:13:24 在房間回 ack。jcom：通知進了 session，Claude Code 回 `Login expired · Please run /login`，房間裡沒有回覆（見 4.2）。這一項照舊不勾：「起不來時看得見」仍然只有假的對照
 - [ ] 4.4 不喚起的負對照（root 6.4）：`SESSION_KEEP` 關、沒有 session、送一份驗得過的直接指令 ⇒ 沒有任何行程被起、發送方得到「不在線」。正對照：同一份指令在 session 存在時被宣告
 
 ## 5. 宣告與回程（root 6.3、6.5）
