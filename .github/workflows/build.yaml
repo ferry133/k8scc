@@ -127,6 +127,11 @@ jobs:
         run: test/chamber-controls.sh
       - name: Check the chamber socket and image-default controls
         run: python3 test/test_chamber_tools.py
+      # Not here: test/test_chamber_client_server.py (the client against a throwaway
+      # Synapse) runs in controls.yaml only. It installs matrix-synapse and its
+      # unpinned dependency tree, and this job holds packages: write; and one of
+      # its cells waits on the server's presence timeout, which must not be what
+      # stops an image from being published (fleet-ops-02 on PR #141).
       - name: Check the chamber-bridge controls
         run: python3 test/test_chamber_bridge.py
       - name: Check the chamber-watch controls
