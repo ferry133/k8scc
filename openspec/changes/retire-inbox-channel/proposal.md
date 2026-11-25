@@ -11,7 +11,7 @@ ferry133 2026-11-21 在 fleet-ops-4c 的 console 選了方案 A：等每一座 i
 - `ferry133/jg-cluster-template#263`：讓 `cluster.yaml` 能開 chamber 的欄位。
 - jcom、jg-jiahd 先跑 `observe`，讀數穩定後由 ferry133 點頭切到 `deliver`。
 
-**歸檔順序：** `im-chamber-client` 的 `operator-inbox` delta 會 MODIFY「A running session is told…」，本 change 則 REMOVE 這一條。所以 `im-chamber-client` 必須先歸檔；反過來的話，歸檔時會 MODIFY 一條已經不存在的 requirement。
+**歸檔順序（2026-11-25 改）：** `im-chamber-client` 原本帶一份 `operator-inbox` 的 MODIFIED delta，修改的正是本 change 要 REMOVE 的那一條，所以它得先歸檔。那份 delta 已在本 PR 裡從 `im-chamber-client` 撤回，兩個 change 不再碰同一條 requirement，歸檔先後不拘。
 
 ## What Changes
 

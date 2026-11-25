@@ -1,9 +1,10 @@
 ## 1. 前置條件（不在本 repo；三項都完成之前不合併）
 
-- [ ] 1.1 `ferry133/jg-extras#26`：生產用 chamber 伺服器
-- [ ] 1.2 `ferry133/jg-cluster-template#263`：`cluster.yaml` 能開 chamber
+- [x] 1.1 `ferry133/jg-extras#26`：生產用 chamber 伺服器（已關，2026-11-23 讀）
+- [x] 1.2 `ferry133/jg-cluster-template#263`：`cluster.yaml` 能開 chamber（已關，2026-11-23 讀）
 - [ ] 1.3 jcom、jg-jiahd 先跑 observe，再切到 deliver（ferry133 點頭）
-- [ ] 1.4 `im-chamber-client` 先歸檔（它的 `operator-inbox` delta 會 MODIFY 本 change 要 REMOVE 的那條 requirement）
+  - 兩座都已是 observe（jcom `c2241e7` 11-23、jg-jiahd `1bee0b3` 11-24）。**切 deliver：ferry133 2026-11-25 在 k8scc-bf 的 console 以選項回答「兩座都切」**；執行交給 fleet-ops（它的 repo），讀數回來才勾
+- [x] 1.4 ~~`im-chamber-client` 先歸檔~~ 不再需要（2026-11-25）：它的 `operator-inbox` delta 已撤回，兩個 change 不再改同一條 requirement
 
 ## 2. k8scc（PR，k8scc#103）
 
