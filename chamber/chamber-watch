@@ -223,6 +223,14 @@ tick() {
         if bridge POST /bridge/beat >/dev/null; then now="alive signal sent (${state})"; else now="the bridge cannot be reached at ${sock}"; fi
     else
         now="no alive signal: ${state}"
+        # Three readings mean there is no session that can act, and the bridge
+        # is told so at once instead of being left to notice three beats of
+        # silence (k8scc#146). Every other reason (a dialog, a half-typed
+        # line, a tmux call that did not answer) stays silence: a person
+        # typing at the ttyd must not flip the im offline within one beat.
+        case "$state" in
+            "no session"|"the pane's process is "*|"not logged in") bridge POST /bridge/gone >/dev/null ;;
+        esac
     fi
     # `idle` and `turn running` alternate all day; that is not a change worth a line
     case "$now" in "alive signal sent"*) key="alive" ;; *) key="$now" ;; esac

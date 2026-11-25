@@ -40,6 +40,8 @@ Modes (CHAMBER_MODE)
 
 Local paths (answered here, never forwarded; used by chamber-watch)
   POST /bridge/beat        the alive signal
+  POST /bridge/gone        the opposite reading: there is no session that can
+                           act (none, not claude, not logged in)
   GET  /bridge/pending     one line per room, "<count> <room>": messages naming
                            this im or all that the session was not yet told about.
                            Empty in observe mode. No text, no sender.
@@ -111,6 +113,9 @@ ACCOUNT = ""
 ME = None                     # the server's answer to "who am I", once it matched ACCOUNT
 STATE = {"server": "unmeasured"}
 BEAT_AT = [None]              # time.monotonic() of the last alive signal
+GONE = [False]                # the watcher's last word was "no session that can act" (k8scc#146)
+SHOWN = [None]                # the presence last set at the server: 'online' | 'offline'
+PRESENCE_LOCK = threading.Lock()
 PENDING = {}                  # room id -> messages for this im not yet announced (deliver only)
 NAMES = {}                    # room id -> name, as last read
 LOCK = threading.Lock()
@@ -305,10 +310,22 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.answer(status, raw)
 
     def local(self, method, path):
-        """The three paths chamber-watch uses. Nothing here reaches the server."""
+        """The four paths chamber-watch uses. Nothing here reaches the server."""
         if (method, path) == ("POST", "/bridge/beat"):
             with LOCK:
                 BEAT_AT[0] = time.monotonic()
+                GONE[0] = False
+            return self.answer(200, (MODE + "\n").encode(), "text/plain")
+        if (method, path) == ("POST", "/bridge/gone"):
+            # The three-beat tolerance is for a watcher that says nothing (a
+            # slow beat, a tmux call that hangs). A watcher that says the
+            # session is gone is not silence: fleet-ops-02 read online=yes
+            # held across a whole minute with no session (jg-jcc2, 13d8a32,
+            # 2026-11-26, k8scc#146), because the signal came back exactly
+            # three beats later.
+            with LOCK:
+                BEAT_AT[0] = None
+                GONE[0] = True
             return self.answer(200, (MODE + "\n").encode(), "text/plain")
         if (method, path) == ("GET", "/bridge/pending"):
             rows = {}
@@ -425,6 +442,11 @@ def status_loop(beat):
             if names is not None:
                 rooms = ",".join(sorted(printable(n) for n in names.values())) or "-"
             note("the rooms could not be read", why)
+            # Set before it is read, the first time: the server still holds
+            # what the previous pod left, and the first line used to repeat
+            # it (online=yes with no signal yet, then no; k8scc#146).
+            if MODE == "deliver" and SHOWN[0] is None:
+                show_presence(beat)
             s, d, why = upstream_json("GET", P + "/presence/%s/status" % urllib.parse.quote(ME, safe=""))
             if s == 200 and isinstance(d.get("presence"), str):
                 online = "yes" if d["presence"] in ("online", "unavailable") else "no"
@@ -454,18 +476,28 @@ def presence_loop(beat):
     fresh: on a bench Synapse an account set online and left alone was read
     online at +45 s and offline at +90 s (k8scc#76), so the round is capped at
     20 s. Not online is said once, when the signal stops."""
-    shown = None
     while True:
-        if ME is not None:
-            if alive(beat):
-                if set_presence("online") and shown != "online":
-                    log("chamber-bridge: online — the session's alive signal is arriving")
-                    shown = "online"
-            elif shown != "offline":
-                if set_presence("offline"):
-                    log("chamber-bridge: not online — %s" % ("no alive signal yet" if BEAT_AT[0] is None else "no alive signal for three beats"))
-                    shown = "offline"
+        show_presence(beat)
         time.sleep(min(beat, 20))
+
+
+def show_presence(beat):
+    """One round of presence_loop; also run once by status_loop before its
+    first reading. One at a time, so "not online" is still said once."""
+    with PRESENCE_LOCK:
+        if ME is None:
+            return
+        if alive(beat):
+            if set_presence("online") and SHOWN[0] != "online":
+                log("chamber-bridge: online — the session's alive signal is arriving")
+                SHOWN[0] = "online"
+        elif SHOWN[0] != "offline":
+            if set_presence("offline"):
+                with LOCK:
+                    why = ("the watcher says there is no session that can act" if GONE[0]
+                           else "no alive signal yet" if BEAT_AT[0] is None else "no alive signal for three beats")
+                log("chamber-bridge: not online — %s" % why)
+                SHOWN[0] = "offline"
 
 
 def addressed(event, me):
