@@ -1595,12 +1595,25 @@ def _plan_reservation(tool: str, mac: str, ip: "str | None") -> "tuple[Plan | No
 
 def _plan_block(tool: str, mac: str, block: bool) -> "tuple[Plan | None, str]":
     client = _seen_by("clients", ("macAddress", "mac"), mac)
+    collection = "clients"
+    if client is None and not block:
+        # k8scc#137 (fleet-ops-1e, FAC1 console, Network 11.0.104, 2026-11-25):
+        # a blocked wired client was no longer in stat/sta, so the tool could
+        # not take off the block it had put on. Its `users` row was still
+        # there with blocked: true. An unblock, and only an unblock, may
+        # address a MAC a users read returned as blocked; the target stays
+        # clients/<mac>, so it shares the block's cooldown and its one undo.
+        user = _seen_by("users", ("mac",), mac)
+        if user is not None and user.get("blocked") is True:
+            client, collection = user, "users"
     if client is None:
-        return None, _read_first("get_clients")
+        return None, _read_first("get_clients") + (
+            "" if block else ". A blocked client can be missing from get_clients: call get_dhcp_reservations, which "
+            "reads every known client, and one it returned as blocked can be unblocked")
     mac = mac.strip().lower()
     do, undo = ("block-sta", "unblock-sta") if block else ("unblock-sta", "block-sta")
     cid = str(client.get("id") or client.get("_id"))
-    return Plan(tool, "clients", cid, f"clients/{mac}", "command", before=client, endpoint="stamgr",
+    return Plan(tool, collection, cid, f"clients/{mac}", "command", before=client, endpoint="stamgr",
                 command={"cmd": do, "mac": mac}, inverse={"cmd": undo, "mac": mac}, class_a=("clients", mac)), ""
 
 

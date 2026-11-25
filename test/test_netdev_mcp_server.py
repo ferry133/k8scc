@@ -96,6 +96,7 @@ class FakeController:
     def __init__(self, tls=None):
         self.requests = []
         self.data = json.loads(json.dumps(FIXTURES))
+        self.hide_blocked = False   # True: a blocked client is not in stat/sta, as on FAC1 (k8scc#137)
         self.status = {}        # path -> forced HTTP status
         self.legacy_rc = "ok"
         self.writes = []        # (method, path, body) of every login/PUT/POST/DELETE
@@ -196,7 +197,10 @@ class FakeController:
         if path in legacy:
             if self.legacy_rc != "ok":
                 return 200, {"meta": {"rc": "error", "msg": "api.err.NoPermission"}, "data": []}
-            return 200, {"meta": {"rc": "ok"}, "data": self.data[legacy[path]]}
+            rows = self.data[legacy[path]]
+            if self.hide_blocked and legacy[path] == "clients":
+                rows = [c for c in rows if not c.get("blocked")]
+            return 200, {"meta": {"rc": "ok"}, "data": rows}
         v2 = {V2 + k: v for k, v in self.V2_GETS.items()}
         if path in v2:
             return 200, self.data[v2[path]]          # v2 answers a bare list
@@ -216,7 +220,7 @@ class FakeController:
             return self.write_v2(method, path[len(V2 + "/static-dns"):].strip("/"), body)
         if path in (LEGACY + "/cmd/stamgr", LEGACY + "/cmd/devmgr") and method == "POST":
             if body.get("cmd") in ("block-sta", "unblock-sta"):
-                for c in self.data["clients"]:
+                for c in self.data["clients"] + self.data["users"]:   # FAC1: the users row carries blocked too (k8scc#137)
                     if c["mac"] == body.get("mac"):
                         c["blocked"] = body["cmd"] == "block-sta"
             return ok([])
@@ -2365,6 +2369,63 @@ class DnsForwards(WriteCase):
             out = self.run_tool(tool, reason="x", **args)
             self.assertRegex(out, r"^refused: dnsrecords/lab\.test was written \d+ s ago; cooldown is 600 s", tool)
             self.assertNotIn("the one exception", out)
+
+
+class UnblockWhatWasBlocked(WriteCase):
+    """k8scc#137: on FAC1 a blocked wired client is no longer in stat/sta
+    (fleet-ops-1e, 2026-11-25: 53 clients instead of 54, for the 14 minutes it
+    was blocked), while its users row stays, with blocked: true. The fake does
+    that here (hide_blocked); elsewhere it keeps a blocked client listed."""
+
+    def setUp(self):
+        super().setUp()
+        self.h.fake.hide_blocked = True
+
+    def macs(self):
+        return [c["mac"] for c in body(self.run_tool("get_clients"))]
+
+    def test_a_block_can_be_taken_off_though_the_client_left_the_listing(self):
+        self.read()
+        self.assertIn(PHONE, self.macs())
+        self.assertEqual(self.write("block_client")["result"], "applied")
+        self.assertNotIn(PHONE, self.macs(), "control: the fake drops a blocked client, as FAC1 did")
+        out = self.run_tool("unblock_client", reason="it was the wrong one", mac=PHONE)
+        self.assertRegex(out, r"^refused: read it first: call get_clients .* call get_dhcp_reservations, which reads "
+                              r"every known client, and one it returned as blocked can be unblocked$")
+        self.read("get_dhcp_reservations")
+        res = self.write("unblock_client")
+        self.assertEqual(res["result"], "applied", res)
+        self.assertEqual(res["target"], f"clients/{PHONE}")
+        cmds = [b for m, p, b in self.h.fake.mutations() if p.endswith("/cmd/stamgr")]
+        self.assertEqual(cmds, [{"cmd": "block-sta", "mac": PHONE}, {"cmd": "unblock-sta", "mac": PHONE}])
+        self.assertIn(PHONE, self.macs())
+        snaps = sorted(self.h.snapshots.iterdir())
+        last = json.loads(snaps[-1].read_text())
+        self.assertEqual((last["collection"], last["object"]["_id"], last["object"]["blocked"]), ("users", "u-phone", True))
+
+    def test_only_a_user_read_as_blocked_and_only_for_an_unblock(self):
+        self.read()
+        self.assertEqual(self.write("block_client")["result"], "applied")
+        self.m._LAST_WRITE.clear()
+        with self.subTest("a user that was not read"):
+            self.run_tool("get_clients")            # the blocked client leaves the clients cache
+            self.m._SEEN.pop("users", None)
+            self.assertIn("refused: read it first", self.run_tool("unblock_client", reason="x", mac=PHONE))
+        self.read("get_dhcp_reservations")
+        with self.subTest("block_client never addresses from users"):
+            self.assertIn("refused: read it first: call get_clients",
+                          self.run_tool("block_client", reason="x", mac=PHONE))
+            self.assertNotIn("get_dhcp_reservations", self.run_tool("block_client", reason="x", mac=PHONE))
+        with self.subTest("a user that is not blocked"):
+            next(u for u in self.h.fake.data["users"] if u["mac"] == PHONE)["blocked"] = False
+            next(c for c in self.h.fake.data["clients"] if c["mac"] == PHONE)["blocked"] = True   # still hidden
+            self.read("get_dhcp_reservations")
+            self.assertIn("refused: read it first", self.run_tool("unblock_client", reason="x", mac=PHONE))
+        with self.subTest(control="read as blocked, the same call gets its token"):
+            next(u for u in self.h.fake.data["users"] if u["mac"] == PHONE)["blocked"] = True
+            self.read("get_dhcp_reservations")
+            self.assertIn("token", self.token("unblock_client"))
+        self.assertEqual(len(self.h.fac.issues), 2, "a refused unblock opened a ticket")
 
 
 class OneWriteAtATime(WriteCase):
