@@ -10,6 +10,8 @@
   - **沒量**：ferry133 真的那把金鑰簽的指令（root 4.2，要他在 MacBook 上簽一次）；arm64 的映像；`--use` 與那本帳在 pod 裡的行為（這次刻意沒帶 `--use`，`HOME` 指到暫存目錄，沒碰 PVC 上的任何檔）
 - [ ] 1.2 session 常駐可不可行：沒有人接著 ttyd 時，detached tmux 裡以 `claude-session` 起的互動式 `claude` 能不能到達 prompt（終端機大小、信任對話框、OAuth 過期時的畫面各一格）；到了之後閒置一小時的 token 用量。不成立 ⇒ 回 root 重想 R20 在現有映像上怎麼做
   - **讀數（2026-11-19 00:2x，`fleet-ops-98 [047e9c]`，拋棄式叢集的 im pod，Claude Code 2.1.261、tmux 3.3a，一次）**：`tmux -u new-session -d -s probe -x 160 -y 45 -- claude`（另一個 session 名，沒有人接著；原有的 `claude` session 沒碰）⇒ 起得來，已登入，5 秒內畫出畫面；**但停在一個沒預期到的對話框**（「Try the new fullscreen renderer?」，`❯ 1. Yes, try it`／`2. Not now`，Enter 確認），15 秒後仍在那裡，`pane_current_command=claude`。所以：(a) detached 起動這一半成立；(b) **「行程是 `claude`」不等於到了 prompt**——design D-c 只列登入與信任兩種畫面不夠，要改成「是閒置的空 prompt 才算」（`inbox-watch` 的 `pane_idle` 正好是這個判斷，那個對話框會被它的選單規則擋下）；(c) 常駐的 session 會卡在這種一次性的對話框上，沒有人按就永遠不在線——要嘛讓它看得見，要嘛預先關掉（哪個設定關它，沒查）。沒量：直接經 `claude-session` 起（這次是直接起 `claude`）、OAuth 過期的畫面、信任對話框、閒置的用量
+  - **讀數（2026-11-25，`fleet-ops-02 [e3795b]`，jg-jcc2，`SESSION_KEEP=1`（jg-jcc2 `39ecbd2`，ferry133 當天在 k8scc-bf 的 console 選「在 jg-jcc2 開」，只這一座）；每格事前寫預期，全文在 k8scc#70 issuecomment-7158510603）**：經 `claude-session` 的 detached 起動（映像 `17ce78a`，15:33–15:37）到了空提示，沒有對話框，session 起來後第一行狀態就是 `online=yes`。**閒置 62 分鐘**（映像 `550287e`，16:14–17:16，沒有人碰）：同一個 session（created 不變）、畫面仍是空提示；`~/.claude/projects` 沒有新的 transcript 檔、沒有任何檔在 session 建立後被寫過；186 行狀態全是 `online=yes`、`server=ok`；session-keep 沒有重起，pod 重啟 0
+  - **這一項不勾。沒量**：token 用量本身（量到的是「沒有任何一輪對話被寫下」，帳號那一側的用量讀不到，不經 transcript 的背景請求看不到）；全新的設定卷（這個卷以前登入過，11-19 的那個一次性對話框這次沒出現，哪一個設定關掉它沒查）；信任對話框；OAuth 過期時的畫面
 - [ ] 1.3 伺服器側多久把一個不再同步的帳號標成不在線（橋接程式被 `kill -9` 之後量）；據此定 `CHAMBER_BEAT`
 - [ ] 1.4 pane 的「登入畫面／信任對話框」長什麼樣（在映像上錄下來，像 `inbox-watch` 當初量 prompt 那樣）；D-c 的判斷式據此寫
 
@@ -66,6 +68,8 @@
   - controls：`test/session-keep-controls.sh` 36 格（跑的是真的 `claude-session`）。七個變異各自轉紅；**其中一個第一輪存活**（拿掉 `session-keep` 自己的「已存在就不動」）：「`claude-session` 完全沒被跑」那格在沒有 MCP 要註冊時分不出「沒跑」與「跑了但沒事做」，已改
   - ⚠️ **一次沒解釋的紅**：這份對照第一次跑紅了 10 格（都是要跑 `claude-session` 的那些），接著連跑 10 次全綠，成因沒找到——第一次的暫存目錄已經刪掉。現在紅的 run 會印出各格的 log。若 CI 上再出現，照印出來的查，不要重跑了事
   - **沒量（都要 pod）**：detached 起的 `claude` 到不到得了 prompt（1.2 量到它會停在一次性的對話框）；ttyd 連上之後畫面大小有沒有跟著改；閒置的用量；OAuth 過期時的樣子
+  - **pod 上的讀數（2026-11-25，`fleet-ops-02 [e3795b]`，jg-jcc2，全文在 k8scc#70 issuecomment-7158510603）**：啟動時先印 `keeping the session 'claude' running, checked every 30s`，再印 `no session, started one (detached)`；用 Chrome 開頁接上的是同一個 session（created 與 pane pid 不變，attached 0→1，關掉分頁後回 0，session 與 online 都還在）；殺掉 `claude` 後 23 秒有新的 session 並再到空提示（映像 `17ce78a`）。那次留下兩個殭屍行程，是 k8scc#133；PR #136（tini 當 PID 1）合併為 `54da413`，在 `c3070f1` 上同一個動作 3 秒與 48 秒各讀到 0 個 defunct
+  - **這一項不勾。沒量**：「起不來時 log 與在線讀數看得見」在 pod 上沒有出現過（每一次都起得來），那一格只有假的對照；生產上沒有開，開不開是 ferry133 的決定
 - [ ] 4.4 不喚起的負對照（root 6.4）：`SESSION_KEEP` 關、沒有 session、送一份驗得過的直接指令 ⇒ 沒有任何行程被起、發送方得到「不在線」。正對照：同一份指令在 session 存在時被宣告
 
 ## 5. 宣告與回程（root 6.3、6.5）
@@ -109,8 +113,9 @@
 - [ ] 7.2 偽造簽章、清單外的金鑰、過期指令、用過的指令、`transcript:` 指標：`directive-verify` 各回 1／1／1／1／2，im 都不動作
   - **兩格量了（`fleet-ops-02 [e3795b]`，jg-jcc2，映像 `aaae5d4`，2026-11-24 06:32–06:39，每格事前寫預期；讀數全文在 k8scc#70 的留言）**：清單外的金鑰在 pod 裡回 1（同一份位元組在清單含那把金鑰的 Mac 上回 0）；`transcript:` 指標回 2。偽造簽章（T3）與用過的（S4）先前已有。**過期那一格沒量**（要 ferry133 簽）。R21 之後「im 都不動作」只在結果是 1 時成立
 - [ ] 7.3 一般訊息與直接指令都不喚起（4.4）
-- [ ] 7.4 `observe` → `deliver` 的切換與退回：退回後行為與切換前逐格相同
+- [x] 7.4 `observe` → `deliver` 的切換與退回：退回後行為與切換前逐格相同
   - **量了（`fleet-ops-02 [e3795b]`，jg-jcc2，映像 `aaae5d4`，2026-11-24 06:32–06:39，每格事前寫預期；讀數全文在 k8scc#70 的留言）**：deliver → observe → deliver，五個容器的映像摘要三次都相同；observe 時 pod 裡 `send` 回 1（403 `CHAMBER_OBSERVE`）、收得到；退回後 `send` 回 3，與切換前相同。**切換時 pod 裡沒有 session**，有 session 時的切換沒量；所以不勾（fleet-ops-02 驗收 #134 時要求：兩邊都沒有 session，「相同」比的是兩個 `online=no`）
+  - **有 session 的那一格量了（`fleet-ops-02 [e3795b]`，jg-jcc2，映像 `550287e`，`SESSION_KEEP=1`，2026-11-25 17:17–17:24；jg-jcc2 `b6defdd` 切 observe、`1d9565d` 切回；全文在 k8scc#70 issuecomment-7158510603，更正在 -7158518736）**：deliver → observe → deliver，狀態行 `online=yes`／`no`／`yes`；`fo` 送給 im 的 `send` 回 0／3／0；bridge 收到 +1／+1／+1、宣告給 session +1／+0／+1；pod 裡 `send` 回 3／1（403 `CHAMBER_OBSERVE`）／3；映像摘要相同。退回後五格與切換前逐格相同，據此勾（fleet-ops-02：「7.4 我認為可以勾了」）。**沒量**：切換當下 im 正在處理一則交辦；每次切換 pod 都重建，session 是 session-keep 新起的，不是同一個 session 跨過切換；生產上的切換只有 observe → deliver 那一個方向（11-25，jcom、jg-jiahd），而且那兩座沒有 session
 
 ## 8. 收尾
 
