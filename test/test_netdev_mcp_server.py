@@ -1148,6 +1148,13 @@ class ReaderTools(Case):
         self.assertEqual([r["_id"] for r in rows], ["u-phone"])
         with self.subTest(control="the fixture holds a non-reserved user that was filtered"):
             self.assertIn("u-tv", [u["_id"] for u in FIXTURES["users"]])
+        with self.subTest("a blocked client is listed though it has no reservation (k8scc#137)"):
+            tv = next(u for u in self.h.fake.data["users"] if u["_id"] == "u-tv")
+            for value, want in ((True, ["u-phone", "u-tv"]), (False, ["u-phone"]), ("true", ["u-phone"])):
+                tv["blocked"] = value
+                rows = body(self.h.call(m.get_dhcp_reservations)[0])
+                self.assertEqual([r["_id"] for r in rows], want, value)
+            self.assertNotIn(USER_SECRET, self.h.call(m.get_dhcp_reservations)[0])
 
     def test_firewall_rules_carry_the_expanded_addresses(self):
         m = self.h.load()
@@ -2390,9 +2397,11 @@ class UnblockWhatWasBlocked(WriteCase):
         self.assertEqual(self.write("block_client")["result"], "applied")
         self.assertNotIn(PHONE, self.macs(), "control: the fake drops a blocked client, as FAC1 did")
         out = self.run_tool("unblock_client", reason="it was the wrong one", mac=PHONE)
-        self.assertRegex(out, r"^refused: read it first: call get_clients .* call get_dhcp_reservations, which reads "
-                              r"every known client, and one it returned as blocked can be unblocked$")
-        self.read("get_dhcp_reservations")
+        self.assertRegex(out, r"^refused: read it first: call get_clients .* call get_dhcp_reservations, which also "
+                              r"lists every blocked client, and one it lists can be unblocked$")
+        listed = body(self.run_tool("get_dhcp_reservations"))
+        self.assertEqual([(u["mac"], u["blocked"]) for u in listed if u.get("blocked")], [(PHONE, True)],
+                         "the reader did not show im the row it is about to address")
         res = self.write("unblock_client")
         self.assertEqual(res["result"], "applied", res)
         self.assertEqual(res["target"], f"clients/{PHONE}")

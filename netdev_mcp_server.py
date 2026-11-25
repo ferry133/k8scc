@@ -659,8 +659,13 @@ def get_port_forwards() -> str:
 
 @_tool
 def get_dhcp_reservations() -> str:
-    """DHCP 固定 IP 保留（設了 use_fixedip 的 client；唯讀）。"""
-    return _read_one("users", shape=lambda users: [u for u in users if isinstance(u, dict) and u.get("use_fixedip")])
+    """DHCP 固定 IP 保留（設了 use_fixedip 的 client），以及被封鎖的 client（blocked: true）；唯讀。
+    被封鎖的 client 可能不在 get_clients 的回覆裡，要解封就從這裡讀到它。"""
+    # A blocked row is shown, not only remembered (k8scc#137, fleet-ops-1e on
+    # PR #139): unblock_client addresses it from this read, and im has to be
+    # able to see what it is about to address.
+    return _read_one("users", shape=lambda users: [u for u in users if isinstance(u, dict)
+                                                   and (u.get("use_fixedip") or u.get("blocked") is True)])
 
 
 @_tool
@@ -1609,7 +1614,7 @@ def _plan_block(tool: str, mac: str, block: bool) -> "tuple[Plan | None, str]":
     if client is None:
         return None, _read_first("get_clients") + (
             "" if block else ". A blocked client can be missing from get_clients: call get_dhcp_reservations, which "
-            "reads every known client, and one it returned as blocked can be unblocked")
+            "also lists every blocked client, and one it lists can be unblocked")
     mac = mac.strip().lower()
     do, undo = ("block-sta", "unblock-sta") if block else ("unblock-sta", "block-sta")
     cid = str(client.get("id") or client.get("_id"))
