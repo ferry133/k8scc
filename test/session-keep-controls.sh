@@ -115,10 +115,10 @@ t0=$(date +%s)
 out=$(env -i PATH="$work/bin:$PATH" HOME="$work/det/home" FAKE_DIR="$work/det/fake" CLAUDE_USER_ID=tester CLAUDE_SESSION_DETACHED=1 bash ./claude-session </dev/null 2>&1)
 t1=$(date +%s)
 check_not "no greeting"                                 grep -q '歡迎' <<<"$out"
-check_not "no inbox line (nobody is there to read it; inbox-watch tells the session)" grep -q 'inbox' <<<"$out"
+check_not "no inbox line"                              grep -q 'inbox' <<<"$out"
 check "no 8-second pause"                               [ $((t1 - t0)) -lt 6 ]
 out=$(env -i PATH="$work/bin:$PATH" HOME="$work/det/home" FAKE_DIR="$work/det/fake" CLAUDE_USER_ID=tester bash ./claude-session </dev/null 2>&1)
-check "control: at a terminal the greeting and the inbox line are there" bash -c 'grep -q "歡迎" <<<"$1" && grep -q "inbox" <<<"$1"' _ "$out"
+check "control: at a terminal the greeting is there" grep -q "歡迎" <<<"$out"
 check "control: … and the terminal attaches (-A), as before" grep -qx 'tmux -u new-session -A -s claude -- claude' "$work/det/fake/tmux.log"
 setup det2; touch "$work/det2/fake/session"
 env -i PATH="$work/bin:$PATH" HOME="$work/det2/home" FAKE_DIR="$work/det2/fake" CLAUDE_USER_ID=tester CLAUDE_SESSION_DETACHED=1 bash ./claude-session </dev/null >/dev/null 2>&1

@@ -166,7 +166,7 @@ SH
   at()  { grep -n -m1 -E "$1" entrypoint.sh | cut -d: -f1; }
   call=$(at '^session_setup$')
   if [ -n "$call" ]; then ok; else bad "entrypoint.sh never calls session_setup"; call=0; fi
-  for later in '^[[:space:]]*inbox-watch &' '^[[:space:]]*chamber-watch &' '^[[:space:]]*session-keep &' '^exec ttyd '; do
+  for later in '^[[:space:]]*chamber-watch &' '^[[:space:]]*session-keep &' '^exec ttyd '; do
     l=$(at "$later")
     if [ -n "$l" ] && [ "$call" -gt 0 ] && [ "$call" -lt "$l" ]; then ok; else bad "session_setup (line $call) is not before '$later' (line ${l:-none})"; fi
   done

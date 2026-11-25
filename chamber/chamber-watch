@@ -29,7 +29,7 @@
 #    A-Z a-z 0-9 . _ - (the bridge applies the same rule and this script
 #    checks again): a room name is set at the server, and whatever is typed
 #    here is read by the agent as input. Any other room is announced with a
-#    fixed sentence that names nothing. The same gate as inbox-watch, from the same file. A
+#    fixed sentence that names nothing. The gate is pane-gate (once inbox-watch's too). A
 #    send that fails marks nothing and is tried again next beat. Nothing is
 #    typed into a session younger than CHAMBER_WATCH_SETTLE seconds.
 #
@@ -85,7 +85,7 @@ if ! command -v timeout >/dev/null 2>&1; then
     exit 0
 fi
 
-# The pane gate is the one inbox-watch uses. It sits next to this script in the
+# The pane gate (pane-gate; once shared with inbox-watch). It sits next to this script in the
 # image; in the repo it is one directory up. Without it nothing may be typed
 # and no pane can be judged, so the watcher does not start.
 here="$(dirname "${BASH_SOURCE[0]}")"

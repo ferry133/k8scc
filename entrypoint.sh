@@ -137,16 +137,6 @@ session_setup() {
 # --- end session set-up at pod start -------------------------------------------
 session_setup
 
-# Tell the claude already running in tmux about inbox files that arrive while
-# its session is open (k8scc#59). claude-session's notice reaches only the
-# person at a terminal that is just connecting. Runs for the pod's lifetime;
-# INBOX_WATCH_INTERVAL=0 turns it off.
-if command -v inbox-watch >/dev/null 2>&1; then
-    inbox-watch &
-else
-    echo "entrypoint: inbox-watch not installed, running sessions are not told about new inbox files" >&2
-fi
-
 # The chamber's half in this container (openspec im-chamber-client): the alive
 # signal and the one-line announcement. With CHAMBER_URL empty -- every pod
 # until the chamber is wired -- it writes one line and exits. It starts no
