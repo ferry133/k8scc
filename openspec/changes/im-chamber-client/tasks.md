@@ -20,6 +20,8 @@
   - **沒量**：映像還沒建，所以「在映像裡起得來」這次沒量（tasks 1.1 量的是以 stdin 帶進 pod 的同一份 `directive-verify`；`chamber` 在 pod 裡沒跑過）
 - [ ] 2.2 對照測試進 `test/`（用戶端 20 格、驗章 24 格＋只用一次 13 格、變異各一支）；CI 對一台本機拋棄式伺服器跑。伺服器起不來 ⇒ 那幾格是「量不到」，CI 不算綠
   - **範圍寫明（`fleet-ops-98 [047e9c]` 驗收 #74 時指出，2026-11-19）**：`test/chamber-controls.sh` 的 20 格裡 `--relayed` 與撤銷清單是 0 格、`--use` 只有 1 格。那些格（以及 `transcript:` 的 28 格）現在只在 Mac 側的 bench。搬過來時要改兩處：它們載入 `directive-sign`（不在本 repo，也不該進映像），而且測試字串裡有叢集名（本 repo 是公開的）
+  - **驗章的那一半做了（2026-11-25，`k8scc-bf [97703c]`）；這一項不勾，用戶端對真伺服器的 20 格還沒有**。`test/test_chamber_tools.py` 多 40 格：D1–D17（簽章形式，搬自 Mac 側的 `directive-test.py`，多一格 `CHAMBER_ACCOUNT`）、R1–R4（撤銷清單，#74 驗收時指出是 0 格）、O1–O7c（只用一次，搬自 `once-test.py`）。金鑰在測試時產生；header 是 `directive-sign` 格式的第二份定義（D1 是它的正對照）；測試字串不含叢集名。十四個變異各紅一次（Mac 側原有的九加三，另加「不讀 `CHAMBER_ACCOUNT`」「不用撤銷清單」）
+  - **沒搬的**：固定的 sk-ecdsa 向量（已在 `test/chamber-controls.sh`）、經真房間來回的 19a／19b、`directive-sign` 自己的拒絕（那支不在本 repo）、`transcript:` 的 28 格（這裡只有 T1–T8 與 O7）。**用戶端 20 格要一台拋棄式伺服器，CI 裡還沒有**；現有的用戶端格都對手寫的假伺服器
 - [x] 2.3 `directive-verify` 在映像裡的預設：公鑰清單讀 `CHAMBER_SIGNERS_DIR`；`transcript:` 指標一律回 2（映像裡沒有別人的 transcript——確認不是剛好找不到，是不找）
   - **做了（2026-11-19 06:50，`k8scc-0f [7c5b85]`）**：`CHAMBER_SIGNERS_DIR` 有值時預設清單是 `<dir>/allowed_signers`（`--signers` 仍然贏；撤銷清單照舊是清單旁的 `revoked_signers`）。`CHAMBER_TRANSCRIPTS=off` 時每個指標回 2，在找任何檔之前就回，訊息說的是「這台主機不讀」而不是「找不到」。`Dockerfile` 以 `ENV` 設這兩個。`test/test_chamber_tools.py` V1–V5、T1–T8、I1–I2
   - ⚠️ **那個開關是預設，不是邊界**：`app` 裡的行程可以把環境變數拿掉。拿掉之後 im 讀得到的只有它自己的 transcript（人在 ttyd 打的字，那本來就是直接指令），讀不到別台主機上的
@@ -29,6 +31,7 @@
   - **回歸**：Mac 側 bench 的三支對改過的 `directive-verify` 跑（`VERIFY_BIN`）：24／24、13／13、28／28，各有一格 skip（bench 沒開、沒給真的指標）
   - **沒量**：改過的 `chamber` 對真的伺服器（https）沒跑過——Mac 側的 20 格要 bench 伺服器；`send`（POST 帶內文）經 socket 沒有格，只有 GET；真的 bridge 還不存在
 - [ ] 2.6 用過的指令的那本帳在 PVC 上（預設 `~/.claude/chamber/used_directives`，而 `~/.claude` 是 PVC——讀 `directive-verify` 與 `CLAUDE.md` 得來，沒在 pod 上量）：control 是「`--use` 之後重啟 pod，同一份再驗回 1」
+  - **一半（`fleet-ops-02 [e3795b]`，jg-jcc2，映像 `aaae5d4`，2026-11-24 06:32–06:39，每格事前寫預期；讀數全文在 k8scc#70 的留言）**：`~/.claude/chamber/used_directives` 的 sha256 在兩次 pod 重啟前後相同。「同一份再驗回 1」要 ferry133 簽的指令，沒量
 - [ ] 2.4 正本住哪（design Open Questions 1）裁定後：另一側改成安裝的副本，加一格雜湊比對
   - **裁定（ferry133 2026-11-19，在 `k8scc-0f` 的 console，逐字）：「正本放 k8scc」。** 正本是本 repo 的 `chamber/`。Mac 側（`~/.claude/scripts/`）改成安裝的副本與雜湊比對那一格由 fleet-ops 收（`fleet-ops-98 [047e9c]` 已接）；那一半做完這一項才勾
   - **Mac 那一半（2026-11-19 06:48，`fleet-ops-98 [047e9c]`，k8scc#70 的留言）**：`~/.claude/scripts/chamber-originals` 比雜湊，六格都與預期相同。它自己寫明「沒有任何東西定期跑它」
@@ -57,6 +60,7 @@
   - `chamber-verify-status ts= interval= signers= revoked= sshkeygen=` 由 `chamber-watch` 每個 beat 印到 `app` 的 log（`signers`／`revoked` 是金鑰數，清單不在就是 `unmeasured`）。**它只說清單讀得到，不說驗過一份簽章**
   - **沒量**：真的 tmux 與 Claude Code（`pane_current_command` 是 `claude` 這一點是 tasks 1.2 在 pod 上讀過一次的）；真的 Synapse 上 20 s 一輪夠不夠密；pod 裡 `app` 的 uid 開不開得了 bridge 建的 0600 socket（兩個 container 都是 uid 0 是 jg-base 側說的，沒量）
 - [ ] 4.2 controls（拋棄式叢集）：殺掉 `claude` ⇒ 三個間隔內顯示不在線、FAC 側 `chamber send` 回 3；session 回來 ⇒ 在線（正對照）；卡在登入畫面 ⇒ 不在線；只有橋接程式活著 ⇒ 不在線
+  - **(a) 量了（`fleet-ops-02 [e3795b]`，jg-jcc2，映像 `aaae5d4`，2026-11-24 06:32–06:39，每格事前寫預期；讀數全文在 k8scc#70 的留言）**：`pkill -x claude` 後 bridge 在 +75 秒記 `online=no`，`fo` 側 +77 秒第一次讀到 offline；FAC 側 `send` 回 3，25 秒後 pod 裡沒有 `claude`。(b)、(d) 先前已有讀數。**(c) 卡在登入畫面沒量**（不登出造不出那個畫面），所以不勾
 - [ ] 4.3 `session-keep`（`SESSION_KEEP=1`）：pod 啟動時起、掉了重起、ttyd 接上同一個；起不來時 log 與在線讀數看得見。依 1.2 的讀數
   - **程式與假的對照做了（2026-11-19 08:31，`k8scc-0f [7c5b85]`）；這一項不勾，因為它的實質是 pod 上的讀數**。`session-keep`（`entrypoint.sh` 起，`SESSION_KEEP` 不是 `1` 就印一行結束——預設關，現有的 pod 只多一行 log）。session 不在時以 `CLAUDE_SESSION_DETACHED=1 claude-session` 起：`claude-session` 多一個模式，照常做 MCP 註冊與權限設定，然後 `tmux new-session -d -x 200 -y 50`，沒有歡迎詞、沒有 inbox 的 8 秒停頓；ttyd 之後連進來照舊 `-A` 接上同一個。已存在的 session 不動。起不來只說一次。**它不讀任何訊息**，也不判斷 session 有沒有到 prompt——那由 `chamber-watch` 的訊號與 log 顯示
   - controls：`test/session-keep-controls.sh` 36 格（跑的是真的 `claude-session`）。七個變異各自轉紅；**其中一個第一輪存活**（拿掉 `session-keep` 自己的「已存在就不動」）：「`claude-session` 完全沒被跑」那格在沒有 MCP 要註冊時分不出「沒跑」與「跑了但沒事做」，已改
@@ -100,10 +104,13 @@
 
 ## 7. 整體 controls（root 6.7；拋棄式叢集）
 
-- [ ] 7.1 讀寫別的房間、邀人、開房間（伺服器拒絕——這三格量的是伺服器，在這裡只確認用戶端回 1 而不是 2）
+- [x] 7.1 讀寫別的房間、邀人、開房間（伺服器拒絕——這三格量的是伺服器，在這裡只確認用戶端回 1 而不是 2）
+  - **量了（`fleet-ops-02 [e3795b]`，jg-jcc2，映像 `aaae5d4`，2026-11-24 06:32–06:39，每格事前寫預期；讀數全文在 k8scc#70 的留言）**：經 pod 的 bridge，`chamber read／members／send fac` 都回 1 不是 2；以房間 id 直接打 bridge 是 403；開房間、邀人、以別名加入都是 404 `CHAMBER_NOT_FORWARDED`；正對照是自己的房間回 0
 - [ ] 7.2 偽造簽章、清單外的金鑰、過期指令、用過的指令、`transcript:` 指標：`directive-verify` 各回 1／1／1／1／2，im 都不動作
+  - **兩格量了（`fleet-ops-02 [e3795b]`，jg-jcc2，映像 `aaae5d4`，2026-11-24 06:32–06:39，每格事前寫預期；讀數全文在 k8scc#70 的留言）**：清單外的金鑰在 pod 裡回 1（同一份位元組在清單含那把金鑰的 Mac 上回 0）；`transcript:` 指標回 2。偽造簽章（T3）與用過的（S4）先前已有。**過期那一格沒量**（要 ferry133 簽）。R21 之後「im 都不動作」只在結果是 1 時成立
 - [ ] 7.3 一般訊息與直接指令都不喚起（4.4）
 - [ ] 7.4 `observe` → `deliver` 的切換與退回：退回後行為與切換前逐格相同
+  - **量了（`fleet-ops-02 [e3795b]`，jg-jcc2，映像 `aaae5d4`，2026-11-24 06:32–06:39，每格事前寫預期；讀數全文在 k8scc#70 的留言）**：deliver → observe → deliver，五個容器的映像摘要三次都相同；observe 時 pod 裡 `send` 回 1（403 `CHAMBER_OBSERVE`）、收得到；退回後 `send` 回 3，與切換前相同。**切換時 pod 裡沒有 session**，有 session 時的切換沒量；所以不勾（fleet-ops-02 驗收 #134 時要求：兩邊都沒有 session，「相同」比的是兩個 `online=no`）
 
 ## 8. 收尾
 
