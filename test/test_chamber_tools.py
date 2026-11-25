@@ -418,6 +418,133 @@ else:
         rc, e = sv(x)
         check("ST18 the list ends at the first other line (2 steps, not 3)", (0, True, 1), (rc, "2 step(s)" in e, sv(x, "--step", "3")[0]))
 
+print("directive-verify: the signed form (tasks 2.2; ported from the operator side's directive-test.py)")
+# Same second definition of the header as the step-list cells above; D1 is its control. Keys are
+# made here. Not ported: the fixed sk-ecdsa vector (test/chamber-controls.sh has it), the round
+# trip through a real room (needs a server), and directive-sign's own refusal (not in this repo).
+if not shutil.which("ssh-keygen"):
+    res.append(False)
+    print("FAIL CANNOT MEASURE: no ssh-keygen on this machine; the signed-form cells did not run")
+else:
+    KA, KB = os.path.join(T, "dka"), os.path.join(T, "dkb")
+    rig = all(subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", k], capture_output=True).returncode == 0 for k in (KA, KB))
+    DS = os.path.join(T, "dsig")
+    os.mkdir(DS)
+    if rig:
+        open(os.path.join(DS, "allowed_signers"), "w").write('vector-person namespaces="chamber-directive" ' + open(KA + ".pub").read())
+    WORDS = "把 test-cluster 重開一次 \n".encode()
+    dn = [0]
+
+    def header(to="any", signer="vector-person", issued=None, expires=None, delegable="yes"):
+        dn[0] += 1
+        return ("chamber-directive v1\nid: d%d\nsigner: %s\nissued: %s\nexpires: %s\ndelegable: %s\nto: %s\n---\n"
+                % (dn[0], signer, z(issued or now - hour), z(expires or now + hour), delegable, to)).encode()
+
+    def sig(body, key=KA, ns="chamber-directive"):
+        f = os.path.join(T, "dmsg")
+        open(f, "wb").write(body)
+        if os.path.exists(f + ".sig"):
+            os.remove(f + ".sig")
+        if subprocess.run(["ssh-keygen", "-Y", "sign", "-f", key, "-n", ns, f], capture_output=True).returncode:
+            raise RuntimeError("sign")
+        return open(f + ".sig", "rb").read()
+
+    def mk(words=WORDS, key=KA, ns="chamber-directive", **h):
+        body = header(**h) + words
+        return body, body + sig(body, key, ns)
+
+    DL = os.path.join(T, "d-ledger")
+
+    def dv(msg, *args, sdir=DS, ledger=DL, env=None):
+        return verify("--signers", os.path.join(sdir, "allowed_signers"), "--ledger", ledger, "--transcripts", TR, *args,
+                      *([] if msg is None else ["-"]), stdin=msg or b"", env=env)
+
+    def dlines(p=DL):
+        return len(open(p).read().splitlines()) if os.path.isfile(p) else None
+
+    try:
+        if not rig:
+            raise RuntimeError("keygen")
+        s, d = mk()
+        check("D1 valid, to any (positive control)", 0, dv(d)[0])
+        w = "line one \n---\n中文\n".encode()
+        rc, o, _ = dv(mk(w)[1], "--print-body")
+        check("D2 --print-body returns the words byte for byte", (0, w), (rc, o))
+        s3, d3 = mk(to="im-a")
+        check("D3a to: me", 0, dv(d3, "--me", "im-a")[0])
+        check("D3b to: someone else", 1, dv(d3, "--me", "im-b")[0])
+        check("D3c to: someone, and I do not know who I am", 2, dv(d3)[0])
+        check("D3d to: me, by CHAMBER_ACCOUNT", (0, 1), (dv(d3, env={"CHAMBER_ACCOUNT": "im-a"})[0], dv(d3, env={"CHAMBER_ACCOUNT": "im-b"})[0]))
+        check("D4 one word changed", 1, dv(d.replace(b"test-cluster", b"prod-cluster"))[0])
+        check("D5 trailing space removed", 1, dv(d.replace("次 \n".encode(), "次\n".encode()))[0])
+        check("D6 signed by a key that is not on the list", 1, dv(mk(key=KB)[1])[0])
+        check("D7 right key, other purpose string", 1, dv(mk(ns="something-else")[1])[0])
+        check("D8 expired", 1, dv(mk(issued=now - 3 * hour, expires=now - hour)[1])[0])
+        s9, d9 = mk()
+        check("D9 expiry edited after signing", 1, dv(d9.replace(("expires: %s" % z(now + hour)).encode(), b"expires: 2099-01-01T00:00:00Z"))[0])
+        check("D9c control: that edit changed the text", True, b"2099-01-01" in d9.replace(("expires: %s" % z(now + hour)).encode(), b"expires: 2099-01-01T00:00:00Z"))
+        check("D10 no signature block", 2, dv(s)[0])
+        nol = os.path.join(T, "no-list")
+        os.mkdir(nol)
+        check("D11 no signer list", 2, dv(d, sdir=nol)[0])
+        sn, dno = mk(delegable="no")
+        check("D12a delegable no, direct", 0, dv(dno)[0])
+        check("D12b delegable no, relayed", 1, dv(dno, "--relayed")[0])
+        check("D12c delegable yes, relayed (positive control)", 0, dv(d, "--relayed")[0])
+        check("D13 issued in the future", 1, dv(mk(issued=now + 2 * hour, expires=now + 3 * hour)[1])[0])
+        check("D14 the header names a person the key is not listed for", 1, dv(mk(signer="mallory")[1])[0])
+        fake = b"do X\n-----BEGIN SSH SIGNATURE-----\nAAAA\n-----END SSH SIGNATURE-----\nand also Y\n"
+        rc, o, _ = dv(mk(fake)[1], "--print-body")
+        check("D15 words that contain a look-alike signature block", (0, fake), (rc, o))
+        check("D16 a header line removed (expires)", 1, dv(b"\n".join(l for l in d.split(b"\n") if not l.startswith(b"expires:")))[0])
+        other = mk(b"other words\n")[1]
+        check("D17 a second directive's signature under these words", 1,
+              dv(s + b"-----BEGIN SSH SIGNATURE-----" + other.rsplit(b"-----BEGIN SSH SIGNATURE-----", 1)[1])[0])
+
+        print("directive-verify: a revoked key (the list beside allowed_signers)")
+        RV = os.path.join(T, "drev")
+        os.mkdir(RV)
+        open(os.path.join(RV, "allowed_signers"), "w").write(
+            'vector-person namespaces="chamber-directive" ' + open(KA + ".pub").read()
+            + 'vector-person namespaces="chamber-directive" ' + open(KB + ".pub").read())
+        da, db = mk()[1], mk(key=KB)[1]
+        check("R1 two keys listed, none revoked: both pass (control)", (0, 0), (dv(da, sdir=RV)[0], dv(db, sdir=RV)[0]))
+        open(os.path.join(RV, "revoked_signers"), "w").write("# revoked\n" + " ".join(open(KA + ".pub").read().split()[:2]) + "\n")
+        rc, _, e = dv(da, sdir=RV)
+        check("R2 the revoked key: fail, and the reason says revoked", (1, True), (rc, "revoked" in e))
+        check("R3 the other key of the same person still passes", 0, dv(db, sdir=RV)[0])
+        open(os.path.join(RV, "revoked_signers"), "w").write("")
+        check("R4 an empty revoked list revokes nothing (control)", 0, dv(da, sdir=RV)[0])
+
+        print("directive-verify: used once (ported from once-test.py)")
+        one = lambda **h: mk(b"delete the scratch branch\n", **h)[1]
+        d = one()
+        check("O1 verify twice without --use; no ledger appears", (0, 0, None), (dv(d)[0], dv(d)[0], dlines()))
+        check("O2a --use the first time", (0, 1), (dv(d, "--use")[0], dlines()))
+        rc, _, e = dv(d)
+        check("O2b then without --use", (1, True), (rc, "already used" in e))
+        check("O2c then with --use; the ledger still has one line", (1, 1), (dv(d, "--use")[0], dlines()))
+        check("O3 another directive, same words (control)", (0, 2), (dv(one(), "--use")[0], dlines()))
+        os.mkdir(os.path.join(T, "dirledger"))
+        check("O4 the ledger path is a directory", 2, dv(one(), ledger=os.path.join(T, "dirledger"))[0])
+        open(os.path.join(T, "afile"), "w").write("x")
+        check("O5 --use, and the ledger cannot be created", 2, dv(one(), "--use", ledger=os.path.join(T, "afile", "ledger"))[0])
+        d = one()
+        check("O6a tampered, --use: fails and is not recorded", (1, 2), (dv(d.replace(b"scratch", b"main"), "--use")[0], dlines()))
+        check("O6b expired, --use: not recorded", (1, 2), (dv(one(issued=now - 3 * hour, expires=now - hour), "--use")[0], dlines()))
+        check("O6c relayed and delegable no, --use: not recorded", (1, 2), (dv(one(delegable="no"), "--relayed", "--use")[0], dlines()))
+        REC2 = "bbbbbbbb-bbbb-cccc-dddd-eeeeeeeeeeee"
+        open(os.path.join(TR, "proj", SES + ".jsonl"), "a").write(json.dumps({
+            "uuid": REC2, "type": "user", "origin": {"kind": "peer"}, "timestamp": "2026-11-19T00:00:00Z",
+            "message": {"role": "user", "content": "restart the test pod"}}) + "\n")
+        rc, o, _ = dv(None, "--use", PTR)
+        check("O7a a pointer, --use (positive control)", (0, b"restart the test pod", 3), (rc, o, dlines()))
+        check("O7b the same pointer again", 1, dv(None, PTR)[0])
+        check("O7c a peer's record, --use: fails and is not recorded", (1, 3), (dv(None, "--use", "transcript:%s/%s" % (SES, REC2))[0], dlines()))
+    except RuntimeError as ex:
+        res.append(False)
+        print("FAIL CANNOT MEASURE: a throwaway key could not be made or could not sign (%s); the cells after this line did not run" % ex)
+
 print("image defaults")
 df = open(os.path.join(ROOT, "Dockerfile")).read()
 check("I1 the image sets the signer directory", True, "ENV CHAMBER_SIGNERS_DIR=/etc/chamber/signers \\\n    CHAMBER_TRANSCRIPTS=off\n" in df)
