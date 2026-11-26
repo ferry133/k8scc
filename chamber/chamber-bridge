@@ -458,10 +458,34 @@ def status_loop(beat):
         time.sleep(beat)
 
 
+PRESENCE_RETRY_MAX = 15   # seconds; the longest wait a rate-limited presence change is given
+
+
 def set_presence(state):
-    """-> True when the server took it."""
-    s, _ = upstream("PUT", P + "/presence/%s/status" % urllib.parse.quote(ME, safe=""),
-                    json.dumps({"presence": state}).encode(), timeout=20)
+    """-> True when the server took it.
+
+    Synapse limits presence changes per account: its default `rc_presence`
+    is one every 10 s with a burst of 1, and a second change inside that
+    answers 429 M_LIMIT_EXCEEDED with retry_after_ms near 10000 (measured on
+    a throwaway Synapse 1.143.0, 2026-11-26). The bridge used to drop that
+    answer and try again only a round later, which is what fleet-ops-02 read
+    on jg-jcc2 (k8scc#146): a new pod's first line still online=yes, the
+    previous pod's last change having been less than 10 s before, and
+    "not online" 18 to 33 s after a session was gone instead of one round.
+    So a 429 is waited out once, for what the server asks (at most
+    PRESENCE_RETRY_MAX), and any other failure is said once."""
+    path = P + "/presence/%s/status" % urllib.parse.quote(ME, safe="")
+    body = json.dumps({"presence": state}).encode()
+    s, raw = upstream("PUT", path, body, timeout=20)
+    if s == 429:
+        try:
+            wait = float(json.loads(raw or b"{}").get("retry_after_ms") or 0) / 1000
+        except (ValueError, AttributeError, TypeError):
+            wait = 0
+        wait = min(max(wait, 1.0) + 0.25, PRESENCE_RETRY_MAX)
+        time.sleep(wait)
+        s, raw = upstream("PUT", path, body, timeout=20)
+    note("the presence could not be set", None if s == 200 else ("the server could not be reached" if s == 0 else "http=%s" % s))
     return s == 200
 
 

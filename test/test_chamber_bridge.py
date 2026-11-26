@@ -47,6 +47,9 @@ class Fake:
         self.rooms = ["!r1:fake"]
         self.name_fault = {}           # room id -> a status to answer for its name; 404 = "has no name" as the server says it, "bare404" = a 404 from something else, "hangup" = no answer
         self.presence_fault = 0        # a status to answer when the account's presence is read
+        self.presence_limited = 0      # answer the next N presence changes 429, as Synapse's rc_presence does
+        self.presence_retry_ms = 400   # … with this retry_after_ms
+        self.presence_put_at = []      # time.time() of every presence change the bridge sent, refused ones included
         self.whoami_hangup = False     # take the connection and answer nothing
         self.lock = threading.Lock()
 
@@ -115,6 +118,11 @@ class H(http.server.BaseHTTPRequestHandler):
             except ValueError:
                 want = None
             with f.lock:
+                f.presence_put_at.append(time.time())
+                if f.presence_limited > 0:
+                    f.presence_limited -= 1
+                    return self.reply(429, {"errcode": "M_LIMIT_EXCEEDED", "error": "Too Many Requests",
+                                            "retry_after_ms": f.presence_retry_ms})
                 f.presence_puts.append(want)
                 if want in ("online", "offline"):
                     f.presence = want
@@ -506,6 +514,37 @@ check("A-7 the signal stops: within three beats (plus one round) the bridge sets
       until(lambda: fake.presence_puts[-1] == "offline" and "no alive signal for three beats" in logged(LOG), 4))
 check("A-8 … and the status line: online=no", True, until(lambda: logged(LOG).splitlines()[-1].endswith("online=no")))
 check("A-9 the local paths never reach the server", 0, count(None, "/bridge/"))
+
+print("deliver: a presence change the server rate-limits is waited out (k8scc#146)")
+# Synapse answers a second change inside 10 s with 429 and retry_after_ms
+# (measured, throwaway Synapse 1.143.0). Here: the old pod's presence is
+# "online" at the server and the first change is refused once.
+rl_srv, rl_fake, RL_URL = fake_server()
+with rl_fake.lock:
+    rl_fake.presence = "online"
+    rl_fake.presence_limited = 1
+    rl_fake.presence_retry_ms = 1500
+rp, RSOCK, RLOG = start("ratelimit", CHAMBER_URL=RL_URL, CHAMBER_MODE="deliver", CHAMBER_BEAT="5")
+first = None
+if until(lambda: any(l.startswith("chamber-status ") for l in logged(RLOG).splitlines()), 15):
+    first = [l for l in logged(RLOG).splitlines() if l.startswith("chamber-status ")][0]
+check("RL1 the first change is refused 429, and the first status line still says online=no", (True, True),
+      (first is not None and first.endswith("online=no"), rl_fake.presence_limited == 0))
+with rl_fake.lock:
+    at = list(rl_fake.presence_put_at)
+check("RL2 … because the bridge waited what the server asked and sent it again (not a round later)", True,
+      len(at) >= 2 and 1.5 <= at[1] - at[0] < 4.5)
+check("RL3 … and the refusal is not said: the second answer was 200", False, "the presence could not be set" in logged(RLOG))
+stop(rp)
+with rl_fake.lock:
+    rl_fake.presence = "online"
+    rl_fake.presence_limited = 2
+    rl_fake.presence_put_at.clear()
+rp, RSOCK, RLOG = start("ratelimit2", CHAMBER_URL=RL_URL, CHAMBER_MODE="deliver", CHAMBER_BEAT="5")
+check("RL4 refused twice: said once, with the status, and no text from the server", (True, False),
+      (until(lambda: "the presence could not be set (http=429)" in logged(RLOG), 15), "Too Many Requests" in logged(RLOG)))
+check("RL5 … and the next round sets it", True, until(lambda: rl_fake.presence == "offline", 15))
+stop(rp)
 
 print("deliver: the watcher says the session is gone (k8scc#146)")
 # its own bridge with a 2 s beat: three beats are 6 s, so "at once" and "after
