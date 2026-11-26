@@ -36,8 +36,9 @@
   - **做了（2026-11-19 06:50，`k8scc-0f [7c5b85]`）**：`CHAMBER_URL=unix:<path>` 時用戶端經那個 socket 說 HTTP，**不讀憑證、不送 `Authorization`**（憑證由另一端加）。`test/test_chamber_tools.py` C1–C9：同一台假伺服器同時開 TCP 與 socket，`whoami` 兩邊答案相同；TCP 那邊看得到憑證（正對照）、socket 那邊沒有；socket 不存在 ⇒ 2；拒絕 ⇒ 兩邊都是 1。六個變異各自轉紅（socket 仍讀憑證；socket 帶憑證；開關失效；開關分大小寫；清單目錄被忽略；連不上當成拒絕）
   - **回歸**：Mac 側 bench 的三支對改過的 `directive-verify` 跑（`VERIFY_BIN`）：24／24、13／13、28／28，各有一格 skip（bench 沒開、沒給真的指標）
   - **沒量**：改過的 `chamber` 對真的伺服器（https）沒跑過——Mac 側的 20 格要 bench 伺服器；`send`（POST 帶內文）經 socket 沒有格，只有 GET；真的 bridge 還不存在
-- [ ] 2.6 用過的指令的那本帳在 PVC 上（預設 `~/.claude/chamber/used_directives`，而 `~/.claude` 是 PVC——讀 `directive-verify` 與 `CLAUDE.md` 得來，沒在 pod 上量）：control 是「`--use` 之後重啟 pod，同一份再驗回 1」
+- [x] 2.6 用過的指令的那本帳在 PVC 上（預設 `~/.claude/chamber/used_directives`，而 `~/.claude` 是 PVC——讀 `directive-verify` 與 `CLAUDE.md` 得來，沒在 pod 上量）：control 是「`--use` 之後重啟 pod，同一份再驗回 1」
   - **一半（`fleet-ops-02 [e3795b]`，jg-jcc2，映像 `aaae5d4`，2026-11-24 06:32–06:39，每格事前寫預期；讀數全文在 k8scc#70 的留言）**：`~/.claude/chamber/used_directives` 的 sha256 在兩次 pod 重啟前後相同。「同一份再驗回 1」要 ferry133 簽的指令，沒量
+  - **另一半（`fleet-ops-02 [e3795b]`，jg-jcc2，2026-11-27 00:1x，k8scc#70 issuecomment-7197610644；預期由 `k8scc-bf [97703c]` 事前寫）**：ferry133 2026-11-27 00:12 簽的指令 A（id `0ec6092462ee`，內文「不要求任何動作」），逐位元組複製進 pod（兩側 sha256 相同）。在 `app` 裡 `--use` 回 0，帳本 1 → 2 行，多出的那一行是唯一差異；同一個 pod 不帶 `--use` 再驗回 1（already used）。重啟後的新 pod 回 1，訊息是「already used on this host at 2026-11-26T16:16:58Z」，帳本仍是 2 行。據此勾
 - [ ] 2.4 正本住哪（design Open Questions 1）裁定後：另一側改成安裝的副本，加一格雜湊比對
   - **裁定（ferry133 2026-11-19，在 `k8scc-0f` 的 console，逐字）：「正本放 k8scc」。** 正本是本 repo 的 `chamber/`。Mac 側（`~/.claude/scripts/`）改成安裝的副本與雜湊比對那一格由 fleet-ops 收（`fleet-ops-98 [047e9c]` 已接）；那一半做完這一項才勾
   - **Mac 那一半（2026-11-19 06:48，`fleet-ops-98 [047e9c]`，k8scc#70 的留言）**：`~/.claude/scripts/chamber-originals` 比雜湊，六格都與預期相同。它自己寫明「沒有任何東西定期跑它」
@@ -78,7 +79,11 @@
   - **pod 上的讀數（2026-11-25，`fleet-ops-02 [e3795b]`，jg-jcc2，全文在 k8scc#70 issuecomment-7158510603）**：啟動時先印 `keeping the session 'claude' running, checked every 30s`，再印 `no session, started one (detached)`；用 Chrome 開頁接上的是同一個 session（created 與 pane pid 不變，attached 0→1，關掉分頁後回 0，session 與 online 都還在）；殺掉 `claude` 後 23 秒有新的 session 並再到空提示（映像 `17ce78a`）。那次留下兩個殭屍行程，是 k8scc#133；PR #136（tini 當 PID 1）合併為 `54da413`，在 `c3070f1` 上同一個動作 3 秒與 48 秒各讀到 0 個 defunct
   - **這一項不勾。沒量**：「起不來時 log 與在線讀數看得見」在 pod 上沒有出現過（每一次都起得來），那一格只有假的對照；生產上沒有開，開不開是 ferry133 的決定
   - **生產上的讀數（2026-11-25 23:1x，`fleet-ops-02 [e3795b]`，映像 `e6926e6`；ferry133 當晚在它的 console 指示兩座生產 im 開 `SESSION_KEEP=1`，jcom `32b52c3`、jg-jiahd `90b1092`；全文在 k8scc#70 issuecomment-7166698330）**：兩座 pod 重建後 session 都自己起來，bridge `online=yes`，`chamber send` 回 0。**jg-jiahd：第一則被生產 im 處理的房間訊息**，23:12:09 送出，im 23:12:50 讀到，23:13:24 在房間回 ack。jcom：通知進了 session，Claude Code 回 `Login expired · Please run /login`，房間裡沒有回覆（見 4.2）。這一項照舊不勾：「起不來時看得見」仍然只有假的對照
-- [ ] 4.4 不喚起的負對照（root 6.4）：`SESSION_KEEP` 關、沒有 session、送一份驗得過的直接指令 ⇒ 沒有任何行程被起、發送方得到「不在線」。正對照：同一份指令在 session 存在時被宣告
+- [x] 4.4 不喚起的負對照（root 6.4）：`SESSION_KEEP` 關、沒有 session、送一份驗得過的直接指令 ⇒ 沒有任何行程被起、發送方得到「不在線」。正對照：同一份指令在 session 存在時被宣告
+  - **量了（`fleet-ops-02 [e3795b]`，jg-jcc2，2026-11-27 00:1x–00:22，k8scc#70 issuecomment-7197610644）**：
+    - 負對照：jg-jcc2 `ad628b6` 關掉 `SESSION_KEEP`，pod 裡沒有 tmux server。從 `fo` 送指令 A 的全文並點名 im：`chamber send` 回 3（offline）；30 秒後沒有任何 `claude` 或 tmux 行程；bridge 的 `pending` 由 {} 變成那間房 1；bridge log `received … for-me=1`。
+    - 正對照：`6da1eba` 逐位元組退回，`SESSION_KEEP` 重新開啟。新 pod 的 bridge 記「1 message(s) kept for the session」，之後轉在線、`pending` 歸 {}，訊息確實宣告給了 session。
+  - ⚠️ **im 回的是 `blocked`，不是預期的 ack**：2.6 已在同一台主機的帳本上把 A 用掉，所以 im 的 `directive-verify --relayed` 回 1（already used），照政策停下、不動作、在房間裡問 ferry133。這是格子的排序造成的，這份行為本身也是一份讀數（見 7.2「用過的」）。**沒量**：im 對一份還沒用過的指令回 ack。task 本身只要求「被宣告」，所以這一項照勾
 
 ## 5. 宣告與回程（root 6.3、6.5）
 
@@ -118,9 +123,14 @@
 
 - [x] 7.1 讀寫別的房間、邀人、開房間（伺服器拒絕——這三格量的是伺服器，在這裡只確認用戶端回 1 而不是 2）
   - **量了（`fleet-ops-02 [e3795b]`，jg-jcc2，映像 `aaae5d4`，2026-11-24 06:32–06:39，每格事前寫預期；讀數全文在 k8scc#70 的留言）**：經 pod 的 bridge，`chamber read／members／send fac` 都回 1 不是 2；以房間 id 直接打 bridge 是 403；開房間、邀人、以別名加入都是 404 `CHAMBER_NOT_FORWARDED`；正對照是自己的房間回 0
-- [ ] 7.2 偽造簽章、清單外的金鑰、過期指令、用過的指令、`transcript:` 指標：`directive-verify` 各回 1／1／1／1／2，im 都不動作
+- [x] 7.2 偽造簽章、清單外的金鑰、過期指令、用過的指令、`transcript:` 指標：`directive-verify` 各回 1／1／1／1／2，im 都不動作
+  - **過期與用過的（`fleet-ops-02 [e3795b]`，jg-jcc2，2026-11-27，k8scc#70 issuecomment-7198925832 與 -7197610644）**：
+    - 過期：ferry133 00:19 簽的指令 B2（id `50c8da05fd73`，`--expires 1h`）在 pod 裡 16:24:11Z 回 0，這是正對照；17:19:53Z 回 1，訊息「expired at 2026-11-26T17:19:22Z」。送進房間（`send` 回 0，在線）之後，im 42 秒內回 `blocked`，理由寫的是過期，沒有任何動作，並在房間問 ferry133。帳本維持 2 行。
+    - 用過的：在 pod 裡由 im 自己驗，結果見 4.4：回 1、`blocked`、不動作。
+  - 五格到此都有讀數：偽造（T3）、清單外的金鑰（pod）、過期（pod）、用過的（Mac S4 與 pod）、`transcript:`（pod，2）。據此勾
   - **兩格量了（`fleet-ops-02 [e3795b]`，jg-jcc2，映像 `aaae5d4`，2026-11-24 06:32–06:39，每格事前寫預期；讀數全文在 k8scc#70 的留言）**：清單外的金鑰在 pod 裡回 1（同一份位元組在清單含那把金鑰的 Mac 上回 0）；`transcript:` 指標回 2。偽造簽章（T3）與用過的（S4）先前已有。**過期那一格沒量**（要 ferry133 簽）。R21 之後「im 都不動作」只在結果是 1 時成立
-- [ ] 7.3 一般訊息與直接指令都不喚起（4.4）
+- [x] 7.3 一般訊息與直接指令都不喚起（4.4）
+  - 直接指令：見 4.4，`send` 回 3，沒有任何行程被起。一般訊息：2026-11-24 那次 `pkill` 之後，從 FAC 側送的 `send` 回 3、pod 裡沒有 `claude`（4.2 (a)），讀數是同一個形狀
 - [x] 7.4 `observe` → `deliver` 的切換與退回：退回後行為與切換前逐格相同
   - **量了（`fleet-ops-02 [e3795b]`，jg-jcc2，映像 `aaae5d4`，2026-11-24 06:32–06:39，每格事前寫預期；讀數全文在 k8scc#70 的留言）**：deliver → observe → deliver，五個容器的映像摘要三次都相同；observe 時 pod 裡 `send` 回 1（403 `CHAMBER_OBSERVE`）、收得到；退回後 `send` 回 3，與切換前相同。**切換時 pod 裡沒有 session**，有 session 時的切換沒量；所以不勾（fleet-ops-02 驗收 #134 時要求：兩邊都沒有 session，「相同」比的是兩個 `online=no`）
   - **有 session 的那一格量了（`fleet-ops-02 [e3795b]`，jg-jcc2，映像 `550287e`，`SESSION_KEEP=1`，2026-11-25 17:17–17:24；jg-jcc2 `b6defdd` 切 observe、`1d9565d` 切回；全文在 k8scc#70 issuecomment-7158510603，更正在 -7158518736）**：deliver → observe → deliver，狀態行 `online=yes`／`no`／`yes`；`fo` 送給 im 的 `send` 回 0／3／0；bridge 收到 +1／+1／+1、宣告給 session +1／+0／+1；pod 裡 `send` 回 3／1（403 `CHAMBER_OBSERVE`）／3；映像摘要相同。退回後五格與切換前逐格相同，據此勾（fleet-ops-02：「7.4 我認為可以勾了」）。**沒量**：切換當下 im 正在處理一則交辦；每次切換 pod 都重建，session 是 session-keep 新起的，不是同一個 session 跨過切換；生產上的切換只有 observe → deliver 那一個方向（11-25，jcom、jg-jiahd），而且那兩座沒有 session
