@@ -12,7 +12,14 @@
   - **讀數（2026-11-19 00:2x，`fleet-ops-98 [047e9c]`，拋棄式叢集的 im pod，Claude Code 2.1.261、tmux 3.3a，一次）**：`tmux -u new-session -d -s probe -x 160 -y 45 -- claude`（另一個 session 名，沒有人接著；原有的 `claude` session 沒碰）⇒ 起得來，已登入，5 秒內畫出畫面；**但停在一個沒預期到的對話框**（「Try the new fullscreen renderer?」，`❯ 1. Yes, try it`／`2. Not now`，Enter 確認），15 秒後仍在那裡，`pane_current_command=claude`。所以：(a) detached 起動這一半成立；(b) **「行程是 `claude`」不等於到了 prompt**——design D-c 只列登入與信任兩種畫面不夠，要改成「是閒置的空 prompt 才算」（`inbox-watch` 的 `pane_idle` 正好是這個判斷，那個對話框會被它的選單規則擋下）；(c) 常駐的 session 會卡在這種一次性的對話框上，沒有人按就永遠不在線——要嘛讓它看得見，要嘛預先關掉（哪個設定關它，沒查）。沒量：直接經 `claude-session` 起（這次是直接起 `claude`）、OAuth 過期的畫面、信任對話框、閒置的用量
   - **讀數（2026-11-25，`fleet-ops-02 [e3795b]`，jg-jcc2，`SESSION_KEEP=1`（jg-jcc2 `39ecbd2`，ferry133 當天在 k8scc-bf 的 console 選「在 jg-jcc2 開」，只這一座）；每格事前寫預期，全文在 k8scc#70 issuecomment-7158510603）**：經 `claude-session` 的 detached 起動（映像 `17ce78a`，15:33–15:37）到了空提示，沒有對話框，session 起來後第一行狀態就是 `online=yes`。**閒置 62 分鐘**（映像 `550287e`，16:14–17:16，沒有人碰）：同一個 session（created 不變）、畫面仍是空提示；`~/.claude/projects` 沒有新的 transcript 檔、沒有任何檔在 session 建立後被寫過；186 行狀態全是 `online=yes`、`server=ok`；session-keep 沒有重起，pod 重啟 0
   - **這一項不勾。沒量**：token 用量本身（量到的是「沒有任何一輪對話被寫下」，帳號那一側的用量讀不到，不經 transcript 的背景請求看不到）；全新的設定卷（這個卷以前登入過，11-19 的那個一次性對話框這次沒出現，哪一個設定關掉它沒查）；信任對話框；OAuth 過期時的畫面
-- [ ] 1.3 伺服器側多久把一個不再同步的帳號標成不在線（橋接程式被 `kill -9` 之後量）；據此定 `CHAMBER_BEAT`
+- [x] 1.3 伺服器側多久把一個不再同步的帳號標成不在線（橋接程式被 `kill -9` 之後量）；據此定 `CHAMBER_BEAT`
+  - **讀數（2026-11-28 00:2x，`k8scc-bf [97703c]`，本機拋棄式 Synapse 1.143.0，事前寫的預期是 30–90 s）**：
+    - 跑的是出貨的 `chamber/chamber-bridge`，deliver 模式，`CHAMBER_BEAT=20`（生產值），每 5 s 在 socket 上送一次活著訊號
+    - 量法：另一個帳號讀到 im 在線（正對照，啟動後 20 s），再撐 30 s，然後 `kill -9`，所以沒有離場時的 `offline`。之後每秒讀一次 presence
+    - 三輪：39.3 s、39.3 s、40.3 s 轉 `offline`，在預期之內。11-19 的 bench 讀數「PUT online 之後不續，+45 s 仍在線、+90 s 不在線」是另一種情形：那次沒有 sync，也沒有續期
+    - **據此 `CHAMBER_BEAT` 維持 20 s**：bridge 每輪（上限 20 s）續一次 `online`，比伺服器約 40 s 的界短
+    - 代價：bridge 被硬殺時，im 在別人眼裡最多還會在線約 40 s。正常結束時有離場的 `offline`；`chamber-watch` 的 `gone` 管的是 session 沒了、bridge 還活著的情形
+    - **沒量**：生產的 `chamber.janncot.com`（它的 Synapse 版本與 presence 設定都沒讀過）；pod 裡的 bridge 被硬殺；以及「約 40 s」是哪一個計時器給的（只量到結果）。量測腳本沒有進 repo，用的是 `test/test_chamber_client_server.py` 的 `Server`
 - [x] 1.4 pane 的「登入畫面／信任對話框」長什麼樣（在映像上錄下來，像 `inbox-watch` 當初量 prompt 那樣）；D-c 的判斷式據此寫
   - **錄到的（截至 2026-11-26）**：信任對話框（`TRUST_REAL`，jg-jcc2，2026-11-10）；登入過期後的 pane（`NOT_LOGGED_IN_REAL`，jcom，2026-11-25，Claude Code 2.1.261，`fleet-ops-02 [e3795b]` 貼在 k8scc#70 issuecomment-7166698330）。**沒有錄到**：第一次登入的畫面
   - **據 **ferry133 2026-11-27 23:1x 在 `k8scc-bf` 的 console 裁定：「讓 #70 先關，這兩格改成「只量了假的對照」再關單」** 勾，與 4.2 (c) 是同一格。** 第一次登入的畫面**沒有錄、也沒有 fixture**；擋它的是通用規則「沒有閒置的空 prompt ⇒ 不送訊號、不打字」，那條規則只在別的 fixture（`TRUST_REAL`、`MENU_NOPHRASE` 等）上跑過。所以這一格是「只量了假的對照」，而且假的對照不是那個畫面本身
