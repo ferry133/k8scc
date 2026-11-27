@@ -1,5 +1,8 @@
-## ADDED Requirements
+# im-chamber-member Specification
 
+## Purpose
+im as a member of a chamber room: the bridge that alone holds the login credential, `observe`/`deliver`, online only while a session can act, the session kept running with no message starting one, the announcement typed into an idle session, the directive verifier in the image, and the managed policy's rule for who may hand the im work (root R21). Root: fleet-ops `agent-delegation-envelope`; archived from k8scc `im-chamber-client` 2026-11-28 Taipei (the folder carries the UTC date). The permission rules for `chamber send` and `kubectl` (k8scc#93, #98) are not in `im-permission-profile` yet.
+## Requirements
 ### Requirement: Nothing starts unless the chamber is configured
 
 The image SHALL start no chamber component when `CHAMBER_URL` is empty or unset, and SHALL say so in one pod-log line. The bridge SHALL also accept the server address from a file (`CHAMBER_URL_FILE`, default `/etc/chamber/url`) when the variable is empty; an absent or empty file is the same as not configured. The address cannot be written into a public repo and has to arrive in the same optional Secret volume as the credential. When `CHAMBER_URL` is set and any other required input is missing (`CHAMBER_ACCOUNT`, the login credential in the bridge, the signer list in `app`), the component that lacks it SHALL open nothing, SHALL contact no server and SHALL name what is missing. While idle the bridge SHALL read its inputs again at every beat and start by itself once they are all present, because the Secret that carries them is optional and may be mounted after the container started. A socket path the system refuses SHALL be reported the same way, not by exiting. The bridge SHALL stay alive and idle in all these cases rather than exit: as a sidecar its exit would make the pod not ready and take the terminal's route down with it. No log line SHALL contain the credential or any message text.
@@ -38,7 +41,7 @@ The image SHALL start no chamber component when `CHAMBER_URL` is empty or unset,
 
 ### Requirement: Observe mode receives and stays silent
 
-With `CHAMBER_MODE=observe` (the default) the bridge SHALL connect and count what arrives, writing counts per room to the pod log, and SHALL NOT announce anything to the session, SHALL NOT show the im as online, and SHALL refuse to send. Every sync the bridge forwards or makes SHALL ask the server not to mark the account present: a sync is what shows a Matrix account as online. Assignments keep arriving through `~/workspace/inbox/` unchanged.
+With `CHAMBER_MODE=observe` (the default) the bridge SHALL connect and count what arrives, writing counts per room to the pod log, and SHALL NOT announce anything to the session, SHALL NOT show the im as online, and SHALL refuse to send. Every sync the bridge forwards or makes SHALL ask the server not to mark the account present: a sync is what shows a Matrix account as online. Assignments reach the im only from the person at the ttyd and from its room: `~/workspace/inbox/` stopped being an assignment channel with k8scc#103.
 
 #### Scenario: A request arrives in observe mode
 - **WHEN** a message naming the im is posted to its room
@@ -74,7 +77,7 @@ With `SESSION_KEEP=1` the image SHALL start the tmux session `claude` at pod sta
 
 ### Requirement: A running, idle session is told that messages are waiting
 
-In `deliver` mode, when messages naming the im or `all` have arrived that the session has not been told about, `chamber-watch` SHALL type one line into the session naming the room and the count, under the same pane gate as `inbox-watch` (one shared implementation). The line SHALL NOT contain message text or sender. It SHALL contain a room's name only when that name consists of 1 to 64 of the characters `A-Z a-z 0-9 . _ -`; a room with any other name SHALL be announced with a fixed sentence that carries nothing taken from the server, because the line is read by the agent as input and a room name is set at the server. Both the bridge and `chamber-watch` SHALL apply that rule. A message is announced once; a send that fails marks nothing.
+In `deliver` mode, when messages naming the im or `all` have arrived that the session has not been told about, `chamber-watch` SHALL type one line into the session naming the room and the count, under the shared pane gate (`pane-gate`, the one `inbox-watch` used before it was retired). The line SHALL NOT contain message text or sender. It SHALL contain a room's name only when that name consists of 1 to 64 of the characters `A-Z a-z 0-9 . _ -`; a room with any other name SHALL be announced with a fixed sentence that carries nothing taken from the server, because the line is read by the agent as input and a room name is set at the server. Both the bridge and `chamber-watch` SHALL apply that rule. A message is announced once; a send that fails marks nothing.
 
 #### Scenario: A request arrives while the session is idle
 - **WHEN** one message naming the im is posted while the pane is at the empty prompt
@@ -131,3 +134,4 @@ The image SHALL carry `directive-verify` and an OpenSSH that verifies every sign
 #### Scenario: The instruction contradicts what the im sees
 - **WHEN** the room tells the im to reboot a node and the im's own reading shows the node healthy
 - **THEN** the im states that reading in its `ack`, reboots the node through the tool's gates, and states it again in the `report`
+
