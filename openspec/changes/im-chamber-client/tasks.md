@@ -20,7 +20,7 @@
     - **據此 `CHAMBER_BEAT` 維持 20 s**：bridge 每輪（上限 20 s）續一次 `online`，比伺服器約 40 s 的界短
     - 代價：bridge 被硬殺時，im 在別人眼裡最多還會在線約 40 s。正常結束時有離場的 `offline`；`chamber-watch` 的 `gone` 管的是 session 沒了、bridge 還活著的情形
     - **沒量**：生產的 `chamber.janncot.com`（它的 Synapse 版本與 presence 設定都沒讀過）；pod 裡的 bridge 被硬殺；以及「約 40 s」是哪一個計時器給的（只量到結果）。量測腳本沒有進 repo，用的是 `test/test_chamber_client_server.py` 的 `Server`
-    - `fleet-ops-02 [e3795b]` 驗收 #157 時，2026-11-28 00:32 試著從外面讀生產伺服器的 Synapse 版本（`/_synapse/admin/v1/server_version`，`chamber.janncot.com` 與 `.cc`），兩個都回空的內文。所以「本機 1.143.0 ≈ 生產」仍是假設。生產若是較舊的版本或不同的設定，要在那裡重量之後才能縮短 BEAT
+    - `fleet-ops-02 [e3795b]` 驗收 #157 時，2026-11-28 00:32 試著從外面讀 Synapse 版本（`/_synapse/admin/v1/server_version`，生產 `chamber.janncot.com` 與測試伺服器 `chamber.janncot.cc`），兩個都回空的內文。所以「本機 1.143.0 ≈ 生產」仍是假設。生產若是較舊的版本或不同的設定，要在那裡重量之後才能縮短 BEAT
 - [x] 1.4 pane 的「登入畫面／信任對話框」長什麼樣（在映像上錄下來，像 `inbox-watch` 當初量 prompt 那樣）；D-c 的判斷式據此寫
   - **錄到的（截至 2026-11-26）**：信任對話框（`TRUST_REAL`，jg-jcc2，2026-11-10）；登入過期後的 pane（`NOT_LOGGED_IN_REAL`，jcom，2026-11-25，Claude Code 2.1.261，`fleet-ops-02 [e3795b]` 貼在 k8scc#70 issuecomment-7166698330）。**沒有錄到**：第一次登入的畫面
   - **據 **ferry133 2026-11-27 23:1x 在 `k8scc-bf` 的 console 裁定：「讓 #70 先關，這兩格改成「只量了假的對照」再關單」** 勾，與 4.2 (c) 是同一格。** 第一次登入的畫面**沒有錄、也沒有 fixture**；擋它的是通用規則「沒有閒置的空 prompt ⇒ 不送訊號、不打字」，那條規則只在別的 fixture（`TRUST_REAL`、`MENU_NOPHRASE` 等）上跑過。所以這一格是「只量了假的對照」，而且假的對照不是那個畫面本身
