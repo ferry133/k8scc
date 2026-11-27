@@ -177,7 +177,7 @@ def main(old: str, new: str) -> tuple[str, str]:
                 return json.loads(r.read())
 
         verdict, detail = compare(mo, mn, layer_entries, config_of)
-        return verdict, f"{detail} ({state['used'] >> 20} MiB read)"
+        return verdict, f"{detail} ({state['used'] / (1 << 20):.1f} MiB read)"
     except Unmeasured as e:
         return "unmeasured", str(e)
     except Exception as e:   # network, auth, a tag that is gone, a tar it cannot parse

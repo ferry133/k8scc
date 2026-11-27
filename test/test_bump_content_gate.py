@@ -125,6 +125,34 @@ class Twins(unittest.TestCase):
     def test_renamed_file(self):
         self._differs(tar(ENTRY), tar([("usr/local/bin/entrypoint", ENTRY[0][1])], mtime=2000))
 
+    def _raw(self, name, mtime, uid=0, gid=0, link=None):
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w", format=tarfile.PAX_FORMAT) as tf:
+            ti = tarfile.TarInfo(name)
+            ti.mtime, ti.uid, ti.gid = mtime, uid, gid
+            if link is None:
+                ti.size = 1
+                tf.addfile(ti, io.BytesIO(b"x"))
+            else:
+                ti.type, ti.linkname = tarfile.SYMTYPE, link
+                tf.addfile(ti)
+        return gzip.compress(buf.getvalue(), mtime=0)
+
+    def test_owner(self):
+        # jg-base-d4's m6 on #156: uid/gid dropped from the tuple survived
+        self._differs(self._raw("home/claude/f", 1, uid=1000, gid=1000), self._raw("home/claude/f", 2, uid=0, gid=1000))
+        self._differs(self._raw("home/claude/f", 1, uid=1000, gid=1000), self._raw("home/claude/f", 2, uid=1000, gid=0))
+        (v, d), _ = run(image([tar(BASE), self._raw("home/claude/f", 1, uid=1000, gid=1000)]),
+                        image([tar(BASE), self._raw("home/claude/f", 2, uid=1000, gid=1000)]))
+        self.assertEqual(v, "same", d)   # control: the same owner with a new mtime
+
+    def test_symlink_target(self):
+        # jg-base-d4's m7 on #156: linkname dropped from the tuple survived
+        self._differs(self._raw("usr/bin/python3", 1, link="python3.11"), self._raw("usr/bin/python3", 2, link="python3.12"))
+        (v, d), _ = run(image([tar(BASE), self._raw("usr/bin/python3", 1, link="python3.11")]),
+                        image([tar(BASE), self._raw("usr/bin/python3", 2, link="python3.11")]))
+        self.assertEqual(v, "same", d)   # control: the same target with a new mtime
+
     def test_layer_count(self):
         (verdict, detail), _ = run(image([tar(BASE), tar(ENTRY)]), image([tar(BASE), tar(ENTRY), tar(POLICY)]))
         self.assertEqual(verdict, "differs")
