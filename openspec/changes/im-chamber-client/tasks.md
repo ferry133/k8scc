@@ -20,6 +20,7 @@
     - **據此 `CHAMBER_BEAT` 維持 20 s**：bridge 每輪（上限 20 s）續一次 `online`，比伺服器約 40 s 的界短
     - 代價：bridge 被硬殺時，im 在別人眼裡最多還會在線約 40 s。正常結束時有離場的 `offline`；`chamber-watch` 的 `gone` 管的是 session 沒了、bridge 還活著的情形
     - **沒量**：生產的 `chamber.janncot.com`（它的 Synapse 版本與 presence 設定都沒讀過）；pod 裡的 bridge 被硬殺；以及「約 40 s」是哪一個計時器給的（只量到結果）。量測腳本沒有進 repo，用的是 `test/test_chamber_client_server.py` 的 `Server`
+    - `fleet-ops-02 [e3795b]` 驗收 #157 時，2026-11-28 00:32 試著從外面讀生產伺服器的 Synapse 版本（`/_synapse/admin/v1/server_version`，`chamber.janncot.com` 與 `.cc`），兩個都回空的內文。所以「本機 1.143.0 ≈ 生產」仍是假設。生產若是較舊的版本或不同的設定，要在那裡重量之後才能縮短 BEAT
 - [x] 1.4 pane 的「登入畫面／信任對話框」長什麼樣（在映像上錄下來，像 `inbox-watch` 當初量 prompt 那樣）；D-c 的判斷式據此寫
   - **錄到的（截至 2026-11-26）**：信任對話框（`TRUST_REAL`，jg-jcc2，2026-11-10）；登入過期後的 pane（`NOT_LOGGED_IN_REAL`，jcom，2026-11-25，Claude Code 2.1.261，`fleet-ops-02 [e3795b]` 貼在 k8scc#70 issuecomment-7166698330）。**沒有錄到**：第一次登入的畫面
   - **據 **ferry133 2026-11-27 23:1x 在 `k8scc-bf` 的 console 裁定：「讓 #70 先關，這兩格改成「只量了假的對照」再關單」** 勾，與 4.2 (c) 是同一格。** 第一次登入的畫面**沒有錄、也沒有 fixture**；擋它的是通用規則「沒有閒置的空 prompt ⇒ 不送訊號、不打字」，那條規則只在別的 fixture（`TRUST_REAL`、`MENU_NOPHRASE` 等）上跑過。所以這一格是「只量了假的對照」，而且假的對照不是那個畫面本身
@@ -65,8 +66,10 @@
 - [x] 3.2 controls：白名單外的路徑被拒；bridge 沒有任何 TCP listener（正對照：同一份列表看得到 ttyd 的 port）；憑證不出現在 log 與任何回應；`observe` 下 `send` 被拒、在線讀數不變；伺服器連不上時用戶端得到「量不到」不是「不在線」
   - **做了（同上）**：`test/test_chamber_bridge.py` 71 格（含 `CHAMBER_URL_FILE` 的 8 格、驗收四件的 8 格）：bridge 以出貨的樣子當行程跑，對一台手寫的假伺服器，真的 `chamber` 用戶端經 socket 走。16 條白名單外的路徑全是 404 且伺服器一條都沒看到；沒有 TCP listener（`lsof`／`ss`，兩者都沒有 ⇒ 量不到 ⇒ 不算綠；正對照是同一份列表看得到假伺服器的 port）；憑證不在任何回應與 log；`observe` 下 `chamber send` 回 1；伺服器連不上 ⇒ 用戶端回 2（兩格：從沒連上、確認過之後才斷）。十五個變異各自轉紅。**第一輪變異抓到兩個對照的毛病**：「每個 sync 都要求不在線」那格在 bridge 自己還沒 sync 時只讀到測試自己送的那一個（時序，乾淨的 run 剛好都過）；「連不上 ⇒ 2」那格被「帳號還沒確認」的路徑遮住，變異存活——兩格都改了
   - **假伺服器是照用戶端用到的路徑手寫的，不是 Matrix**：這些格量的是 bridge，不是協定
-- [ ] 3.3 在沒有 sidecar 的 pod 上由 `entrypoint.sh` 起（只給拋棄式叢集），啟動行說「憑證在 app 內」
+- [x] ~~3.3 在沒有 sidecar 的 pod 上由 `entrypoint.sh` 起（只給拋棄式叢集），啟動行說「憑證在 app 內」~~ **劃掉**
   - **2026-11-19 08:53 的狀態（`k8scc-0f [7c5b85]`）：可能不需要了，沒做**。當初寫這一項是因為 jg-base 還沒有 sidecar；jg-base#251 已合併，component 以 `command: ["chamber-bridge"]` 起一個 container。bridge 本身認得 `CHAMBER_BRIDGE_IN_APP=1`（啟動行會說憑證在 app 內，有格），但 `entrypoint.sh` 沒有起它的路徑。第一次走通若直接用 jg-base 的 component，這一項就劃掉；要不要留由第一次走通的人定
+  - **劃掉（2026-11-28，`fleet-ops-02 [e3795b]` 以 fleet-ops-98 同目錄同僚的身分裁定，k8scc-bf 記）**：第一次走通是 `fleet-ops-98 [047e9c]` 2026-11-20 00:48 在 jg-jcc2，用的是 jg-base 的 component（kustomization `components=["../chamber"]`；紀錄在 fleet-ops `openspec/changes/agent-delegation-envelope/tasks.md:606`）。格裡寫的條件成立。fleet-ops-98 已不在 ListAgents
+  - 留下的：bridge 仍認得 `CHAMBER_BRIDGE_IN_APP=1`（有格），但 `entrypoint.sh` 沒有起它的路徑。這次沒拿掉，因為拿掉會換映像的一層
 
 ## 4. 在線與常駐（root 6.3 的另一半、6.4）
 
