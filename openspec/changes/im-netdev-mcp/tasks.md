@@ -6,8 +6,11 @@
 ## 1. Spikes（結果會改 design）
 
 - [x] 1.1 `httpx` 在 `mcp` 釘版的依賴樹裡嗎（映像內 `python3 -c 'import httpx; print(httpx.__version__)'`）；不在 ⇒ 照 `mcp` 的釘法加進 base 層，design D-a 改。**讀數（2026-10-26）**：`pip show mcp`（1.29.0）的 `Requires` 有 `httpx`，裝出來是 0.28.1——依賴宣告與平台無關；在 darwin 的 venv 量，不是映像內，映像內那一句留給 image build 後。D-a 不改。
-- [ ] 1.2 消費 root spike 1.1 的讀數（FAC1 UniFi 的 API 面：哪些 collection 走 Integration、哪些只有 legacy；PUT 整物件或 PATCH；登入流程的 header／cookie 名；`set_dns_forward` 有沒有 API）→ 填 `ROUTES` 表與 fixture；錄一份去值的 legacy 登入 request／response 當 fixture 依據。**root 1.1 沒量之前，這裡只能寫 Integration 半邊與假 controller。**
-- [ ] 1.3 消費 root spike 1.5（fine-grained token 的最小 scope）→ design D-g 寫明 scope；本地用假 FAC 先做。
+- [x] 1.2 消費 root spike 1.1 的讀數（FAC1 UniFi 的 API 面：哪些 collection 走 Integration、哪些只有 legacy；PUT 整物件或 PATCH；登入流程的 header／cookie 名；`set_dns_forward` 有沒有 API）→ 填 `ROUTES` 表與 fixture；錄一份去值的 legacy 登入 request／response 當 fixture 依據。**root 1.1 沒量之前，這裡只能寫 Integration 半邊與假 controller。**
+  - **消費了（2026-11-27 對帳，`k8scc-bf [97703c]`）**：root 1.1 的讀面（fleet-ops-b0 [5a4f4b]，2026-11-12，UCG Ultra／Network 11.0.99）與寫面的已量部分（`rest/user` 合併式 PUT、`DELETE rest/user` 404、View Only cookie 寫入 403、v2 `static-dns` 的條件式轉發）經 k8scc#67（finding 1–8，#68／#69 → `e8d7522`）與 k8scc#109 進了 `ROUTES`／`WRITES`、fixture 與 `set_dns_forward`／`clear_dns_forward`。**沒有 Integration API 的路由**：它對 View Only cookie 回 401。
+  - **仍沒量，所以 `ROUTES`／`WRITES` 的這幾項還是暫定**：`networkconf`／`portforward`／`wlanconf`／防火牆的寫入；`self/sites`、v2 `firewall/zone` 的讀取。**`stat/device` 與 `stat/sta` 在 FAC1 上讀過**：前者在 spike 1.1 以 legacy 讀到 200（root design D4）；後者是 sidecar 的 `get_clients`，root 6.2–6.5 讀過很多次，11-25 有一次回 500，sidecar 據此拒絕了所有寫入（root 6.5 (d)）。初稿把這兩項寫成沒量，是 fleet-ops-1e [83ff46] 驗收 #152 時指出的root 1.1 因此也還沒勾。「錄一份去值的登入 fixture」沒有做，fixture 是照文件上的欄位名手寫的（CLAUDE.md 有記）
+- [x] 1.3 消費 root spike 1.5（fine-grained token 的最小 scope）→ design D-g 寫明 scope；本地用假 FAC 先做。
+  - **消費了（2026-11-27 對帳，`k8scc-bf [97703c]`）**：root 1.5 由 fleet-ops-1e [83ff46] 在 2026-11-24 量到（root design D9），結論是 (a) 可行。D-g 已寫進 scope；CLAUDE.md 原本那句「not yet measured」也改了
 
 ## 2. server
 
@@ -34,8 +37,22 @@
 
 ## 5. 契約與收尾
 
-- [ ] 5.1 spec `netdev-mcp-server` 定稿 ⇒ 貼到 jg-base#222（env 名、port、Secret 掛載路徑、快照目錄、daily-check 列要讀的 stderr 行），jg-base-ed [d73263] 據此開 `netdev-mcp-sidecar`。
+- [x] 5.1 spec `netdev-mcp-server` 定稿 ⇒ 貼到 jg-base#222（env 名、port、Secret 掛載路徑、快照目錄、daily-check 列要讀的 stderr 行），jg-base-ed [d73263] 據此開 `netdev-mcp-sidecar`。
+  - **做了（2026-11-27 對帳，`k8scc-bf [97703c]`）**：k8scc-c7 [9b9eab] 2026-10-26 在 jg-base#222 貼了契約（`5bf8f25`，jg-base-ed 回「收到契約」），20:29 又貼了寫入映像的 addendum（#45）。jg-base#222 已關閉，驗收是 k8scc-bf 在 2026-11-24 代 k8scc-c7 收的
 - [ ] 5.2 `im-permission-profile` 的 MODIFIED 在歸檔時合進 `openspec/specs/`（寫在 `im-ha-mcp` 的 delta 之上；順序相反就重疊一次）；`netdev-mcp-server` 成為新 spec。
-- [ ] 5.3 活 controller 的格（root §6，FAC1 真 UniFi、拋棄式）——本 sub-change 不等它歸檔，但 PR 內文要寫「真 controller 未量」與哪幾格是假物量的。
-- [ ] 5.4 PR 內文署名；驗收者（fleet-ops 目錄的 session）在 merge 之前收；merge 後 PR 留一行 `peer name [ref]`。先出 reader-only 的映像（root Migration 2），operator 面第二張 PR。
+- [x] 5.3 活 controller 的格（root §6，FAC1 真 UniFi、拋棄式）——本 sub-change 不等它歸檔，但 PR 內文要寫「真 controller 未量」與哪幾格是假物量的。
+  - **對帳（2026-11-27 對帳，`k8scc-bf [97703c]`）**：root §6 的 6.1–6.7 都已勾，在 FAC1 真 UniFi 加拋棄式叢集 jg-jcc2 上量，各格由誰量寫在 root tasks §6 那一格。6.8（清場）還開著，那是 fleet-ops 的。**仍沒在真 controller 上量的**：
+    - DNS 轉發的兩支工具。要等 root 7.2 在 jcom 上量
+    - port forward 的 DELETE 回滾
+    - 跨 sidecar 重啟的 `interrupted`
+    - 同時送出第二個寫入會被拒（#132）
+    - undo 的 baseline 豁免，#142 (a)。ferry133 裁定走 (b)
+    - im 自己（Claude）呼叫寫入工具。6.3、6.5、6.6 的呼叫端都是 fleet-ops-1e 寫的 client
+    - `restart_device`／`power_cycle_port` 真的執行。FAC1 上只量過被 class A 拒絕的路：6.5 (f)，以及 #73 設備類型那一半
+  - **在 FAC1 上讀過、初稿寫成只對假物量的**（fleet-ops-1e [83ff46] 驗收 #152 時指出，issuecomment-7222158916）：
+    - #132：等 token 的 124 s 裡，另一條 session 讀了 9 次 `get_clients`，都有回應（2026-11-26，映像 `615cc51`，票 #17／#18）
+    - #132：set 與 clear 共用 cooldown，undo 例外拿到 token 並 `applied`（票 #12／#13）
+    - #142 (b)：token 綁的是變更，同一場那 9 次讀取都沒有讓它作廢。改之前的對照是票 #14，那一次 token 被作廢
+- [x] 5.4 PR 內文署名；驗收者（fleet-ops 目錄的 session）在 merge 之前收；merge 後 PR 留一行 `peer name [ref]`。先出 reader-only 的映像（root Migration 2），operator 面第二張 PR。
+  - **做了（2026-11-27 對帳，`k8scc-bf [97703c]`）**：reader-only 是 k8scc#43（2026-10-26 合併，fleet-ops-65 驗收），operator 面是 #45（同日合併）。之後的修正各有自己的 issue，由開單者驗收（清單在 CLAUDE.md 的「Netdev MCP Sidecar」一節，這裡不複述）
 - [ ] 5.5 歸檔本 sub-change，回更新 root 的 Sub-changes 表與 tasks §2。
