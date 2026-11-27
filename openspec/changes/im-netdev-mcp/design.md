@@ -30,7 +30,7 @@ UniFi console 預設自簽。`verify=False` 是一行就能寫出來、而且永
 
 ### D-g ─ 票是 GitHub issue，用最小 scope 的 fine-grained token，只在 sidecar
 
-`IM_FAC_TICKET_REPO`（`owner/repo`，private）＋ `IM_FAC_TICKET_TOKEN_FILE`。scope：issues read／write 於那一個 repo。**root spike 1.5 量到（2026-11-24，fleet-ops-1e [83ff46]，root design D9）**：fine-grained token 只選票 repo、權限只有 Issues 讀寫，就能開單、讀留言、留言、關單。讀內容、寫檔、讀 PR、讀 Actions secrets、改設定都回 403；別的 repo 回 404。多出來的權限是加 label 與鎖 issue，因為 Issues 讀寫沒有更細的切法，**最小就是這樣**。票 repo 一座叢集一個，命名 `<叢集>-im-tickets`（ferry133 2026-11-24 裁定）。server 直接 `httpx` 打 REST（`POST /repos/{r}/issues`、`GET …/comments`、`PATCH …` close），不用 `gh`（base 映像沒有，不加）。票的標題 `[netdev] <cluster> <tool> <target>`；內文：叢集、collection＋`_id`、剝過的 diff、截止時間、票號；release 是關單留言，帶三種讀數。GitHub 同時是三條探針之一（D-f），所以「開不了票」與「探針掉」在基線時是同一個讀數。
+`IM_FAC_TICKET_REPO`（`owner/repo`，private）＋ `IM_FAC_TICKET_TOKEN_FILE`。scope：issues read／write 於那一個 repo。**root spike 1.5 量到（2026-11-24，fleet-ops-1e [83ff46]，root design D9）**：fine-grained token 只選票 repo、權限只有 Issues 讀寫，就能開單、讀留言、留言、關單。讀內容、寫檔、讀 PR、讀 Actions secrets、改設定都回 403；別的 repo 回 404。多出來的權限是加 label 與鎖 issue，因為 Issues 讀寫沒有更細的切法，**最小就是這樣**。票 repo 一座叢集一個，命名 `<叢集>-im-tickets`（ferry133 2026-11-24 裁定）。jg-jcc2 那把 token **2026-12-24 到期**（D9）。到期之後就開不了票，所以每一個寫入都會 `aborted`。server 直接 `httpx` 打 REST（`POST /repos/{r}/issues`、`GET …/comments`、`PATCH …` close），不用 `gh`（base 映像沒有，不加）。票的標題 `[netdev] <cluster> <tool> <target>`；內文：叢集、collection＋`_id`、剝過的 diff、截止時間、票號；release 是關單留言，帶三種讀數。GitHub 同時是三條探針之一（D-f），所以「開不了票」與「探針掉」在基線時是同一個讀數。
 
 ### D-h ─ 冷卻與計數在記憶體；own-node 那種洞這裡沒有
 
