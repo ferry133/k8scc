@@ -461,9 +461,12 @@ with fake.lock:
 p, SOCK, LOG = start("deliver", CHAMBER_MODE="deliver", CHAMBER_BRIDGE_IN_APP="1")
 until(lambda: os.path.exists(SOCK) and "the server confirms the account" in logged(LOG))
 check("D1 the start line says the credential is inside app when told so", True, "the credential is inside app (no sidecar)" in logged(LOG))
-before_put = count("PUT")
+# Only the send path is counted (2026-11-27): in deliver mode the bridge also PUTs
+# presence (the first "offline" since k8scc#146), and one landing in the window
+# made D2 read (3, 2) on run 46023185325.
+before_put = count("PUT", "/send/")
 rc, o, e = client(SOCK, "send", "cust-a", "--to", "fac-agent", "hello")
-check("D2 chamber send goes through (3: left in the room, the fake says the recipient is offline)", (3, 1), (rc, count("PUT") - before_put))
+check("D2 chamber send goes through (3: left in the room, the fake says the recipient is offline)", (3, 1), (rc, count("PUT", "/send/") - before_put))
 with fake.lock:
     syncs = [pth for m, pth, a in fake.seen if pth.startswith(P + "/sync")]
 check("D3 every sync still asks for presence offline (presence is set by the bridge itself, not by syncing)", True, all("set_presence=offline" in s for s in syncs))
@@ -481,12 +484,12 @@ def announce_only(sock, length):
         c.close()
 
 
-before_put = count("PUT")
+before_put = count("PUT", "/send/")
 check("D4 a send announcing a body over the limit is refused here, and the server sees no PUT", (413, 0),
-      (announce_only(SOCK, (1 << 20) + 1), count("PUT") - before_put))
-before_put = count("PUT")
+      (announce_only(SOCK, (1 << 20) + 1), count("PUT", "/send/") - before_put))
+before_put = count("PUT", "/send/")
 check("D5 control: a send within the limit reaches the server", (200, 1),
-      (raw(SOCK, "PUT", P + "/rooms/!r1:fake/send/m.room.message/3", body=b"{}")[0], count("PUT") - before_put))
+      (raw(SOCK, "PUT", P + "/rooms/!r1:fake/send/m.room.message/3", body=b"{}")[0], count("PUT", "/send/") - before_put))
 
 print("deliver: online only while the alive signal arrives (tasks 4.1)")
 check("A-1 no signal yet: the bridge says not online, once", (True, ["offline"]),
