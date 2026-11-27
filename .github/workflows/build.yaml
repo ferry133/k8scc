@@ -71,6 +71,10 @@ jobs:
       # same / absent / unknown against a throwaway git history.
       - name: Check the bump-order controls
         run: python3 test/test_bump_order.py
+      # A build whose files equal the pin's opens no bump PR (k8scc#153):
+      # same / differs / unmeasured on tars made at test time.
+      - name: Check the bump content-gate controls
+        run: python3 test/test_bump_content_gate.py
       - name: Check the written-pin cross-check controls
         run: test/bump-pin-check-controls.sh
 
@@ -634,6 +638,32 @@ jobs:
             exit 0
           fi
 
+          # Same files as what the PR would replace ⇒ no PR, no push (k8scc#153).
+          # A docs-only commit still publishes a new digest (new mtimes in the
+          # COPY layers, fresh provenance), and merging that bump restarted both
+          # production ims for nothing (jg-base#282, #283). Compared against the
+          # pin the open PR carries when there is one, else jg-base main's: so a
+          # revert of an unmerged change still rewrites the PR. "unmeasured"
+          # never suppresses: the PR opens as before and its body says so.
+          case "${ON_BRANCH}" in
+            ""|"<"*) GATE_OLD="${OLD_SHORT}" ;;
+            *)       GATE_OLD="${ON_BRANCH}" ;;
+          esac
+          GATE_LINE="unmeasured	no pin to compare with"
+          if [ -n "${GATE_OLD}" ]; then
+            GATE_RC=0
+            GATE_LINE=$(cd ../k8scc && python3 .github/scripts/bump_content_gate.py "${GATE_OLD}" "${SHORT}") || GATE_RC=$?
+            echo "content gate (${GATE_OLD} → ${SHORT}): ${GATE_LINE}"
+            if [ "${GATE_RC}" -eq 0 ]; then
+              echo "::notice::${SHORT} is content-identical to ${GATE_OLD} -- no bump PR opened or rewritten (k8scc#153). ${GATE_LINE#*$'\t'}"
+              exit 0
+            fi
+          fi
+          case "${GATE_LINE}" in
+            differs*) GATE_NOTE="**Content gate (k8scc#153):** differs from \`${GATE_OLD}\` -- ${GATE_LINE#*$'\t'}" ;;
+            *)        GATE_NOTE="**Content gate (k8scc#153):** not measured (${GATE_LINE#*$'\t'}); opened as before" ;;
+          esac
+
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git checkout -B "${BRANCH}"
@@ -706,6 +736,8 @@ jobs:
             echo "\`${OLD_SHORT:-?}\` → \`${SHORT}\`."
             echo
             printf '%s\n' "${EXPLAIN}"
+            echo
+            printf '%s\n' "${GATE_NOTE}"
             echo
             echo "⚠️ **This PR's head moves.** It lives on the fixed branch \`${BRANCH}\`, and every"
             echo "later k8scc main build force-pushes its own pin onto it and rewrites this body"
