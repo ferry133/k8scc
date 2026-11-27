@@ -1,0 +1,297 @@
+# netdev-mcp-server Specification
+
+## Purpose
+The contract of the `netdev-mcp` sidecar (`netdev_mcp_server.py`): im's UniFi controller access, with reader tools and write tools behind seven server-side gates and an inward dead-man, credentials only in the sidecar, TLS always verified. Root: fleet-ops `im-unifi-management`; archived from k8scc `im-netdev-mcp` 2026-11-27. The jg-base side (container, Secrets, snapshot PVC) is jg-base#222.
+## Requirements
+### Requirement: Configuration comes from the environment and mounted files, and TLS is always verified
+
+The netdev MCP server SHALL read its configuration from `UNIFI_CONTROLLER_URL`, `UNIFI_SITE` (default `default`), `UNIFI_CA_FILE`, `UNIFI_READER_FILE`, `UNIFI_OPERATOR_FILE`, `POD_IP`, `NETDEV_SNAPSHOT_DIR`, `NETDEV_SNAPSHOT_KEEP` (default 50), `NETDEV_HEALTH_TIMEOUT` (default 120), `NETDEV_WRITES_PER_HOUR` (default 12), `NETDEV_OUTSIDE_PROBES` (three comma-separated probes), `NETDEV_WITNESS_WAIT` (default 120), `IM_FAC_TICKET_REPO`, `IM_FAC_TICKET_TOKEN_FILE`, `NETDEV_READ_TIMEOUT` (default 15), `CLAUDE_USER_ID`, `CLUSTER_NAME` (ticket title), and the tuning values `NETDEV_HEALTH_INTERVAL` (default 10), `NETDEV_WITNESS_POLL` (default 5), `NETDEV_PROBE_TIMEOUT` (default 5) and `IM_FAC_TICKET_API` (default `https://api.github.com`, held to the same https rule as the controller). It SHALL listen on `127.0.0.1:8766` over SSE. It SHALL verify the controller's TLS certificate against `UNIFI_CA_FILE` and SHALL offer no option to disable verification. When that file holds exactly one certificate, it SHALL be the only trust anchor, the hostname SHALL NOT be checked, and the peer SHALL be refused unless its certificate is byte-identical to that one, so a CA alone in the file never authorises what it signed. A console's factory certificate is self-signed for `unifi.local`, valid for no address the sidecar dials, and counted by OpenSSL as a CA (FAC1: keyCertSign, no basicConstraints; k8scc#67), so the mode SHALL NOT be decided by the CA bit. With two or more certificates the hostname SHALL be checked. The startup readings SHALL name the mode; an `http://` controller URL SHALL be refused unless `NETDEV_ALLOW_INSECURE_HTTP=1`, in which case the startup readings SHALL say so. The reader credential SHALL be the console's View Only local account, two lines (user, password), logged in over `/api/auth/login` (cookie + CSRF) on its own HTTP client, like the operator's and never sharing a client with it; a 401 SHALL log in again once. There SHALL be no API-key path: on FAC1 a View Only user cannot create a key, and the owner's key wrote (k8scc#67 finding 6, ferry133 2026-11-13). A set `UNIFI_READER_KEY_FILE` SHALL NOT be read, and SHALL be named in the not-configured answer when `UNIFI_READER_FILE` is missing. No credential value SHALL appear in any startup reading, tool response, audit line or process argument.
+
+#### Scenario: Plain http refused without the test flag
+- **WHEN** `UNIFI_CONTROLLER_URL` is `http://…` and `NETDEV_ALLOW_INSECURE_HTTP` is unset
+- **THEN** every tool responds that the controller URL is refused, and no request reaches the fake controller (positive control: with the flag set, requests arrive and the startup readings contain `insecure http accepted`)
+
+#### Scenario: Factory certificate pinned, nothing else trusted
+- **WHEN** the fake controller is served over TLS with a FAC1-shaped certificate (self-signed `CN=unifi.local`, keyCertSign, no basicConstraints, no SKI/AKI, no SAN for the address dialled), and `UNIFI_CA_FILE` is that certificate
+- **THEN** the reader reads, and the startup readings say `TLS: pinned certificate` (controls: the fixture reads `x509_ca` 1 and fails strict as FAC1's does; the earlier `verify=<file>` context is refused; a certificate signed by the fixture's key, which chains to it, is refused before any request; another certificate is refused; a root CA alone in the file refuses the leaf it signed; a file of two certificates, one of them the served one, keeps the hostname check and is refused; a CA chain refuses a leaf valid only for `unifi.local` and reads one valid for the address dialled)
+
+#### Scenario: Credentials never surface
+- **WHEN** the server starts with known dummy reader and operator values
+- **THEN** the captured startup readings, every tool response in the test run and every audit line contain zero occurrences of those values, the reader's and the operator's cookies included
+
+#### Scenario: Reader is a login, not a key
+- **WHEN** the reader tools run with `UNIFI_READER_FILE` holding the dummy View Only account
+- **THEN** the fake controller recorded one login for that user and every GET carried the reader's cookie and none the operator's; no request carried `X-API-Key` (positive controls: the fake answers a key-only GET 401 and a write with the reader's cookie 403, as FAC1's View Only account did)
+
+### Requirement: Three startup states decide which tools exist
+
+With no usable reader credential every tool SHALL respond `not configured` naming the missing input. With a usable reader credential but an absent, empty or non-authenticating operator credential, no ticket channel (`IM_FAC_TICKET_REPO` empty or its token file missing), `NETDEV_OUTSIDE_PROBES` not exactly three, `POD_IP` unset, or `NETDEV_SNAPSHOT_DIR` unset or not writable, the server SHALL register only the reader tools and SHALL name the reason in the startup readings. With all of them usable the server SHALL also register the write tools. There SHALL be no state in which a write tool is registered but refuses every call for lack of configuration.
+
+#### Scenario: Reader-only for each missing input
+- **WHEN** the server starts three times — operator file absent, operator file present but the fake controller refuses its login, ticket repo unset
+- **THEN** each time the tool list contains the ten reader tools and no write tool, and the startup readings name which input was missing (positive control: all present ⇒ write tools listed); the same holds for two probes, `POD_IP` unset and the snapshot directory unset
+
+### Requirement: Reader tools strip secrets and name their path
+
+`get_sites`, `get_controller_info`, `get_devices`, `get_clients`, `get_networks`, `get_firewall_rules`, `get_port_forwards`, `get_dhcp_reservations`, `get_wlans` and `get_lan_inventory` SHALL be read-only, SHALL replace the value of every key matching `^x_`, `_secret$`, `_keys?$`, `passphrase`, `password`, `psk` or `preshared` (case-insensitive, recursively; `private_preshared_keys` matched none of the first six, k8scc#67 finding 2) with `<stripped>`, SHALL begin the response with `[via legacy]`, `[via legacy-root]`, `[via v2]` or, for `get_firewall_rules`, `[via legacy+v2]`, SHALL use no Integration API route (it refuses the View Only cookie: fleet-ops-b0 on FAC1, 2026-11-14), and SHALL record what they returned in a session cache with a 600-second TTL for the write tools to address.
+
+#### Scenario: Passphrase stripped at every exit
+- **WHEN** `get_wlans` runs against a fixture containing `x_passphrase`
+- **THEN** the response contains `<stripped>` and zero occurrences of the passphrase value
+
+#### Scenario: Secret stripped at every write exit, kept by the snapshot
+- **WHEN** a confirmed write addresses an object carrying an `x_` field (no write tool addresses a WLAN, so the controls use a user row)
+- **THEN** the token response, the result, every audit line and the ticket contain zero occurrences of the value and the snapshot file contains it once (positive control), and the PUT body carries the original value, not `<stripped>`
+
+#### Scenario: Path marker present
+- **WHEN** any reader tool returns data from the fake controller
+- **THEN** the first line names the API according to the route table
+
+#### Scenario: Zone-based firewall is read
+- **WHEN** the legacy firewall rule and group collections answer empty and v2 `firewall-policies` holds policies, as on FAC1 (Network 11.0.99)
+- **THEN** `get_firewall_rules` returns the policies with each side expanded (IP list, network subnets, or a zone's networks), naming as unresolved any side it cannot expand (a zone with no networks, an unread zone, a negated side, a target type it does not model) (negative controls: zones unreadable ⇒ only zone-given sides become unresolved; policies unreadable ⇒ an error, not an empty firewall)
+
+### Requirement: Every write is typed, reasoned, addressed from the cache, tokened, cooled and rate-limited
+
+Each write tool SHALL take typed arguments and a non-blank `reason`, SHALL compose the request body server-side from the object as the snapshot read it, unstripped, changing only the fields the tool defines (so a secret goes back as it was), SHALL refuse a target not returned by a reader in this session within the TTL, SHALL run in two phases (no `confirm` ⇒ a single-use token bound to the target, `expires_in: 120`, `will_change` as a stripped before/after diff, `cooldown_after: 600`, and the ticket number; valid token ⇒ consumed before acting), SHALL refuse the same target for 600 s after a write, and SHALL refuse once `NETDEV_WRITES_PER_HOUR` confirmed writes have run in the trailing hour. `confirm` SHALL be a string token, never a boolean.
+
+#### Scenario: Blank reason refused before any request
+- **WHEN** a write tool is called with a blank `reason`
+- **THEN** it is refused and the fake controller recorded zero requests
+
+#### Scenario: Unread target refused
+- **WHEN** `block_client` names a MAC no reader returned in this session
+- **THEN** it is refused with "read it first" (positive control: after `get_clients`, a token is issued)
+
+#### Scenario: Body changes only the defined fields
+- **WHEN** a confirmed `set_dhcp_reservation` runs
+- **THEN** the PUT body the fake controller recorded equals the cached object with only `use_fixedip` and `fixed_ip` changed, and equals the `after` side of `will_change` field by field except that a field `after` shows as `<stripped>` carries its original value
+
+#### Scenario: Token single-use, bound and timed
+- **WHEN** a token is reused, used for another target, or used after 120 s
+- **THEN** the call is refused and the fake controller shows exactly one write for the first use
+
+#### Scenario: Cooldown and hourly ceiling
+- **WHEN** a second write targets the same object within 600 s, and when the hourly ceiling has been reached
+- **THEN** each is refused naming the seconds or count remaining (negative control: another object inside the cooldown window is accepted while under the ceiling)
+
+### Requirement: Snapshot, apply, verify, revert from inside — with outside probes and FAC as witness
+
+Before the token phase the server SHALL probe the three outside endpoints and open a ticket on the im→FAC channel carrying the cluster, the target's collection and id, the stripped diff and a deadline — never a snapshot or a secret; a failed probe or a failed ticket SHALL refuse the write. It SHALL wait up to `NETDEV_WITNESS_WAIT` for a `pre-ack:` comment; absence SHALL be recorded as `fac_witness: unmeasured` and SHALL NOT block. Before applying it SHALL GET the whole target object and the list of `_id`s in its collection into `NETDEV_SNAPSHOT_DIR` (a failed GET aborts). After the snapshot and before the write it SHALL comment `netdev-mcp applying` on the ticket; a comment that cannot be posted, or whose answer carries no id, SHALL abort with nothing written (k8scc#126). After applying, within `NETDEV_HEALTH_TIMEOUT`, it SHALL verify the controller API, the Kubernetes API server (`kubectl get --raw /readyz`), the fields the tool sets reading back equal to `after` (not the whole object: fields such as `last_seen` change on their own; a command has no read-back), the three probes (two or more lost ⇒ failure; one lost ⇒ `outbound: degraded`), and — when a pre-ack arrived — a `post-ack:` comment that stands after the server's `netdev-mcp applying` comment in the ticket's listing (absent with probes answering ⇒ failure, `fac_witness: lost`; a `post-ack:` before that comment, or with that comment not in the listing, SHALL NOT count). Any failure SHALL PUT the snapshot back through the controller and re-check. Because the legacy PUT merges (k8scc#67 finding 4), a field the tool set that the snapshot did not have can survive that PUT: it SHALL count as reverted only where a server table names it inert in the state read back (today `users.fixed_ip` with `use_fixedip` not true), and SHALL otherwise end the revert as `revert-failed` naming the field. A write the controller itself refuses (an HTTP status or `rc` not ok) SHALL end as `aborted` with nothing to revert; a transport error SHALL be treated as possibly applied. A command with no inverse (`restart_device`, `power_cycle_port`) SHALL end as `revert-failed` when health fails, saying it cannot be undone. For a write that created an object in a collection whose DELETE is not known to remove it (today every collection but `portforwards`: `DELETE rest/user` answered 404 on FAC1, finding 5), the revert SHALL send nothing and end `revert-failed`. Otherwise the revert SHALL DELETE only the `_id` the create response returned, and only when it is the sole `_id` in the collection absent from the snapshot's list; when any other new `_id` is present the server SHALL delete nothing and the result SHALL be `revert-failed`. The ticket SHALL be closed with a release comment carrying `outbound`, `fac_witness` and `result`; a failed revert SHALL be `result: revert-failed` and the tool response SHALL instruct im to write a dated inbox report immediately. No comment the server writes itself (release, `revert-failed`, or any other) SHALL begin with `pre-ack:` or `post-ack:`.
+
+#### Scenario: Unhealthy baseline refuses
+- **WHEN** one of the three probe listeners is down before the write
+- **THEN** the write is refused, no ticket is opened and no PUT occurs (positive control: all three up ⇒ token issued and ticket opened)
+
+#### Scenario: FAC silent, im reverts from inside
+- **WHEN** the fake FAC pre-acks, the confirmed write runs, and two probe listeners are then stopped while the fake controller keeps answering
+- **THEN** within `NETDEV_HEALTH_TIMEOUT` the server PUTs the snapshot, the ticket is closed with `outbound: lost`, `result: reverted`, and the audit shows `token`, `execute`, `reverted` for that target (negative control: probes kept up ⇒ `result: applied`, no snapshot PUT)
+
+#### Scenario: Witness unmeasured does not block
+- **WHEN** the fake FAC never comments and the probes stay up
+- **THEN** the write proceeds and the release reads `fac_witness: unmeasured`, `result: applied`
+
+#### Scenario: Witness armed and lost reverts
+- **WHEN** the fake FAC pre-acks but never post-acks while the probes stay up
+- **THEN** the write is reverted and the release reads `fac_witness: lost`, `result: reverted`
+
+#### Scenario: A post-ack left before the change is applied is not a witness
+- **WHEN** the fake FAC pre-acks and leaves its `post-ack:` before the server's `netdev-mcp applying` comment, and none after it
+- **THEN** the result is `reverted` with `fac_witness: lost` (positive control: the same `post-ack:` left after that comment gives `applied`, `fac_witness: ok`)
+
+#### Scenario: No applying comment, no write
+- **WHEN** the `netdev-mcp applying` comment cannot be posted
+- **THEN** the result is `aborted` and the controller received no write (positive control: with the comment accepted the same write is sent)
+
+#### Scenario: Server's own comments never count as witness
+- **WHEN** the fake FAC never comments and the server writes its own comments on the ticket (release, `revert-failed`)
+- **THEN** none of those comments begins with `pre-ack:` or `post-ack:` and `fac_witness` stays `unmeasured` (positive control: a fixture comment beginning with `pre-ack:` from the same GitHub identity arms it)
+
+#### Scenario: Created object reverted by delete
+- **WHEN** a confirmed `set_port_forward` creates a new object and the health check then fails
+- **THEN** the server DELETEs only the `_id` the create response returned, which is the sole `_id` absent from the snapshot's list; the collection reads back equal to that list and the release reads `result: reverted` (negative control: health passing ⇒ no DELETE)
+
+#### Scenario: A second new object blocks the delete
+- **WHEN** a confirmed `set_port_forward` creates an object, another object then appears in the same collection on the fake controller (added by someone else), and the health check fails
+- **THEN** the fake controller recorded zero DELETE requests, the release reads `result: revert-failed`, and the response carries the inbox instruction naming both new `_id`s
+
+#### Scenario: A merged PUT's residue is judged, not ignored
+- **WHEN** `set_dhcp_reservation` gives `u-tv` a `fixed_ip` it did not have, health fails, and the fake controller merges PUTs as FAC1 did
+- **THEN** after the revert `fixed_ip` is still on the object with `use_fixedip` false, and the result is `reverted` naming it as left behind but switched off (negative controls: with no inert rule the same state is `revert-failed`; a port forward that gains `enabled` it lacked is `revert-failed`)
+
+#### Scenario: Snapshot GET failure aborts
+- **WHEN** the fake controller returns an error for the snapshot GET
+- **THEN** no PUT is sent, the ticket is closed with `result: aborted`, and the response names the GET error
+
+#### Scenario: Revert failure is reported, not swallowed
+- **WHEN** the fake controller stops answering after accepting the write
+- **THEN** the audit line is `revert-failed`, the ticket stays open with a `revert-failed` comment, and the response contains the inbox instruction with the snapshot digest
+
+### Requirement: A target on im's own LAN path is refused, named, and fails closed on missing data
+
+At each write the server SHALL compute from the session's reader data the networks containing `POD_IP`, the controller address and the API server endpoints; the switch port or AP the node is attached to; and every legacy firewall rule (groups expanded) and every zone-based policy (v2 `firewall-policies`: IP lists, network subnets, a zone's networks) whose expanded source/destination covers pod↔controller or pod↔API server by CIDR containment; a side it cannot expand covers. The policies SHALL be a required input: on a zone-based console the legacy rules are empty and the policies are the firewall (k8scc#67 finding 1). Zones are optional; unread, a side given only by its zone covers. A target in that set SHALL be refused naming the intersecting element before any ticket or token. If any of those inputs cannot be read, every write SHALL be refused with the reader error. `restart_device` SHALL refuse the gateway device (a device at a network's gateway address or the controller's, or whose type is `ugw`, `udm` or `uxg`, since legacy `stat/device` may report a gateway's WAN address). `power_cycle_port` SHALL refuse every port of that gateway device, since what its ports power is not read (k8scc#71). A switch the node is attached to SHALL be refused for every port while the controller does not say which port the node is on. A reservation SHALL be refused when its address is the node's, the controller's or an API server's. No tool SHALL exist for VLAN create/delete, gateway restart/firmware, WLAN passphrases or deletion, WAN settings, default firewall policies, site settings, or user/API-key management.
+
+#### Scenario: Own network refused
+- **WHEN** a write targets the network object containing `POD_IP`
+- **THEN** it is refused naming that network, with no ticket and no PUT (positive control: an unrelated network reaches the token phase)
+
+#### Scenario: Firewall group expansion
+- **WHEN** a firewall rule's destination group contains the controller address
+- **THEN** a write to that rule is refused (negative control: a group without it proceeds)
+
+#### Scenario: Zone policy on im's path refused
+- **WHEN** the legacy rules are empty and a policy's sides cover pod↔controller (Internal zone → Gateway zone, or LAN network → the controller's IP)
+- **THEN** class A refuses that policy as a target, naming it (no shipped write tool addresses a firewall object; this guards the next one) (negative control: an IoT→IoT policy and a node→IoT policy pass)
+
+#### Scenario: Gateway restart refused
+- **WHEN** `restart_device` names the gateway's MAC
+- **THEN** it is refused (positive control: an AP's MAC reaches the token phase)
+
+#### Scenario: Gateway port power-cycle refused
+- **WHEN** `power_cycle_port` names the gateway's MAC and any port
+- **THEN** it is refused before any ticket or token (positive control: a port on an AP reaches the token phase)
+
+#### Scenario: Missing reader data fails closed
+- **WHEN** `get_networks` cannot be read at write time
+- **THEN** every write tool refuses with the reader error
+
+#### Scenario: Forbidden verbs have no tool
+- **WHEN** the registered tool list is enumerated with all three inputs usable
+- **THEN** it contains exactly the ten reader tools and the write tools listed in the proposal, and none whose name or arguments address the forbidden objects
+
+### Requirement: Every write phase leaves one audit line on stdout
+
+For every write call the server SHALL write one JSON line to stdout with `ts`, `tool`, `target`, `phase` (`token`, `applying`, `execute`, `refused`, `reverted`, `revert-failed`, `aborted`, and `interrupted` at start-up), `stated_reason`, `reason` or `rc`, `user`, `snapshot_digest`, `diff_digest`, `health` (the list of health checks that passed; empty before any check ran), `outbound`, `fac_witness` and `ticket`, and SHALL write nothing else to stdout — the HTTP server's access log included.
+
+#### Scenario: Lines match phases
+- **WHEN** a write goes token → execute → reverted on the fake controller because two probes were lost
+- **THEN** stdout holds exactly four JSON lines for that target, `token`, `applying`, `execute`, `reverted`, with identical `stated_reason`, `snapshot_digest` equal to the sha256 of the snapshot file on the last three, `health` empty on the `token` and `applying` lines and listing `controller`, `apiserver`, `readback` but not `probes` on the `execute` and `reverted` lines
+
+#### Scenario: The applying line is on stdout before the change is sent
+- **WHEN** a confirmed write reaches the controller
+- **THEN** at the moment the controller receives the request, stdout already holds that write's `applying` line, with its ticket, `snapshot_digest` and `diff_digest` (k8scc#132: `execute` is written after health, and a sidecar killed in between left a change with no audit line)
+
+#### Scenario: The access log does not reach stdout
+- **WHEN** the server runs as its container does and receives HTTP requests
+- **THEN** stdout holds no line (the access lines are on stderr), while the same server run as a plain FastMCP app puts each request's access line on stdout (positive control; measured by hand 2026-10-26, not in the automated controls)
+
+### Requirement: DNS conditional forwards wait for the resolver and never cover im's own path
+
+`set_dns_forward(domain, target, reason, confirm)` and `clear_dns_forward(domain, reason, confirm)` (k8scc#109) SHALL write v2 `static-dns` rows with `record_type: NS`, `key` = domain, `value` = target, `port: 0`, creating with POST, changing with a PUT of the whole object, clearing with DELETE, under every gate of the other write tools. Before any ticket they SHALL refuse a domain that is not a domain name or has a single label, a key that already holds a record of another type, a target that is not an IP literal or is loopback, unspecified or multicast, an unchanged forward, and a target that does not answer an SOA query for the domain with NOERROR or NXDOMAIN. Class A SHALL refuse a domain that is, or is a parent of, a name on im's own path: the controller host, the ticket API host, every outside probe host, `KUBERNETES_SERVICE_HOST`, and each name in `NETDEV_DNS_PROTECT`. At execute the server SHALL wait `NETDEV_DNS_SETTLE` seconds before the first health round, and SHALL add a `dns` check against the gateway of the network carrying the node (no such network ⇒ refused, fail closed). It compares SOA fingerprints (rcode, MNAME, serial). For a set, the gateway SHALL answer as the target does. For a clear, it SHALL no longer answer with the old target's MNAME (the serial is not compared: a cached answer carries an older one). Not in effect by the end of the window is a failure. When the gateway's answer just before the apply already looked like the wanted state, the result SHALL say `dns_effect: unmeasured` and SHALL NOT list `dns` as passed.
+
+#### Scenario: A new forward in the measured shape
+- **WHEN** a confirmed `set_dns_forward` names a domain with no record
+- **THEN** the fake controller recorded one POST to v2 `static-dns` with exactly `{record_type: NS, key, value, port: 0, enabled: true}`, the target and the LAN gateway were each asked for the domain, and `health` lists `dns`
+
+#### Scenario: A changed forward is the whole object
+- **WHEN** a confirmed `set_dns_forward` names a domain that already forwards elsewhere
+- **THEN** the PUT body equals the read object with only `value` changed (negative control: the fake answers a partial PUT 400, as FAC1 did)
+
+#### Scenario: Written is not in effect
+- **WHEN** the controller takes the record and the gateway keeps answering the domain from public DNS
+- **THEN** the write is `reverted` with `dns: not in effect` (negative control: a target whose SOA equals the public one reads `dns_effect: unmeasured`, never `dns` passed)
+
+#### Scenario: Settle before health
+- **WHEN** the LAN gateway answers SERVFAIL until the settle has passed
+- **THEN** the write is `applied` (negative control: a gateway that stays SERVFAIL through the window is `reverted`, the created row DELETEd)
+
+#### Scenario: A dead target is refused before the ticket
+- **WHEN** the target is silent, REFUSED or SERVFAIL for the domain
+- **THEN** the call is refused and no ticket is opened (positive control: NXDOMAIN reaches the token)
+
+#### Scenario: A name on im's path is never under the forward
+- **WHEN** `NETDEV_DNS_PROTECT` holds `chamber.home.test` and the domain is `home.test`
+- **THEN** class A refuses it naming that host (negative controls: `other.test` reaches the token; `ome.test` and `chamber.home.test.evil` cover nothing)
+
+### Requirement: A write that waits does not stop the others being served, and writes run one at a time
+
+Every tool SHALL run off the server's event loop, so that while one session's write waits for its witness or its health rounds, another session's `initialize` and read tools are answered (k8scc#132; fleet-ops-1e measured a second session unanswered 15 s into a 133 s confirm on jg-jcc2, 2026-11-25). At most one write SHALL be in progress: a second write call, in either phase, SHALL be refused at once, naming the tool, target and phase of the one running, with an audit line and no ticket; it SHALL NOT queue.
+
+#### Scenario: A read is answered while a write is in its health loop
+- **WHEN** a confirmed write's health loop runs its whole window and a read tool is called 0.3 s into it
+- **THEN** the read returns before the write does (control: the write took the whole window)
+
+#### Scenario: A second session is served by the server as shipped
+- **WHEN** the server runs as its container does, one SSE session's write waits for a pre-ack that never comes, and a second SSE session initializes and reads 1 s later
+- **THEN** the second session's answer arrives before the first session's (control: the first waited the whole witness window)
+
+#### Scenario: A second write is refused at once
+- **WHEN** a write is called while another is in its health loop
+- **THEN** it is refused within half a second naming the running write, opens no ticket, and the same call gets its token once the first has returned
+
+### Requirement: Start-up reads the tickets a stopped sidecar left open
+
+With the write tools registered, the server SHALL read, once at start-up and before serving, the ticket repo's open issues whose title starts with this cluster's prefix. For one that carries the server's `applying` comment and no `release`, `revert-failed` or `interrupted` comment, it SHALL comment `netdev-mcp interrupted`, leave the ticket open, write one audit line with phase `interrupted`, and start that target's cooldown; it SHALL NOT send anything to the controller. For one that carries none of the server's comments it SHALL post the release `result: not-executed` and close it. Every other ticket SHALL be left as it is. Only a comment that starts with the server's mark counts. A listing that cannot be read SHALL be said in the start-up readings and stop nothing.
+
+#### Scenario: A killed write is found and left for a person
+- **WHEN** a sidecar stops after `applying` and the next one starts
+- **THEN** the ticket gets `netdev-mcp interrupted` and stays open, stdout gets one `interrupted` line carrying the ticket's tool, target and stated reason, the controller receives nothing, the target is refused for the cooldown, and a third start comments nothing more
+
+#### Scenario: A lost token's ticket is released
+- **WHEN** a sidecar stops after issuing a token and the next one starts
+- **THEN** the ticket is closed with `result: not-executed`, and the target is not in cooldown
+
+#### Scenario: Other tickets are untouched
+- **WHEN** the repo holds an open ticket of another cluster, one whose cluster name only begins with this one's, a closed ticket, a `revert-failed` ticket, and an issue a person opened
+- **THEN** none of them changes
+
+### Requirement: The last applied write of a target may be taken back once inside the cooldown
+
+The cooldown is per target, so a tool and its opposite share it. While a target's last write stands as `applied`, the tool that undoes it (`set_dhcp_reservation` ↔ `clear_dhcp_reservation`, `block_client` ↔ `unblock_client`, `set_dns_forward` ↔ `clear_dns_forward`) SHALL be accepted once inside the cooldown, as a full write with its own ticket, snapshot and health, counted against the hourly ceiling; after it both directions SHALL wait for the cooldown. A write that ended `reverted`, `revert-failed` or `aborted`, or was found `interrupted`, opens no such exception. The cooldown refusal SHALL name the exception while it is available.
+
+#### Scenario: A reservation taken back once
+- **WHEN** a reservation is set and applied, and 0 s later the same set, then the clear, then both again are called
+- **THEN** the set is refused naming `clear_dhcp_reservation, once`, the clear is applied under its own ticket, and both are refused afterwards without that sentence
+
+#### Scenario: A reverted write opens no exception
+- **WHEN** a clear ends `reverted` and the set for the same target is called inside the cooldown
+- **THEN** it is refused for the cooldown
+
+### Requirement: An unblock may address a client that left the client listing
+
+`unblock_client`, and no other tool, SHALL also accept a MAC that is absent from the cached client listing when a `users` read in this session returned that MAC with `blocked: true` (k8scc#137: on FAC1 a blocked wired client is not in `stat/sta`). The snapshot SHALL then be the users row, and the target SHALL remain `clients/<mac>`. A user not read, or read as not blocked, SHALL be refused, and the refusal SHALL name the reader to call. That reader, `get_dhcp_reservations`, SHALL list every users row with `blocked: true` beside the reservations, so the row an unblock addresses is one im was shown.
+
+#### Scenario: A block taken off after the client left the listing
+- **WHEN** the controller drops a blocked client from its client listing, a client is blocked, and after a `get_clients` and a `get_dhcp_reservations` the same MAC is unblocked inside the cooldown
+- **THEN** the unblock is applied, the controller received `block-sta` then `unblock-sta` for that MAC, and the snapshot holds the users row (control: before the users read, the unblock is refused naming `get_dhcp_reservations`)
+
+#### Scenario: Only a user read as blocked, and only for an unblock
+- **WHEN** the MAC is absent from the client listing and the users row was not read, or is not blocked, or the tool is `block_client`
+- **THEN** the call is refused and no ticket is opened
+
+### Requirement: A passing health round counts only after a minimum watch
+
+A health round in which every check passes SHALL end the check only when `NETDEV_HEALTH_MIN` seconds (default 30) have passed since the apply, or the health timeout has been reached; before that, passing rounds SHALL be repeated (k8scc#142: with no witness armed, a block was released `applied` one second after it was sent and bit two seconds later).
+
+#### Scenario: A change that bites after the first round
+- **WHEN** two probes stop answering 0.2 s after the controller accepted a block, with a minimum of 0.8 s
+- **THEN** the write ends `reverted` (control: with a minimum of 0 the same write ends `applied` and the probes are down afterwards)
+
+#### Scenario: A clean write waits the minimum and no longer
+- **WHEN** nothing fails and the minimum is 0.5 s under a timeout of 3 s
+- **THEN** the confirm returns `applied` after at least 0.5 s and well before the timeout
+
+### Requirement: The undo of an applied write may start from an unhealthy baseline, with its ticket
+
+The undo accepted inside the cooldown SHALL NOT be refused because outside probes do not answer at its token; every other write SHALL be. Its token SHALL carry the probes that were down, its health SHALL fail the probe check only when a probe outside that set is lost, and `outbound` SHALL report what was read. It SHALL still be refused when its ticket cannot be opened.
+
+#### Scenario: An undo is not refused for the outage it takes back
+- **WHEN** a block is applied, all three probes then stop answering, and the unblock is called
+- **THEN** it gets a token naming the baseline, is applied with `probes (no worse than at the baseline)` and `outbound: lost` (control: another write at that moment is refused `baseline unhealthy`)
+
+#### Scenario: An undo that loses another probe is reverted
+- **WHEN** one probe is down at the undo's token and a second stops at its apply
+- **THEN** the undo ends `reverted`, naming the probe lost since its baseline
+
+### Requirement: A token is bound to the change, not to the cached object
+
+The digest a token is bound to SHALL be taken over the tool, the target, the kind, the changed fields with the values they had, and the command, and SHALL NOT include any other field of the cached object; for a delete it SHALL include the whole object as read, stripped. A command's `will_change` SHALL show only the fields that identify its target.
+
+#### Scenario: A read between the phases keeps the token
+- **WHEN** a client row's counters, or a user's `last_seen`, change and the reader is called between a token and its confirm
+- **THEN** the confirm is applied (control: other arguments, or a changed field that moved on the controller, are refused)
+
+#### Scenario: A delete token does not outlive an edit of its object
+- **WHEN** a port forward, or a DNS forward, is edited on the controller and read again between a delete's token and its confirm
+- **THEN** the confirm is refused and nothing is sent to the controller (control: read again and unchanged, a fresh token deletes it)
+
