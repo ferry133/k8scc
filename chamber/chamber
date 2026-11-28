@@ -32,7 +32,10 @@ thread, no id), needed no answer, or were cancelled by a later request, as a
 real room showed (k8scc#102). Their number goes to stderr; a plain `read`
 shows them.
 
---reply-to puts the message into a thread under that event. A stock client
+--reply-to puts the message into a thread under that event; when that event is
+itself inside a thread, into that thread as a reply to it (a thread cannot be
+started from it), and when it carries another relation, a plain reply. A
+message that cannot be read is not replied to: nothing is sent. A stock client
 shows a thread in the room as "N replies" with the last message only, so a
 question a person has to see is sent without it (k8scc#91).
 
@@ -260,10 +263,37 @@ def answered_by(msgs, me):
             continue
         c = e.get("content") or {}
         rel = c.get("m.relates_to") or {}
-        for tgt in [rel.get("event_id"), (rel.get("m.in_reply_to") or {}).get("event_id")] + EVENT_ID.findall(c.get("body", "")):
+        irt = (rel.get("m.in_reply_to") or {}).get("event_id")
+        if rel.get("rel_type") == "m.thread" and irt and rel.get("is_falling_back") is False:
+            # a reply to one message inside a thread answers that message, not the root (k8scc#160)
+            linked = [irt]
+        else:
+            linked = [rel.get("event_id"), irt]
+        for tgt in linked + EVENT_ID.findall(c.get("body", "")):
             if tgt and tgt != e.get("event_id"):
                 out.setdefault(tgt, e["event_id"])
     return out
+
+
+def reply_relation(rid, target):
+    """The m.relates_to for a reply to `target` (k8scc#160). A thread cannot be
+    rooted at an event that has a relation of its own: Synapse answers 400
+    "Cannot start threads from an event with a relation", which is what every
+    reply to a message inside a thread got, directive-answer's included. So the
+    target is read first: in a thread => into that thread, replying to it; any
+    other relation => a plain reply, no thread; none => a thread under it."""
+    s, d = call("GET", "/_matrix/client/v3/rooms/%s/event/%s" % (q(rid), q(target)))
+    if s != 200:
+        fail("NOT SENT: the message to reply to could not be read (%s)" % (
+            "cannot reach the server" if s == 0 else "http=%s %s" % (s, d.get("errcode", ""))),
+            UNMEASURED if s == 0 else FAILED)
+    rel = (d.get("content") or {}).get("m.relates_to") or {}
+    if rel.get("rel_type") == "m.thread" and rel.get("event_id"):
+        return {"rel_type": "m.thread", "event_id": rel["event_id"], "is_falling_back": False,
+                "m.in_reply_to": {"event_id": target}}
+    if rel.get("rel_type") or rel.get("m.in_reply_to"):
+        return {"m.in_reply_to": {"event_id": target}}
+    return {"rel_type": "m.thread", "event_id": target}
 
 
 def show(e, answer=None):
@@ -413,7 +443,7 @@ def main():
         if ref:
             content["chamber.ref"] = ref
         if reply:
-            content["m.relates_to"] = {"rel_type": "m.thread", "event_id": reply}
+            content["m.relates_to"] = reply_relation(rid, reply)
         s, d = call("PUT", "/_matrix/client/v3/rooms/%s/send/m.room.message/%d" % (q(rid), time.time_ns()), content)
         if s != 200:
             fail("NOT SENT: %s" % ("cannot reach the server" if s == 0 else "http=%s %s %s" % (s, d.get("errcode", ""), d.get("error", ""))),

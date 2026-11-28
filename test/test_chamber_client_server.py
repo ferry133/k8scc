@@ -277,6 +277,31 @@ def main():
         shown = [ch(FO, "whoami"), ch(FO, "rooms"), ch(FO, "send", "fac", "--to", "all", "T15"), ch(FO, "read", "fac")]
         leak = any(srv.tokens[FO] in (o + e) for _, o, e in shown)
         check("15 credential never appears in output", "absent", leak, not leak)
+        # k8scc#160: a reply to a message that is itself inside a thread. The in-thread
+        # message is made with the API directly, in a stock client's shape (Element's
+        # "reply in thread": rel m.thread + a fallback m.in_reply_to), not by the client.
+        tok = srv.tokens[PERSON]
+        frid = next(r for r in srv.call("GET", "/_matrix/client/v3/joined_rooms", tok)[1]["joined_rooms"]
+                    if srv.call("GET", "/_matrix/client/v3/rooms/%s/state/m.room.name" % urllib.parse.quote(r, safe=""), tok)[1].get("name") == "fac")
+        qr = urllib.parse.quote(frid, safe="")
+        root = srv.call("PUT", f"/_matrix/client/v3/rooms/{qr}/send/m.room.message/r17", tok,
+                        {"msgtype": "m.text", "body": "T17 root", "m.mentions": {"user_ids": ["@fo:localhost"]}})[1]["event_id"]
+        inner = srv.call("PUT", f"/_matrix/client/v3/rooms/{qr}/send/m.room.message/i17", tok,
+                         {"msgtype": "m.text", "body": "T17 in the thread", "m.mentions": {"user_ids": ["@fo:localhost"]},
+                          "m.relates_to": {"rel_type": "m.thread", "event_id": root, "is_falling_back": True,
+                                           "m.in_reply_to": {"event_id": root}}})[1]["event_id"]
+        rc, out, err = ch(FO, "send", "fac", "--to", PERSON, "--reply-to", inner, "T17 answer")
+        sent = next((l.split()[1] for l in out.splitlines() if l.startswith("sent ")), None)
+        got = srv.call("GET", f"/_matrix/client/v3/rooms/{qr}/event/{urllib.parse.quote(sent, safe='')}", tok)[1] if sent else {}
+        relates = (got.get("content") or {}).get("m.relates_to") or {}
+        check("17 --reply-to a message inside a thread is sent into that thread", "rc0/3, root and in_reply_to",
+              (rc, relates.get("event_id") == root, (relates.get("m.in_reply_to") or {}).get("event_id") == inner, err.strip()[-80:]),
+              rc in (0, 3) and relates.get("rel_type") == "m.thread" and relates.get("event_id") == root
+              and (relates.get("m.in_reply_to") or {}).get("event_id") == inner)
+        rc, out, _ = ch(FO, "read", "fac", "20", "--everything")
+        hdr = lambda eid: next((l for l in out.splitlines() if " %s " % eid in l), "")
+        check("17b read marks the in-thread message answered, not the root", "inner marked, root not",
+              ("answered" in hdr(inner), "answered" in hdr(root)), "answered" in hdr(inner) and "answered" not in hdr(root))
         t0 = time.time()
         state = None
         while time.time() - t0 < 90:

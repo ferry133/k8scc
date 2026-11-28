@@ -113,6 +113,14 @@ class Room(http.server.BaseHTTPRequestHandler):
     chunk = []                 # what /messages answers, newest first (dir=b)
     name_fault = None          # None | 404 ("no name", as the server says it) | "bare404" | 500 | "hangup" | "noname200"
     presence = {"@t:fake": "online", "@person:fake": "offline", "@fac:fake": "online"}
+    events = {                 # what GET /event/<id> answers (k8scc#160)
+        "$plainxxxxxxxx": {"event_id": "$plainxxxxxxxx", "content": {"body": "a request"}},
+        "$inthreadxxxxx": {"event_id": "$inthreadxxxxx", "content": {"body": "reply in thread",
+                           "m.relates_to": {"rel_type": "m.thread", "event_id": "$rootxxxxxxxxx", "is_falling_back": True,
+                                            "m.in_reply_to": {"event_id": "$lastxxxxxxxxx"}}}},
+        "$editxxxxxxxxx": {"event_id": "$editxxxxxxxxx", "content": {"body": "* fixed",
+                           "m.relates_to": {"rel_type": "m.replace", "event_id": "$plainxxxxxxxx"}}},
+    }
 
     def reply(self, code, body):
         raw = json.dumps(body).encode()
@@ -149,6 +157,14 @@ class Room(http.server.BaseHTTPRequestHandler):
             return self.reply(200, {"presence": Room.presence[uid]}) if uid in Room.presence else self.reply(404, {})
         if path.endswith("/messages"):
             return self.reply(200, {"chunk": list(Room.chunk)})
+        if "/event/" in path:
+            eid = urllib.parse.unquote(path.rsplit("/", 1)[-1])
+            if eid in Room.events:
+                return self.reply(200, Room.events[eid])
+            if eid == "$hangupxxxxxxx":
+                self.close_connection = True
+                return
+            return self.reply(404, {"errcode": "M_NOT_FOUND", "error": "Event not found"})
         return self.reply(418, {})
 
     def do_PUT(self):
@@ -187,6 +203,21 @@ rc, o, e = client(ROOM_URL, "send", "room-a", "--to", "all", "report: done, noth
 check("S10 control: another first word to all ⇒ no hint", (True, False), (last() == {"room": True}, "names nobody" in e))
 rc, o, e = client(ROOM_URL, "send", "room-a", "--to", "all", "blockedness is a word")
 check("S11 control: the first word has to be blocked itself", False, "names nobody" in e)
+
+print("chamber send --reply-to: a target inside a thread (k8scc#160)")
+rel = lambda: Room.sent[-1].get("m.relates_to")
+rc, o, e = client(ROOM_URL, "send", "room-a", "--to", "fac", "--reply-to", "$plainxxxxxxxx", "ack")
+check("RT1 control: a target with no relation ⇒ a thread under it, as before", (0, {"rel_type": "m.thread", "event_id": "$plainxxxxxxxx"}), (rc, rel()))
+rc, o, e = client(ROOM_URL, "send", "room-a", "--to", "fac", "--reply-to", "$inthreadxxxxx", "ack")
+check("RT2 a target inside a thread ⇒ into that thread (its root), replying to the target, not a fallback",
+      (0, {"rel_type": "m.thread", "event_id": "$rootxxxxxxxxx", "is_falling_back": False, "m.in_reply_to": {"event_id": "$inthreadxxxxx"}}), (rc, rel()))
+rc, o, e = client(ROOM_URL, "send", "room-a", "--to", "fac", "--reply-to", "$editxxxxxxxxx", "ack")
+check("RT3 a target with another relation ⇒ a plain reply, no thread", (0, {"m.in_reply_to": {"event_id": "$editxxxxxxxxx"}}), (rc, rel()))
+n = len(Room.sent)
+rc, o, e = client(ROOM_URL, "send", "room-a", "--to", "fac", "--reply-to", "$nonexistentxx", "ack")
+check("RT4 a target the server does not have ⇒ 1, nothing sent", (1, 0, True), (rc, len(Room.sent) - n, "could not be read" in e))
+rc, o, e = client(ROOM_URL, "send", "room-a", "--to", "fac", "--reply-to", "$hangupxxxxxxx", "ack")
+check("RT5 the target cannot be fetched (connection dropped) ⇒ 2, nothing sent", (2, 0), (rc, len(Room.sent) - n))
 
 SG = os.path.join(T, "sg")
 os.mkdir(SG)
@@ -250,12 +281,15 @@ Room.name_fault = None
 check("R5 control: read again once the name answers", 0, client(ROOM_URL, "read", "room-a")[0])
 
 print("chamber read: what you have already answered (k8scc#101)")
-def m(eid, sender, to, body, ts, rel=None):
+def m(eid, sender, to, body, ts, rel=None, irt=None, fallback=None):
     c = {"msgtype": "m.text", "body": body, "m.mentions": {"room": True} if to == "all" else {"user_ids": [to]}}
     if rel:
         c["m.relates_to"] = {"rel_type": "m.thread", "event_id": rel}
+        if irt:
+            c["m.relates_to"].update({"is_falling_back": bool(fallback), "m.in_reply_to": {"event_id": irt}})
     return {"type": "m.room.message", "event_id": eid, "sender": sender, "origin_server_ts": 1763700000000 + ts, "content": c}
 R0, R1, R2, R3, R4 = "$req0zzzzzzzzz", "$req1aaaaaaaaa", "$req2bbbbbbbbb", "$req3ccccccccc", "$req4ddddddddd"
+R5, X5, R6, X6 = "$req5mmmmmmmmm", "$fol5nnnnnnnnn", "$req6ooooooooo", "$fol6ppppppppp"
 Room.chunk = list(reversed([
     m(R0, "@fac:fake", "@t:fake", "T0: answered the old way, no thread, no id", 500),
     m("$old0hhhhhhhhh", "@t:fake", "@fac:fake", "done", 600),
@@ -294,6 +328,19 @@ rc, o, e = client(ROOM_URL, "read", "room-a", "--unanswered", "--everything")
 ids = [l.split()[2] for l in o.splitlines() if l[:2] == "20"]
 check("A6 --unanswered --everything: my own messages are never listed (and the others are)", (0, False, False, True),
       (rc, "$ack1eeeeeeeee" in ids, "$ask2fffffffff" in ids, R4 in ids))
+Room.chunk = list(reversed([
+    m(R5, "@fac:fake", "@t:fake", "T5: a request that is a thread root", 8000),
+    m(X5, "@person:fake", "@t:fake", "T5x: a follow-up inside T5's thread", 8500, rel=R5),
+    m("$ans5kkkkkkkkk", "@t:fake", "@person:fake", "ack T5x", 9000, rel=R5, irt=X5),          # into the thread, replying to X5
+    m(R6, "@fac:fake", "@t:fake", "T6: another root", 9500),
+    m(X6, "@fac:fake", "@t:fake", "T6x: latest in T6's thread", 9600, rel=R6),
+    m("$ans6lllllllll", "@t:fake", "@fac:fake", "ack T6", 9700, rel=R6, irt=X6, fallback=True),  # a stock client's thread reply
+]))
+rc, o, e = client(ROOM_URL, "read", "room-a")
+check("A7 a reply into a thread that names its target marks the target, not the root (k8scc#160)", (0, True, False),
+      (rc, line(X5).endswith("(answered by you: $ans5kkkkkkkkk)"), "answered" in line(R5)))
+check("A8 control: a stock client's thread reply (fallback in-reply-to) still marks the root, as before", True,
+      line(R6).endswith("(answered by you: $ans6lllllllll)"))
 Room.chunk = []
 room.shutdown()
 
